@@ -14,51 +14,37 @@ Developed by [Zühlke](https://www.zuehlke.com/en/industries/industrial-sector).
 | .NET Framework | 4.8 |
 | Build toolchain | .NET SDK (for building from source) |
 | Platform | Windows x86 / x64 |
+| Any AI of your choice | E.g. a paid version of Claude with access to Claude Code in the Desktop App |
+
+
 
 ---
 
-## Build
+## Integration into Claude Desktop - Getting Started with the TestStand MCP Server
 
-```bat
-dotnet build --configuration Debug --framework net48 -p:Platform=x86
-```
+This MCP Server can be used with any AI tool that supports MCPs. The instructions below describe the Claude Desktop case on Windows:
 
-The output executable is placed at:
+1. Download the latest binary from the [releases section](https://github.com/Zuehlke/teststand-mcp/tags) (or build the project, see below)
 
-```
-bin\x86\Debug\net48\TestStandMCP.exe
-```
-
-To rebuild after code changes, kill any running instance first:
-
-```bat
-taskkill /F /IM TestStandMCP.exe
-dotnet build --configuration Debug --framework net48 -p:Platform=x86
-```
-
----
-
-## Integration into Claude Desktop
-
-1. Open (or create) the Claude Desktop configuration file:
+2. Open (or create) the Claude Desktop configuration file:
 
    ```
    %APPDATA%\Claude\claude_desktop_config.json
    ```
 
-2. Add the `teststand` entry under `mcpServers`:
+3. Add the `teststand` entry under `mcpServers`:
 
    ```json
    {
      "mcpServers": {
        "teststand": {
-         "command": "C:\\your_path\\TestStandMCP\\bin\\x86\\Debug\\net48\\TestStandMCP.exe"
+         "command": "C:\\your_download_path\\TestStandMCP.exe"
        }
      }
    }
    ```
 
-   Adjust the path to match your actual build output location.
+   Adjust the path to match your actual download or build output location.
 
 3. Restart Claude Desktop. The TestStand tools will appear automatically.
 
@@ -142,6 +128,26 @@ TestStandMCP.exe --list-tools  # Print all registered tool names and description
 ## License
 
 See `LICENSE` file in this repository.
+---
+
+## Build
+
+```bat
+dotnet build --configuration Debug --framework net48 -p:Platform=x86
+```
+
+The output executable is placed at:
+
+```
+bin\x86\Debug\net48\TestStandMCP.exe
+```
+
+To rebuild after code changes, kill any running instance first:
+
+```bat
+taskkill /F /IM TestStandMCP.exe
+dotnet build --configuration Debug --framework net48 -p:Platform=x86
+```
 
 ---
 
