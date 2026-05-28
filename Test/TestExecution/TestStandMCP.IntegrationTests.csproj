@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <PlatformTarget>x86</PlatformTarget>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>TestStandMCP.IntegrationTests</RootNamespace>
+    <AssemblyName>TestStandMCP.IntegrationTests</AssemblyName>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <!-- Source files from main project compiled directly (main project OutputType=Exe has no DLL) -->
+    <EnableDefaultCompileItems>true</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <!-- ── Source files shared from main project ─────────────────────────── -->
+  <ItemGroup>
+    <Compile Include="..\..\src\Models\TestStandModels.cs"   Link="Shared\TestStandModels.cs" />
+    <Compile Include="..\..\src\Models\McpModels.cs"         Link="Shared\McpModels.cs" />
+    <Compile Include="..\..\src\Services\TestStandService.cs" Link="Shared\TestStandService.cs" />
+  </ItemGroup>
+
+  <!-- ── NuGet packages ────────────────────────────────────────────────── -->
+  <ItemGroup>
+    <PackageReference Include="NUnit"                                       Version="3.14.0" />
+    <PackageReference Include="NUnit3TestAdapter"                           Version="4.5.0" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk"                     Version="17.8.0" />
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.CSharp"                           Version="4.7.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging"               Version="8.0.1" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Console"       Version="8.0.1" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions"  Version="8.0.2" />
+  </ItemGroup>
+
+  <!-- ── TestStand COM reference ────────────────────────────────────────── -->
+  <ItemGroup>
+    <Reference Include="Microsoft.CSharp" />
+    <Reference Include="NationalInstruments.TestStand.Interop.API">
+      <HintPath>C:\Program Files (x86)\National Instruments\TestStand 2026\API\DotNET\Assemblies\CurrentVersion\NationalInstruments.TestStand.Interop.API.dll</HintPath>
+      <EmbedInteropTypes>false</EmbedInteropTypes>
+    </Reference>
+  </ItemGroup>
+
+</Project>

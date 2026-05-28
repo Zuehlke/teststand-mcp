@@ -55,3 +55,12 @@ CodeCoverage/
 *.VisualState.xml
 TestResult.xml
 nunit-*.xml
+
+# VS
+.vs
+
+# AI
+.claude
+
+# Demo code
+.Demo*
