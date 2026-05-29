@@ -75,6 +75,21 @@ meaning from the flowchart, continue to the next step.
 
 **If "Link details" — always two stages: File first, then Subsequence.**
 
+> ⚠ **Hard rule — the user must always be able to pick the file explicitly.**
+> Suggestions based on step-name heuristics (e.g. "Wasser einschalten" →
+> `DriverSeqDemo.seq` / `Open`) are **allowed** as convenience defaults,
+> but they MUST NOT replace the file-selection step. Every detail step
+> presents an `AskUserQuestion` whose options include:
+>   1. The heuristic suggestion (if any), clearly labelled as a suggestion,
+>   2. The discovered `.seq` files (loaded → workspace → globbed),
+>   3. **"Pick file & subsequence explicitly"** — forces the full
+>      two-stage flow (file picker → subsequence picker), even when a
+>      suggestion is shown,
+>   4. **"Ignore"** — insert as plain Statement placeholder.
+> The explicit-pick option is mandatory on EVERY detail step. Never
+> batch all decisions into a single "looks good?" preview that hides
+> the file choice.
+
 a) **Pick SequenceFile first.**
 
    File ordering rule (recomputed before every detail step):
@@ -115,12 +130,9 @@ c) **Pick the subsequence — paginated clicks + full list visible.**
       > "Which subsequence in `<file>`? (Page N/M)
       >
       > Available:
-      >   • Close
-      >   • MainSequence
-      >   • Measure_Hz
-      >   • Measure_I
-      >   • Measure_V
-      >   • Open"
+      >   • A
+      >   • B
+      >   • C
 
    3. **Options** follow a paginated 3-click pattern (max 4 options per
       `AskUserQuestion` call). Option labels below are English
@@ -179,6 +191,12 @@ d) Insert the step as a `SequenceCall` (or keep the intended step type if
 
 - **Never guess** which subsequence is meant — always ask the user, unless
   it has been explicitly specified.
+- **Suggestions are fine, silent auto-picks are not.** You may offer a
+  heuristic file+subsequence suggestion as a convenience option, but every
+  detail step MUST also offer **"Pick file & subsequence explicitly"** so
+  the user can override the suggestion and walk through file picker →
+  subsequence picker. Do not bake a file into your initial plan or batch
+  all decisions into one "looks good?" preview that hides the file choice.
 - **Never generate `Goto`/`Label`** when an `NI_Flow_*` construct fits.
 - For long sequences: ask the detail questions in batches of at most
   ~5–8 steps so the user does not have to click through 30 dialogs. Flow
