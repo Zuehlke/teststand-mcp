@@ -1,5 +1,23 @@
 # TestStandMCP — Behavior Rules for Claude
 
+## CRITICAL: How to build sequences from a flowchart/description
+
+The `teststand-sequence-builder` workflow is **interactive** — it asks the user
+per step whether to link a `SequenceCall` (target file + subsequence) or insert a
+plain placeholder. That per-step question uses `AskUserQuestion`.
+
+**`AskUserQuestion` is NOT available to spawned subagents** (it depends on the
+main-conversation UI). Therefore:
+
+- **NEVER** delegate sequence-building to the `teststand-sequence-builder` via the
+  Agent/Task tool. If spawned as a subagent, every linking question fails silently
+  and all steps degrade to Statement placeholders — exactly the failure to avoid.
+- **ALWAYS run the builder workflow in the MAIN conversation thread.** When the
+  user asks to "build a sequence from a flowchart" (or "use the Seq agent"), open
+  `.claude/agents/teststand-sequence-builder.md`, read its workflow, and execute
+  those steps yourself in the main thread — so the per-step `AskUserQuestion`
+  linking prompts actually reach the user.
+
 ## Sequence Design Rules
 
 ### Flow Control: If/Else always with NI_Flow_* Step Types
