@@ -3113,8 +3113,24 @@ public class TestStandService : ITestStandService
             var sf    = GetOrLoadSeqFile(filePath);
             var seq   = sf.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
-            var step  = seq.GetStepByName(stepName, (object)sgVal);
-            seq.DeleteStep(step, (object)sgVal);
+            // NOTE: Sequence.DeleteStep/RemoveStep expect a numeric step index, NOT a Step
+            // object (passing the object raises "Could not convert argument 1 ...").
+            // Resolve the index by name within the step group, then delete by index.
+            int numSteps = (int)seq.GetNumSteps((object)sgVal);
+            int idx = -1;
+            for (int i = 0; i < numSteps; i++)
+            {
+                var s = seq.GetStep(i, (object)sgVal);
+                if (string.Equals((string)s.Name, stepName, StringComparison.Ordinal))
+                {
+                    idx = i;
+                    break;
+                }
+            }
+            if (idx < 0)
+                throw new InvalidOperationException(
+                    $"Step '{stepName}' not found in sequence '{sequenceName}' [{stepGroup}].");
+            seq.DeleteStep(idx, (object)sgVal);
             sf.Save(filePath);
         });
     }

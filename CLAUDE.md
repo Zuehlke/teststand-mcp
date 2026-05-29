@@ -53,6 +53,21 @@ Label  →  Only as a target for the mentioned Goto exceptions
 - `Goto/Label` produce spaghetti code, are hard to follow, and
   error-prone during sequence modifications
 
+### Default Step Type When Unclear
+
+**When it is not clear which step type a step should be, default to
+`SequenceCall`** (instead of `Statement`).
+
+- Applies to every "action"/placeholder step whose concrete type is not
+  otherwise determined by a rule (e.g. not a flow step, not a Wait, not a
+  Check — see the semantic auto-mapping rules).
+- The `SequenceCall` may be left **unresolved** (no target) when the target
+  subsequence is not yet known — the user links it later.
+- The deterministic rules still take precedence: `NI_Flow_*` for branching/
+  loops, `NI_Wait` for waits/delays, result-template/`PassFailTest` for
+  checks. `SequenceCall` is only the fallback for the otherwise-ambiguous
+  "plain action" case where `Statement` was previously used.
+
 ### Correct Structure for an If/Else Block:
 
 ```
