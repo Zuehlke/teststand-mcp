@@ -1498,7 +1498,32 @@ public class TestStandService : ITestStandService
             seqCallModule.SequenceName   = targetSequenceName;
             seqCallModule.UseCurrentFile = string.IsNullOrEmpty(targetSequenceFile);
             if (!string.IsNullOrEmpty(targetSequenceFile))
-                seqCallModule.SequenceFilePath = targetSequenceFile;
+            {
+                // Always store the SequenceCall target as a *relative* path
+                // (relative to the source sequence file's directory). Users
+                // explicitly do not want absolute paths persisted in the
+                // sequence file.
+                string relTarget = MakeRelativePath(
+                    Path.GetDirectoryName(filePath) ?? "",
+                    targetSequenceFile);
+
+                seqCallModule.SequenceFilePath = relTarget;
+
+                // Defensive: clear the "use absolute path" flag if the COM
+                // object exposes it. Older / different engine builds expose
+                // it under varying names — try the common ones and ignore
+                // the rest.
+                foreach (var propName in new[] {
+                    "UseAbsolutePath", "AbsolutePath", "IsAbsolutePath" })
+                {
+                    try { ((object)seqCallModule).GetType().InvokeMember(
+                        propName,
+                        System.Reflection.BindingFlags.SetProperty,
+                        null, seqCallModule, new object[] { false });
+                    }
+                    catch { /* property not present on this build */ }
+                }
+            }
 
             sf.Save(filePath);
             _loadedSequenceFiles[filePath] = sf;
@@ -3000,9 +3025,51 @@ public class TestStandService : ITestStandService
         EnsureConnected();
         await Task.Run(() =>
         {
-            var sf  = GetOrLoadSeqFile(filePath);
-            var seq = sf.GetSequenceByName(sequenceName);
-            sf.DeleteSequence(seq);
+            var sf = GetOrLoadSeqFile(filePath);
+
+            // Locate the sequence by index: TestStand's SequenceFile.RemoveSequence
+            // expects an integer index (DISP_E_TYPEMISMATCH was returned when
+            // passing the name string or a Sequence object).
+            int numSeqs = Convert.ToInt32((object)sf.NumSequences);
+            int idx = -1;
+            for (int i = 0; i < numSeqs; i++)
+            {
+                dynamic s = sf.GetSequence(i);
+                string sn = (string)s.Name;
+                if (string.Equals(sn, sequenceName, StringComparison.Ordinal))
+                { idx = i; break; }
+            }
+            if (idx < 0)
+                throw new KeyNotFoundException(
+                    $"Sequence '{sequenceName}' not found in {filePath}.");
+
+            // Dispatch via reflection so the COM type-library overload that
+            // accepts an integer index gets resolved correctly.
+            object sfObj = (object)sf;
+            var sfType   = sfObj.GetType();
+            Exception? lastEx = null;
+            bool removed = false;
+            foreach (var arg in new object[] { idx, (long)idx, (short)idx })
+            {
+                try
+                {
+                    sfType.InvokeMember(
+                        "RemoveSequence",
+                        System.Reflection.BindingFlags.InvokeMethod,
+                        null, sfObj, new[] { arg });
+                    removed = true;
+                    break;
+                }
+                catch (System.Reflection.TargetInvocationException tex)
+                { lastEx = tex.InnerException ?? tex; }
+                catch (Exception ex) { lastEx = ex; }
+            }
+            if (!removed)
+                throw new InvalidOperationException(
+                    $"RemoveSequence failed for '{sequenceName}' (idx={idx}). " +
+                    $"Last error: {lastEx?.GetType().Name}: {lastEx?.Message}",
+                    lastEx);
+
             sf.Save(filePath);
         });
     }
@@ -3823,6 +3890,43 @@ public class TestStandService : ITestStandService
         return _loadedSequenceFiles.TryGetValue(filePath, out var cached)
             ? cached
             : _engine!.GetSequenceFileEx(filePath, 0, 4);
+    }
+
+    /// <summary>
+    /// Returns <paramref name="targetPath"/> rewritten as a path relative to
+    /// <paramref name="fromDirectory"/>. Falls back to <paramref name="targetPath"/>
+    /// unchanged if the paths cannot be relativized (e.g. different drives) or
+    /// if <paramref name="targetPath"/> is already relative.
+    /// </summary>
+    private static string MakeRelativePath(string fromDirectory, string targetPath)
+    {
+        if (string.IsNullOrEmpty(targetPath))    return targetPath;
+        if (!Path.IsPathRooted(targetPath))      return targetPath;        // already relative
+        if (string.IsNullOrEmpty(fromDirectory)) return targetPath;
+
+        try
+        {
+            string fromFull = Path.GetFullPath(
+                fromDirectory.EndsWith(Path.DirectorySeparatorChar.ToString())
+                    ? fromDirectory
+                    : fromDirectory + Path.DirectorySeparatorChar);
+            string toFull   = Path.GetFullPath(targetPath);
+
+            var fromUri = new Uri(fromFull);
+            var toUri   = new Uri(toFull);
+
+            // Different schemes (e.g. file vs. UNC) — give up and keep absolute.
+            if (fromUri.Scheme != toUri.Scheme) return targetPath;
+
+            string rel = Uri.UnescapeDataString(
+                            fromUri.MakeRelativeUri(toUri).ToString())
+                         .Replace('/', Path.DirectorySeparatorChar);
+            return string.IsNullOrEmpty(rel) ? targetPath : rel;
+        }
+        catch
+        {
+            return targetPath;
+        }
     }
 
     private static int ParseStepGroup(string stepGroup) => stepGroup.ToLowerInvariant() switch

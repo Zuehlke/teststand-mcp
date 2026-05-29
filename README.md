@@ -125,6 +125,15 @@ TestStandMCP.exe --list-tools  # Print all registered tool names and description
 
 ---
 
+## Release Notes
+
+### V0.0.2
+- Added `teststand-sequence-builder` subagent for guided sequence creation from flowcharts or test descriptions.
+- `set_sequence_call_target` now stores the target as a path relative to the source sequence file (no more absolute paths persisted).
+- Fixed `delete_sequence`: resolved the COM `DISP_E_TYPEMISMATCH` error by dispatching `RemoveSequence` with an integer index.
+
+---
+
 ## License
 
 See `LICENSE` file in this repository.
