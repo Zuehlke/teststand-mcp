@@ -51,6 +51,35 @@ public class SchemaObject
         return this;
     }
 
+    /// <summary>
+    /// Adds an array property whose items are objects described by <paramref name="itemConfigure"/>.
+    /// The item object's required-field list is emitted on the item schema.
+    /// </summary>
+    public SchemaObject AddArray(string name, string description,
+        Action<SchemaObject> itemConfigure, bool required = true)
+    {
+        Properties ??= new();
+        var item = new SchemaObject { Type = "object" };
+        itemConfigure(item);
+        Properties[name] = new SchemaProperty
+        {
+            Type        = "array",
+            Description = description,
+            Items       = new SchemaProperty
+            {
+                Type       = "object",
+                Properties = item.Properties,
+                Required   = item.Required
+            }
+        };
+        if (required)
+        {
+            Required ??= new();
+            Required.Add(name);
+        }
+        return this;
+    }
+
     public SchemaObject AddObjectProperty(string name, string description,
         Action<SchemaObject> configure)
     {
@@ -74,5 +103,6 @@ public class SchemaProperty
     public object? Default { get; set; }
     public string[]? Enum { get; set; }
     public Dictionary<string, SchemaProperty>? Properties { get; set; }
+    public List<string>? Required { get; set; }
     public SchemaProperty? Items { get; set; }
 }
