@@ -39,6 +39,39 @@ public class StepResult
     public double ElapsedSeconds { get; set; }
 }
 
+// ── Bulk Insert Models ───────────────────────────────────────────────────────
+
+/// <summary>
+/// One step to insert via insert_steps_bulk. Steps are appended in list order.
+/// Optional fields let a single bulk call also set comment, expression and the
+/// SequenceCall target — collapsing what used to be ~4 separate tool calls per step.
+/// </summary>
+public class BulkStepSpec
+{
+    public string Name { get; set; } = "";
+    public string StepType { get; set; } = "";
+    public string? Adapter { get; set; }
+    public string? Comment { get; set; }
+    public string? Expression { get; set; }
+    public string? ExpressionType { get; set; }
+    /// <summary>Target sequence for a SequenceCall step (optional).</summary>
+    public string? TargetSequenceName { get; set; }
+    /// <summary>Target sequence file (empty/omitted = same/current file).</summary>
+    public string? TargetSequenceFile { get; set; }
+}
+
+public class BulkInsertResult
+{
+    public string SequenceName { get; set; } = "";
+    public string StepGroup { get; set; } = "";
+    public int InsertedCount { get; set; }
+    public int CommentsSet { get; set; }
+    public int ExpressionsSet { get; set; }
+    public int TargetsSet { get; set; }
+    public List<string> InsertedSteps { get; set; } = new();
+    public List<string> Warnings { get; set; } = new();
+}
+
 // ── Sequence File Models ─────────────────────────────────────────────────────
 
 public class SequenceFileInfo
@@ -50,6 +83,20 @@ public class SequenceFileInfo
     public List<VariableInfo> StationGlobals { get; set; } = new();
     public string? Description { get; set; }
     public string? Version { get; set; }
+}
+
+/// <summary>
+/// Lightweight overview of a loaded sequence file: paths, sequence names and
+/// count only — no steps, locals or globals. Used by get_loaded_sequence_files
+/// in its default "summary" mode to avoid huge payloads. Detail is retrieved
+/// on demand via get_sequence / get_steps.
+/// </summary>
+public class SequenceFileSummary
+{
+    public string FilePath { get; set; } = "";
+    public string FileName { get; set; } = "";
+    public int SequenceCount { get; set; }
+    public List<string> Sequences { get; set; } = new();
 }
 
 public class SequenceInfo

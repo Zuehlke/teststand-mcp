@@ -78,8 +78,13 @@ public class TestStandToolRegistry
             CloseSequenceFileAsync);
 
         Register("get_loaded_sequence_files",
-            "List all sequence files currently loaded in the TestStand engine.",
-            s => { },
+            "List all sequence files currently loaded in the TestStand engine. " +
+            "Default 'summary' returns only file paths and sequence names/counts " +
+            "(lightweight). Use detail='full' for the complete structure incl. steps, " +
+            "locals and globals (large) — prefer get_sequence/get_steps for details.",
+            s => s.AddOptional("detail", "string",
+                "Level of detail: 'summary' (default, names + counts only) or 'full' " +
+                "(complete recursive structure)."),
             GetLoadedSequenceFilesAsync);
 
         Register("get_sequence",
@@ -125,6 +130,41 @@ public class TestStandToolRegistry
                 .AddOptional("index", "integer", "Insert position (default: append at end)", -1)
                 .AddOptional("adapter", "string", "Adapter name: 'LabVIEW', 'CVI', 'DotNet', 'Python', 'None' (default)"),
             InsertStepAsync);
+
+        Register("insert_steps_bulk",
+            "Insert MANY steps into ONE sequence in a single call — far more efficient than " +
+            "calling insert_step repeatedly (the file is saved only ONCE for the whole batch). " +
+            "Steps are appended in array order, so list them top-to-bottom as they should appear. " +
+            "Each step may optionally carry its own comment, expression and SequenceCall target, " +
+            "collapsing what used to be ~4 calls per step into one. Use this to build a whole " +
+            "sequence (or a complete If/Else/loop block) at once. Same step-type and adapter rules " +
+            "as insert_step: use 'NI_Flow_If'/'NI_Flow_Else'/'NI_Flow_End' for branching, never Goto/Label.",
+            s => s
+                .AddRequired("sequence_file_path", "string", "Path to the sequence file")
+                .AddRequired("sequence_name", "string", "Name of the sequence to build")
+                .AddRequired("step_group", "string", "Step group: 'Setup', 'Main', or 'Cleanup'")
+                .AddArray("steps",
+                    "Ordered list of steps to append. Each item: {step_name, step_type} required; " +
+                    "optional adapter, comment, expression, expression_type, " +
+                    "target_sequence_name, target_sequence_file.",
+                    item => item
+                        .AddRequired("step_name", "string", "Name for the step")
+                        .AddRequired("step_type", "string",
+                            "Step type, e.g. 'SequenceCall', 'NI_Flow_If', 'NI_Flow_End', 'NI_Wait', 'Statement'.")
+                        .AddOptional("adapter", "string",
+                            "Adapter: 'LabVIEW', 'CVI', 'DotNet', 'Python', 'None' (default)")
+                        .AddOptional("comment", "string", "Step comment/description (kept short)")
+                        .AddOptional("expression", "string",
+                            "Step expression (e.g. an NI_Flow_If condition)")
+                        .AddOptional("expression_type", "string",
+                            "Expression type: 'Statement' (default), 'Pre', 'Post', 'Status'")
+                        .AddOptional("target_sequence_name", "string",
+                            "For SequenceCall steps: name of the sequence to call")
+                        .AddOptional("target_sequence_file", "string",
+                            "Target sequence file (empty/omitted = same/current file)"))
+                .AddOptional("save", "boolean",
+                    "Save the file after the batch (default true). Set false to chain several bulk calls.", true),
+            InsertStepsBulkAsync);
 
         Register("insert_local_variable",
             "Insert a new local variable into a sequence.",
@@ -1450,10 +1490,20 @@ public class TestStandToolRegistry
         return Ok($"Sequence file closed: {path}");
     }
 
-    private async Task<CallToolResult> GetLoadedSequenceFilesAsync(JsonElement? _)
+    private async Task<CallToolResult> GetLoadedSequenceFilesAsync(JsonElement? args)
     {
-        var files = await _ts.GetLoadedSequenceFilesAsync();
-        return OkJson(files);
+        var detail = args.HasValue
+            ? args.Value.GetStringOrDefault("detail", "summary")
+            : "summary";
+
+        if (detail.Equals("full", StringComparison.OrdinalIgnoreCase))
+        {
+            var files = await _ts.GetLoadedSequenceFilesAsync();
+            return OkJson(files);
+        }
+
+        var summary = await _ts.GetLoadedSequenceFilesSummaryAsync();
+        return OkJson(summary);
     }
 
     private async Task<CallToolResult> GetSequenceAsync(JsonElement? args)
@@ -1499,6 +1549,40 @@ public class TestStandToolRegistry
         return Ok($"Step '{stepName}' ({stepType}) inserted into sequence '{sequenceName}' [{stepGroup}]");
     }
 
+    private async Task<CallToolResult> InsertStepsBulkAsync(JsonElement? args)
+    {
+        var filePath     = args!.Value.GetRequiredString("sequence_file_path");
+        var sequenceName = args!.Value.GetRequiredString("sequence_name");
+        var stepGroup    = args!.Value.GetRequiredString("step_group");
+        var save         = args!.Value.GetBoolOrDefault("save", true);
+
+        if (!args!.Value.TryGetProperty("steps", out var stepsEl) ||
+            stepsEl.ValueKind != JsonValueKind.Array)
+            return Error("Argument 'steps' must be a non-empty array of step objects.");
+
+        var specs = new List<BulkStepSpec>();
+        foreach (var el in stepsEl.EnumerateArray())
+        {
+            specs.Add(new BulkStepSpec
+            {
+                Name               = el.GetStringOrDefault("step_name", ""),
+                StepType           = el.GetStringOrDefault("step_type", ""),
+                Adapter            = el.GetStringOrNull("adapter"),
+                Comment            = el.GetStringOrNull("comment"),
+                Expression         = el.GetStringOrNull("expression"),
+                ExpressionType     = el.GetStringOrNull("expression_type"),
+                TargetSequenceName = el.GetStringOrNull("target_sequence_name"),
+                TargetSequenceFile = el.GetStringOrNull("target_sequence_file")
+            });
+        }
+
+        if (specs.Count == 0)
+            return Error("Argument 'steps' must contain at least one step object.");
+
+        var result = await _ts.InsertStepsBulkAsync(filePath, sequenceName, stepGroup, specs, save);
+        return OkJson(result);
+    }
+
     private async Task<CallToolResult> InsertLocalVariableAsync(JsonElement? args)
     {
         var filePath      = args!.Value.GetRequiredString("file_path");
@@ -1525,8 +1609,7 @@ public class TestStandToolRegistry
         var filePath     = args!.Value.GetRequiredString("file_path");
         var sequenceName = args!.Value.GetRequiredString("sequence_name");
         var vars = await _ts.GetLocalVariablesAsync(filePath, sequenceName);
-        return Ok(System.Text.Json.JsonSerializer.Serialize(vars,
-            new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+        return OkJson(vars);
     }
 
     private async Task<CallToolResult> SetLocalVariableAsync(JsonElement? args)
@@ -2957,7 +3040,7 @@ public class TestStandToolRegistry
                 Type = "text",
                 Text = JsonSerializer.Serialize(obj, new JsonSerializerOptions
                 {
-                    WriteIndented   = true,
+                    WriteIndented   = false,
                     PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
                     DefaultIgnoreCondition =
                         System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull

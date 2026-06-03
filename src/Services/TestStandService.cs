@@ -28,12 +28,15 @@ public interface ITestStandService : IDisposable
     Task<SequenceFileInfo> OpenSequenceFileAsync(string filePath);
     Task CloseSequenceFileAsync(string filePath);
     Task<List<SequenceFileInfo>> GetLoadedSequenceFilesAsync();
+    Task<List<SequenceFileSummary>> GetLoadedSequenceFilesSummaryAsync();
     Task<SequenceInfo> GetSequenceAsync(string filePath, string sequenceName);
     Task SaveSequenceFileAsync(string filePath);
     Task<string> CreateSequenceFileAsync(string filePath);
     Task InsertSequenceAsync(string filePath, string sequenceName);
     Task InsertStepAsync(string filePath, string sequenceName, string stepGroup,
         string stepType, string stepName, int index = -1, string? adapterName = null);
+    Task<BulkInsertResult> InsertStepsBulkAsync(string filePath, string sequenceName,
+        string stepGroup, List<BulkStepSpec> steps, bool save = true);
     Task InsertLocalVariableAsync(string filePath, string sequenceName,
         string variableName, string dataType, string? defaultValue = null);
     Task SetLocalVariableCommentAsync(string filePath, string sequenceName,
@@ -498,6 +501,58 @@ public class TestStandService : ITestStandService
         });
     }
 
+    public async Task<List<SequenceFileSummary>> GetLoadedSequenceFilesSummaryAsync()
+    {
+        EnsureConnected();
+        return await Task.Run(() =>
+        {
+            var result = new List<SequenceFileSummary>();
+            foreach (var kvp in _loadedSequenceFiles)
+            {
+                var summary = new SequenceFileSummary
+                {
+                    FilePath = kvp.Key,
+                    FileName = Path.GetFileName(kvp.Key)
+                };
+                try
+                {
+                    dynamic sf = kvp.Value;
+                    int numSeqs = 0;
+                    try { numSeqs = Convert.ToInt32((object)sf.NumSequences); }
+                    catch
+                    {
+                        // Probe fallback (cap kept low — only counting names).
+                        for (int probe = 0; probe < 1000; probe++)
+                        {
+                            try { object _ = sf.GetSequence(probe); numSeqs = probe + 1; }
+                            catch { break; }
+                        }
+                    }
+
+                    for (int i = 0; i < numSeqs; i++)
+                    {
+                        try
+                        {
+                            dynamic seq = sf.GetSequence(i);
+                            string name;
+                            try { name = (string)seq.Name; }
+                            catch { name = "Unknown"; }
+                            summary.Sequences.Add(name);
+                        }
+                        catch { }
+                    }
+                    summary.SequenceCount = summary.Sequences.Count;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to summarize sequence file {Path}", kvp.Key);
+                }
+                result.Add(summary);
+            }
+            return result;
+        });
+    }
+
     public async Task<SequenceInfo> GetSequenceAsync(string filePath, string sequenceName)
     {
         EnsureConnected();
@@ -564,65 +619,9 @@ public class TestStandService : ITestStandService
                 : _engine!.GetSequenceFileEx(filePath, 0, 4);
 
             var seq  = sf.GetSequenceByName(sequenceName);
+            int sgValue = ParseStepGroup(stepGroup);
 
-            // StepGroup_Setup=0, StepGroup_Main=1, StepGroup_Cleanup=2
-            int sgValue = stepGroup.ToLowerInvariant() switch
-            {
-                "setup"   => 0,
-                "main"    => 1,
-                "cleanup" => 2,
-                _         => 1
-            };
-
-            // Map adapter display names to internal key names
-            string ResolveAdapter(string name) => name.ToLowerInvariant() switch
-            {
-                "labview" or "lv" or "g" or "vi"       => "G Std Prototype Adapter",
-                "labview flex" or "g flex"              => "G Flexible VI Adapter",
-                "cvi" or "c" or "c/cvi"                => "C/CVI Std Prototype Adapter",
-                "cvi flex" or "c flex"                  => "C/CVI Flexible Prototype Adapter",
-                "dotnet" or ".net"                      => "DotNet Adapter",
-                "python"                                => "Python Adapter",
-                "none"                                  => "None Adapter",
-                "sequence adapter" or "sequence"        => "Sequence Adapter",
-                _                                       => name  // pass through as-is
-            };
-
-            // Determine adapter and internal step type name
-            string adapterKey, internalType;
-            switch (stepType.ToLowerInvariant())
-            {
-                case "sequence call":
-                case "sequencecall":
-                    adapterKey = "Sequence Adapter"; internalType = "SequenceCall"; break;
-                case "call executable":
-                case "callexecutable":
-                    adapterKey = "None Adapter"; internalType = "CallExecutable"; break;
-                case "numericlimittest":
-                case "numeric limit test":
-                    adapterKey = "None Adapter"; internalType = "NumericLimitTest"; break;
-                case "stringvaluetest":
-                case "string value test":
-                    adapterKey = "None Adapter"; internalType = "StringValueTest"; break;
-                case "passfail":
-                case "passfailtest":
-                case "pass/fail":
-                case "pass/fail test":
-                    adapterKey = "None Adapter"; internalType = "PassFailTest"; break;
-                case "messagepopup":
-                case "message popup":
-                    adapterKey = "None Adapter"; internalType = "MessagePopup"; break;
-                case "statement":
-                    adapterKey = "None Adapter"; internalType = "Statement"; break;
-                case "goto":
-                    adapterKey = "None Adapter"; internalType = "Goto"; break;
-                default:
-                    adapterKey = "None Adapter"; internalType = stepType; break;
-            }
-
-            // Override adapter if explicitly specified
-            if (!string.IsNullOrWhiteSpace(adapterName))
-                adapterKey = ResolveAdapter(adapterName);
+            var (adapterKey, internalType) = ResolveStepTypeAndAdapter(stepType, adapterName);
 
             var step = _engine!.NewStep(adapterKey, internalType);
             step.Name = stepName;
@@ -630,17 +629,193 @@ public class TestStandService : ITestStandService
             int insertAt = index < 0 ? (int)seq.GetNumSteps((object)sgValue) : index;
             seq.InsertStep(step, insertAt, (object)sgValue);
 
-            // Initialize TS.Description to a non-empty placeholder so the binary file
-            // serializes this field. Empty strings are omitted by the TOF1 binary format,
-            // so we use a space to force the field to exist after save/load.
-            // set_step_comment will overwrite this with the real description.
-            bool tsDescInit = false;
-            try { step.SetValString("TS.Description", 0, " "); tsDescInit = true; } catch { }
-            if (!tsDescInit)
-                try { step.SetValString("TS.Description", 0x8, " "); } catch { }
+            InitStepDescriptionField(step);
 
             sf.Save(filePath);
             _loadedSequenceFiles[filePath] = sf;
+        });
+    }
+
+    // Map adapter display names to internal key names + resolve the internal step
+    // type. Shared by InsertStepAsync and InsertStepsBulkAsync so both behave identically.
+    private static (string adapterKey, string internalType) ResolveStepTypeAndAdapter(
+        string stepType, string? adapterName)
+    {
+        string ResolveAdapter(string name) => name.ToLowerInvariant() switch
+        {
+            "labview" or "lv" or "g" or "vi"       => "G Std Prototype Adapter",
+            "labview flex" or "g flex"              => "G Flexible VI Adapter",
+            "cvi" or "c" or "c/cvi"                => "C/CVI Std Prototype Adapter",
+            "cvi flex" or "c flex"                  => "C/CVI Flexible Prototype Adapter",
+            "dotnet" or ".net"                      => "DotNet Adapter",
+            "python"                                => "Python Adapter",
+            "none"                                  => "None Adapter",
+            "sequence adapter" or "sequence"        => "Sequence Adapter",
+            _                                       => name  // pass through as-is
+        };
+
+        string adapterKey, internalType;
+        switch (stepType.ToLowerInvariant())
+        {
+            case "sequence call":
+            case "sequencecall":
+                adapterKey = "Sequence Adapter"; internalType = "SequenceCall"; break;
+            case "call executable":
+            case "callexecutable":
+                adapterKey = "None Adapter"; internalType = "CallExecutable"; break;
+            case "numericlimittest":
+            case "numeric limit test":
+                adapterKey = "None Adapter"; internalType = "NumericLimitTest"; break;
+            case "stringvaluetest":
+            case "string value test":
+                adapterKey = "None Adapter"; internalType = "StringValueTest"; break;
+            case "passfail":
+            case "passfailtest":
+            case "pass/fail":
+            case "pass/fail test":
+                adapterKey = "None Adapter"; internalType = "PassFailTest"; break;
+            case "messagepopup":
+            case "message popup":
+                adapterKey = "None Adapter"; internalType = "MessagePopup"; break;
+            case "statement":
+                adapterKey = "None Adapter"; internalType = "Statement"; break;
+            case "goto":
+                adapterKey = "None Adapter"; internalType = "Goto"; break;
+            default:
+                adapterKey = "None Adapter"; internalType = stepType; break;
+        }
+
+        if (!string.IsNullOrWhiteSpace(adapterName))
+            adapterKey = ResolveAdapter(adapterName);
+
+        return (adapterKey, internalType);
+    }
+
+    // Initialize TS.Description to a non-empty placeholder so the binary file
+    // serializes this field. Empty strings are omitted by the TOF1 binary format,
+    // so we use a space to force the field to exist after save/load.
+    // set_step_comment / a bulk comment will overwrite this with the real description.
+    private static void InitStepDescriptionField(dynamic step)
+    {
+        bool tsDescInit = false;
+        try { step.SetValString("TS.Description", 0, " "); tsDescInit = true; } catch { }
+        if (!tsDescInit)
+            try { step.SetValString("TS.Description", 0x8, " "); } catch { }
+    }
+
+    public async Task<BulkInsertResult> InsertStepsBulkAsync(string filePath,
+        string sequenceName, string stepGroup, List<BulkStepSpec> steps, bool save = true)
+    {
+        EnsureConnected();
+        return await Task.Run(() =>
+        {
+            var result = new BulkInsertResult
+            {
+                SequenceName = sequenceName,
+                StepGroup    = stepGroup
+            };
+            if (steps == null || steps.Count == 0)
+                return result;
+
+            var sf  = _loadedSequenceFiles.TryGetValue(filePath, out var cached)
+                ? cached
+                : _engine!.GetSequenceFileEx(filePath, 0, 4);
+
+            var seq     = sf.GetSequenceByName(sequenceName);
+            int sgValue = ParseStepGroup(stepGroup);
+
+            foreach (var spec in steps)
+            {
+                if (string.IsNullOrWhiteSpace(spec.Name) || string.IsNullOrWhiteSpace(spec.StepType))
+                {
+                    result.Warnings.Add($"Skipped step with empty name or type ('{spec.Name}').");
+                    continue;
+                }
+
+                var (adapterKey, internalType) =
+                    ResolveStepTypeAndAdapter(spec.StepType, spec.Adapter);
+
+                var step  = _engine!.NewStep(adapterKey, internalType);
+                step.Name = spec.Name;
+
+                // Always append in list order (bulk builds a sequence top-to-bottom).
+                int insertAt = (int)seq.GetNumSteps((object)sgValue);
+                seq.InsertStep(step, insertAt, (object)sgValue);
+                InitStepDescriptionField(step);
+
+                // Optional comment
+                if (!string.IsNullOrEmpty(spec.Comment))
+                {
+                    bool ok = false;
+                    try { step.Comment = spec.Comment; ok = true; } catch { }
+                    if (!ok) try { step.AsPropertyObject().Comment = spec.Comment; ok = true; } catch { }
+                    if (ok) result.CommentsSet++;
+                    else    result.Warnings.Add($"Comment not set on '{spec.Name}'.");
+                }
+
+                // Optional expression
+                if (!string.IsNullOrEmpty(spec.Expression))
+                {
+                    try
+                    {
+                        switch ((spec.ExpressionType ?? "Statement").ToLowerInvariant())
+                        {
+                            case "pre":    step.PreExpression    = spec.Expression; break;
+                            case "post":   step.PostExpression   = spec.Expression; break;
+                            case "status": step.StatusExpression = spec.Expression; break;
+                            default:
+                                try { step.AsPropertyObject().SetValString("Module.Expression", 0, spec.Expression); }
+                                catch { step.PreExpression = spec.Expression; }
+                                break;
+                        }
+                        result.ExpressionsSet++;
+                    }
+                    catch (Exception ex)
+                    {
+                        result.Warnings.Add($"Expression not set on '{spec.Name}': {ex.Message}");
+                    }
+                }
+
+                // Optional SequenceCall target
+                if (!string.IsNullOrEmpty(spec.TargetSequenceName))
+                {
+                    try
+                    {
+                        dynamic seqCallModule = step.Module;
+                        seqCallModule.SequenceName   = spec.TargetSequenceName;
+                        seqCallModule.UseCurrentFile = string.IsNullOrEmpty(spec.TargetSequenceFile);
+                        if (!string.IsNullOrEmpty(spec.TargetSequenceFile))
+                        {
+                            string relTarget = MakeRelativePath(
+                                Path.GetDirectoryName(filePath) ?? "", spec.TargetSequenceFile);
+                            seqCallModule.SequenceFilePath = relTarget;
+                            foreach (var propName in new[] { "UseAbsolutePath", "AbsolutePath", "IsAbsolutePath" })
+                            {
+                                try { ((object)seqCallModule).GetType().InvokeMember(
+                                    propName, System.Reflection.BindingFlags.SetProperty,
+                                    null, seqCallModule, new object[] { false }); }
+                                catch { }
+                            }
+                        }
+                        result.TargetsSet++;
+                    }
+                    catch (Exception ex)
+                    {
+                        result.Warnings.Add($"SequenceCall target not set on '{spec.Name}': {ex.Message}");
+                    }
+                }
+
+                result.InsertedCount++;
+                result.InsertedSteps.Add(spec.Name);
+            }
+
+            // Save ONCE for the whole batch — this is the key efficiency win over
+            // calling insert_step (which saves per step).
+            if (save)
+                sf.Save(filePath);
+            _loadedSequenceFiles[filePath] = sf;
+
+            return result;
         });
     }
 
