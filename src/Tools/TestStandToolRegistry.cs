@@ -166,6 +166,36 @@ public class TestStandToolRegistry
                     "Save the file after the batch (default true). Set false to chain several bulk calls.", true),
             InsertStepsBulkAsync);
 
+        Register("validate_sequence_plan",
+            "Validate a sequence BUILD-PLAN before writing it to TestStand (Phase-3 gate). " +
+            "Deterministic, engine-independent structural check — run it on the exact same " +
+            "'steps' array you will pass to insert_steps_bulk, plus the planned local-variable " +
+            "names. Returns {valid, errorCount, warningCount, errors[], warnings[], stats{}}. " +
+            "ONLY proceed to build when valid==true (errors block the build; warnings are " +
+            "advisory — e.g. unlinked SequenceCall placeholders). Checks: balanced NI_Flow_* " +
+            "blocks (openers ↔ End), ElseIf/Else inside If, Case inside Select, Break/Continue " +
+            "inside a loop, no Goto/Label, unique step names, known step types, and that every " +
+            "Locals.X referenced in a condition is declared in 'locals'.",
+            s => s
+                .AddRequired("sequence_name", "string", "Name of the sequence the plan builds")
+                .AddArray("steps",
+                    "The ordered build-plan steps — identical shape to insert_steps_bulk: " +
+                    "{step_name, step_type} required; optional expression, target_sequence_name, " +
+                    "target_sequence_file, comment.",
+                    item => item
+                        .AddRequired("step_name", "string", "Name for the step")
+                        .AddRequired("step_type", "string", "Step type, e.g. 'SequenceCall', 'NI_Flow_If'.")
+                        .AddOptional("expression", "string", "Condition/expression (e.g. an NI_Flow_If condition)")
+                        .AddOptional("target_sequence_name", "string", "For SequenceCall: target sequence name")
+                        .AddOptional("target_sequence_file", "string", "For SequenceCall: target file")
+                        .AddOptional("comment", "string", "Step comment"))
+                .AddArray("locals",
+                    "Planned local variables (names only are required for the reference check).",
+                    item => item
+                        .AddRequired("name", "string", "Local variable name"),
+                    required: false),
+            ValidateSequencePlanAsync);
+
         Register("insert_local_variable",
             "Insert a new local variable into a sequence.",
             s => s
@@ -338,7 +368,12 @@ public class TestStandToolRegistry
 
         // Steps
         Register("get_steps",
-            "Get all steps in the Main step group of a sequence.",
+            "Get all steps of a sequence (Setup, Main and Cleanup groups). " +
+            "Compact output: fields are OMITTED when they hold their default — " +
+            "absent 'enabled' means the step is enabled (only 'enabled:false' is " +
+            "written, for skipped steps); absent 'stepGroup' means the Main group " +
+            "('setup'/'cleanup' written explicitly); 'subSteps'/'properties' are " +
+            "absent when empty.",
             s => s
                 .AddRequired("sequence_file_path", "string", "Path to the sequence file")
                 .AddRequired("sequence_name", "string", "Name of the sequence"),
@@ -1581,6 +1616,44 @@ public class TestStandToolRegistry
 
         var result = await _ts.InsertStepsBulkAsync(filePath, sequenceName, stepGroup, specs, save);
         return OkJson(result);
+    }
+
+    // Phase-3 gate: deterministic, engine-free validation of a build plan.
+    private Task<CallToolResult> ValidateSequencePlanAsync(JsonElement? args)
+    {
+        var sequenceName = args!.Value.GetStringOrDefault("sequence_name", "");
+
+        if (!args!.Value.TryGetProperty("steps", out var stepsEl) ||
+            stepsEl.ValueKind != JsonValueKind.Array)
+            return Task.FromResult(Error("Argument 'steps' must be an array of step objects."));
+
+        var planSteps = new List<PlanStepInput>();
+        foreach (var el in stepsEl.EnumerateArray())
+        {
+            planSteps.Add(new PlanStepInput
+            {
+                Name               = el.GetStringOrDefault("step_name", ""),
+                StepType           = el.GetStringOrDefault("step_type", ""),
+                Expression         = el.GetStringOrNull("expression"),
+                TargetSequenceName = el.GetStringOrNull("target_sequence_name"),
+                TargetSequenceFile = el.GetStringOrNull("target_sequence_file"),
+                Comment            = el.GetStringOrNull("comment")
+            });
+        }
+
+        var localNames = new List<string>();
+        if (args!.Value.TryGetProperty("locals", out var localsEl) &&
+            localsEl.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var el in localsEl.EnumerateArray())
+            {
+                var n = el.GetStringOrNull("name");
+                if (!string.IsNullOrWhiteSpace(n)) localNames.Add(n!);
+            }
+        }
+
+        var result = SequencePlanValidator.Validate(sequenceName, planSteps, localNames);
+        return Task.FromResult(OkJson(result));
     }
 
     private async Task<CallToolResult> InsertLocalVariableAsync(JsonElement? args)

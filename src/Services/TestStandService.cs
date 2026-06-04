@@ -1189,7 +1189,8 @@ public class TestStandService : ITestStandService
                         try
                         {
                             var step = MapStepInfo(seq.GetStep(i, (object)g));
-                            step.StepGroup = groupNames[g];
+                            // Omit the default "Main" group (g==1) to save tokens; absent = Main.
+                            step.StepGroup = g == 1 ? null : groupNames[g];
                             all.Add(step);
                         }
                         catch { }
@@ -2456,7 +2457,8 @@ public class TestStandService : ITestStandService
                     try
                     {
                         var step = MapStepInfo(seq.GetStep(i, (object)g));
-                        step.StepGroup = groupNames[g];
+                        // Omit the default "Main" group (g==1) to save tokens; absent = Main.
+                        step.StepGroup = g == 1 ? null : groupNames[g];
                         info.Steps.Add(step);
                     }
                     catch { }
@@ -2488,8 +2490,10 @@ public class TestStandService : ITestStandService
             Name     = (string)step.Name,
             StepType = TryGetString(step.StepType, "Name"),
         };
-        // RunMode is a string property: "Normal", "Skip", "Fail", "Pass"
-        try { info.Enabled = (string)step.RunMode != "Skip"; } catch { info.Enabled = true; }
+        // RunMode is a string property: "Normal", "Skip", "Fail", "Pass".
+        // Only emit Enabled when the step is skipped; enabled steps leave it
+        // null so the serializer omits it (absence = enabled — token saver).
+        try { if ((string)step.RunMode == "Skip") info.Enabled = false; } catch { }
         // step.Comment holds the user-set comment (written by SetStepCommentAsync).
         // step.Description returns the auto-generated type description (e.g. "Action"),
         // so prefer Comment, and only fall back to Description when Comment is empty.

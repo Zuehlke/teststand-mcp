@@ -113,11 +113,17 @@ public class StepInfo
     public string Name { get; set; } = "";
     public string StepType { get; set; } = "";
     public string? Description { get; set; }
-    public bool Enabled { get; set; } = true;
-    /// <summary>Step group the step belongs to: "Setup", "Main", or "Cleanup".</summary>
-    public string StepGroup { get; set; } = "";
-    public List<StepInfo> SubSteps { get; set; } = new();
-    public Dictionary<string, string> Properties { get; set; } = new();
+    /// <summary>Null/omitted = enabled (the common case); false = step is skipped.
+    /// Kept nullable so the serializer drops it for the overwhelmingly common
+    /// enabled steps (token optimization — absence means enabled).</summary>
+    public bool? Enabled { get; set; }
+    /// <summary>Step group: "Setup" or "Cleanup". Null/omitted = "Main"
+    /// (the default group — omitted to save tokens).</summary>
+    public string? StepGroup { get; set; }
+    /// <summary>Null/omitted when there are no sub-steps.</summary>
+    public List<StepInfo>? SubSteps { get; set; }
+    /// <summary>Null/omitted when empty (get_steps never populates this).</summary>
+    public Dictionary<string, string>? Properties { get; set; }
 }
 
 // ── Variable / Property Models ───────────────────────────────────────────────
