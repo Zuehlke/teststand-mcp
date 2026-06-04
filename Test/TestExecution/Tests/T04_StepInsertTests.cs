@@ -236,7 +236,7 @@ public class T04_StepInsertTests : TestBase
         var s     = steps.FirstOrDefault(x => x.Name == "Toggleable");
 
         Assert.That(s, Is.Not.Null);
-        Assert.That(s!.Enabled, Is.False, "Step should be disabled after EnableStep(false)");
+        Assert.That(s!.Enabled, Is.EqualTo(false), "Step should be disabled after EnableStep(false)");
     }
 
     // ── Delete step ────────────────────────────────────────────────────────────
