@@ -93,9 +93,11 @@ public class T05_StepPropertyTests : TestBase
 
         var limits = await Ts.GetNumericLimitsAsync(TempSeqFile, Seq, Grp, "n");
 
-        Assert.That(limits,         Is.Not.Null);
-        Assert.That(limits["Low"],  Is.EqualTo(4.75).Within(0.0001));
-        Assert.That(limits["High"], Is.EqualTo(5.25).Within(0.0001));
+        // GetNumericLimitsAsync returns the public MCP contract keys
+        // (low_limit / high_limit), serialized verbatim by the get_numeric_limits tool.
+        Assert.That(limits,                Is.Not.Null);
+        Assert.That(limits["low_limit"],   Is.EqualTo(4.75).Within(0.0001));
+        Assert.That(limits["high_limit"],  Is.EqualTo(5.25).Within(0.0001));
     }
 
     // ── String value test ─────────────────────────────────────────────────────

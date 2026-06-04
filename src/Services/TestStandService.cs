@@ -316,6 +316,14 @@ public class TestStandService : ITestStandService
     private dynamic? _engine;         // NationalInstruments.TestStand.Interop.API.Engine
     private dynamic? _engineMgr;      // EngineManager
     private bool _disposed;
+
+    // Number of live TestStand engine instances across the whole process. Engine.ShutDown
+    // takes a `final` flag that, when true, also shuts down NI licensing (the NILM helper
+    // process) — which is what lets a headless host actually exit. That global shutdown is
+    // only safe for the LAST engine: doing it while another instance is still connected
+    // poisons the shared engine and hangs teardown. We therefore pass final:true only when
+    // this is the last engine being released, and final:false otherwise.
+    private static int _liveEngineCount;
     private readonly Dictionary<string, DateTime> _executionStartTimes = new();
     private readonly Dictionary<string, List<LogEntry>> _executionLogs = new();
     private readonly Dictionary<string, dynamic> _syncObjects = new();
@@ -323,6 +331,7 @@ public class TestStandService : ITestStandService
     // In-memory tracking (Engine API has no SequenceFiles/Executions collection)
     private readonly Dictionary<string, dynamic> _loadedSequenceFiles = new();
     private readonly Dictionary<string, dynamic> _activeExecutions = new();
+
 
     // Watch expressions are an editor/GUI concept not available in the engine API;
     // we keep them in memory so Claude can manage them across calls.
@@ -364,6 +373,7 @@ public class TestStandService : ITestStandService
 
                 _engine = Activator.CreateInstance(engineType)
                     ?? throw new InvalidOperationException("Failed to create TestStand Engine instance.");
+                System.Threading.Interlocked.Increment(ref _liveEngineCount);
 
                 // Load type palette files so step types (Label, Action, etc.) are available
                 try { _engine.LoadTypePaletteFiles(); }
@@ -393,9 +403,18 @@ public class TestStandService : ITestStandService
             _loadedSequenceFiles.Clear();
             _activeExecutions.Clear();
 
+            _undoGroups.Clear();
+
             if (_engine != null)
             {
-                System.Runtime.InteropServices.Marshal.ReleaseComObject(_engine);
+                // Engine.ShutDown stops the engine's background threads. Pass final:true ONLY
+                // when this is the last live engine — that also shuts down NI licensing (the
+                // NILM helper) which otherwise keeps the host process alive and hangs exit.
+                // Passing final:true while another instance is still connected would break the
+                // shared engine, so transient instances use final:false.
+                bool isLast = System.Threading.Interlocked.Decrement(ref _liveEngineCount) <= 0;
+                try { _engine.ShutDown(isLast); } catch { }
+                try { System.Runtime.InteropServices.Marshal.ReleaseComObject(_engine); } catch { }
                 _engine = null;
             }
         });
@@ -641,18 +660,7 @@ public class TestStandService : ITestStandService
     private static (string adapterKey, string internalType) ResolveStepTypeAndAdapter(
         string stepType, string? adapterName)
     {
-        string ResolveAdapter(string name) => name.ToLowerInvariant() switch
-        {
-            "labview" or "lv" or "g" or "vi"       => "G Std Prototype Adapter",
-            "labview flex" or "g flex"              => "G Flexible VI Adapter",
-            "cvi" or "c" or "c/cvi"                => "C/CVI Std Prototype Adapter",
-            "cvi flex" or "c flex"                  => "C/CVI Flexible Prototype Adapter",
-            "dotnet" or ".net"                      => "DotNet Adapter",
-            "python"                                => "Python Adapter",
-            "none"                                  => "None Adapter",
-            "sequence adapter" or "sequence"        => "Sequence Adapter",
-            _                                       => name  // pass through as-is
-        };
+        string ResolveAdapter(string name) => ResolveAdapterKeyName(name);
 
         string adapterKey, internalType;
         switch (stepType.ToLowerInvariant())
@@ -1227,7 +1235,10 @@ public class TestStandService : ITestStandService
                 : _engine!.GetSequenceFileEx(sequenceFilePath, 0, 4);
             var seq  = sf.GetSequenceByName(sequenceName);
             var step = FindStepInAllGroups(seq, stepName);
-            step.StepEnabled = enabled;
+            // Step has no `StepEnabled` property. A step is "disabled" by setting its
+            // RunMode to "Skip" (and re-enabled with "Normal") — this is exactly the
+            // representation GetStepsAsync reads back (RunMode == "Skip" → Enabled=false).
+            step.SetRunModeEx(enabled ? "Normal" : "Skip", System.Type.Missing);
         });
     }
 
@@ -1246,7 +1257,7 @@ public class TestStandService : ITestStandService
             var props = new Dictionary<string, object>();
             try { props["Name"]            = (string)step.Name; }            catch { }
             try { props["StepType"]        = (string)step.StepType.Name; }   catch { }
-            try { props["Enabled"]         = (bool)step.StepEnabled; }       catch { }
+            try { props["Enabled"]         = (string)step.RunMode != "Skip"; } catch { }
             try { props["PreExpression"]   = (string)step.PreExpression; }   catch { }
             try { props["PostExpression"]  = (string)step.PostExpression; }  catch { }
             try { props["StatusExpression"]= (string)step.StatusExpression;} catch { }
@@ -1393,16 +1404,18 @@ public class TestStandService : ITestStandService
         EnsureConnected();
         return await Task.Run(() =>
         {
-            var result   = new List<AdapterInfo>();
-            var adapters = _engine!.Adapters;
-            for (int i = 0; i < (int)adapters.Count; i++)
+            var result = new List<AdapterInfo>();
+            // IEngine exposes adapters via NumAdapters + GetAdapter(index) — there is
+            // no `Adapters` collection. Adapter has KeyName/DisplayName (no Name/Type).
+            int count = (int)_engine!.NumAdapters;
+            for (int i = 0; i < count; i++)
             {
-                var adapter = adapters[(object)i];
+                var adapter = _engine!.GetAdapter((object)i);
                 result.Add(new AdapterInfo
                 {
-                    Name     = (string)adapter.Name,
-                    Type     = (string)adapter.Type,
-                    Version  = TryGetString(adapter, "Version"),
+                    Name     = TryGetString(adapter, "DisplayName"),
+                    Type     = TryGetString(adapter, "KeyName"),
+                    Version  = "",
                     IsLoaded = true
                 });
             }
@@ -2530,11 +2543,19 @@ public class TestStandService : ITestStandService
                 {
                     dynamic prop = propType.InvokeMember("GetNthSubProperty",
                         _comFlags, null, propObj, new object[] { "", i, 0 });
+
+                    // PropertyObject has no `TypeName` property — the human-readable type
+                    // name comes from GetTypeDisplayString(lookupString, options).
+                    string dataType = "";
+                    try { dataType = (string)prop.GetTypeDisplayString("", (object)0); } catch { }
+                    if (string.IsNullOrEmpty(dataType)) dataType = TryGetString(prop, "TypeName");
+
                     vars.Add(new VariableInfo
                     {
-                        Name     = (string)prop.Name,
-                        DataType = TryGetString(prop, "TypeName"),
-                        Value    = TryGetValue(prop)
+                        Name        = (string)prop.Name,
+                        DataType    = dataType,
+                        Value       = TryGetValue(prop),
+                        Description = TryGetStringOrNull(prop, "Comment")
                     });
                 }
                 catch { }
@@ -3043,7 +3064,50 @@ public class TestStandService : ITestStandService
         EnsureConnected();
         return await Task.Run(() =>
         {
-            try { return (string)_engine!.ExpandPathMacros((object)path); }
+            try
+            {
+                // IEngine.ExpandPathMacros only resolves relative/workspace macros — it
+                // does NOT expand the well-known <TestStand*> location macros. We expand
+                // those ourselves via GetTestStandPath, then let ExpandPathMacros handle
+                // anything that remains.
+                var typedEngine =
+                    (NationalInstruments.TestStand.Interop.API.IEngine)(object)_engine!;
+
+                string p = path ?? "";
+
+                // Longest macro names first so e.g. <TestStandPublic> is not partially
+                // matched by <TestStand>.
+                (string Macro, int PathId)[] macros =
+                {
+                    ("<TestStandGlobalCommonAppData>", 13),
+                    ("<TestStandGlobalLocalAppData>",  14),
+                    ("<TestStandCommonAppData>",         5),
+                    ("<TestStandLocalAppData>",          6),
+                    ("<TestStandApplicationData>",       5),
+                    ("<TestStandPublicComponents>",      7),
+                    ("<TestStandNIComponents>",          8),
+                    ("<TestStandGlobalConfig>",         11),
+                    ("<TestStandGlobalPublic>",         12),
+                    ("<TestStandConfig>",                3),
+                    ("<TestStandPublic>",                4),
+                    ("<TestStandTemp>",                  9),
+                    ("<TestStandBin>",                   2),
+                    ("<TestStand>",                      1),
+                };
+
+                foreach (var (macro, id) in macros)
+                {
+                    int idx = p.IndexOf(macro, StringComparison.OrdinalIgnoreCase);
+                    if (idx < 0) continue;
+                    string expanded;
+                    try { expanded = (string)_engine!.GetTestStandPath((object)id); }
+                    catch { continue; }
+                    p = p.Substring(0, idx) + expanded + p.Substring(idx + macro.Length);
+                }
+
+                try { typedEngine.ExpandPathMacros(ref p); } catch { }
+                return p;
+            }
             catch { return path; }
         });
     }
@@ -3324,8 +3388,10 @@ public class TestStandService : ITestStandService
             var seq   = sf.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
             var step  = seq.GetStepByName(stepName, (object)sgVal);
-            // RemoveStep + InsertStep at new position
-            seq.RemoveStep(step, (object)sgVal);
+            // RemoveStep takes a numeric index (not a Step object). Resolve the current
+            // index by name, detach the step, then re-insert it at the target position.
+            int curIdx = (int)seq.GetStepIndex(stepName, (object)sgVal);
+            seq.RemoveStep(curIdx, (object)sgVal);
             seq.InsertStep(step, newIndex, (object)sgVal);
             sf.Save(filePath);
         });
@@ -3972,6 +4038,22 @@ public class TestStandService : ITestStandService
         });
     }
 
+    // Maps friendly adapter names (e.g. "None", ".NET", "LabVIEW") to TestStand
+    // adapter KeyNames (e.g. "None Adapter", "DotNet Adapter"). Unknown names pass
+    // through unchanged so an explicit KeyName still works.
+    internal static string ResolveAdapterKeyName(string? name) => name?.ToLowerInvariant() switch
+    {
+        "labview" or "lv" or "g" or "vi"       => "G Std Prototype Adapter",
+        "labview flex" or "g flex"             => "G Flexible VI Adapter",
+        "cvi" or "c" or "c/cvi"                => "C/CVI Std Prototype Adapter",
+        "cvi flex" or "c flex"                 => "C/CVI Flexible Prototype Adapter",
+        "dotnet" or ".net"                     => "DotNet Adapter",
+        "python"                               => "Python Adapter",
+        "none" or "<none>"                     => "None Adapter",
+        "sequence adapter" or "sequence"       => "Sequence Adapter",
+        _                                      => name ?? ""
+    };
+
     public async Task ChangeStepAdapterAsync(string filePath, string sequenceName,
         string stepGroup, string stepName, string newAdapter)
     {
@@ -3982,8 +4064,8 @@ public class TestStandService : ITestStandService
             var seq   = sf.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
             var step  = seq.GetStepByName(stepName, (object)sgVal);
-            var adapter = _engine!.GetAdapterByKeyName((object)newAdapter);
-            step.ChangeAdapter(adapter);
+            // Step.ChangeAdapter takes the adapter KEY NAME string, not an Adapter object.
+            step.ChangeAdapter((object)ResolveAdapterKeyName(newAdapter));
             sf.Save(filePath);
         });
     }
@@ -4216,123 +4298,65 @@ public class TestStandService : ITestStandService
     }
 
     // ── Undo/Redo ─────────────────────────────────────────────────────────────
+    //
+    // IMPORTANT: automatic undo recording is a Sequence Editor (UI) feature. The
+    // headless Engine API exposes NO per-file undo stack — neither SequenceFile nor
+    // Engine has an UndoStack property, and edits performed through the Engine API are
+    // never recorded for undo. Engine.NewUndoStack() only creates a detached, empty
+    // stack; worse, holding such a COM object across engine shutdown makes the process
+    // hang on teardown. We therefore expose undo/redo as honest no-ops that report
+    // "nothing to undo" rather than fabricating COM state. Undo group bookkeeping is
+    // tracked purely in memory so callers (and the MCP tools) behave predictably.
 
-    private dynamic GetUndoStack(string? filePath)
-    {
-        if (!string.IsNullOrEmpty(filePath))
-        {
-            var sf = GetOrLoadSeqFile(filePath);
-            try { return sf.UndoStack; } catch { }
-        }
-        try { return _engine!.UndoStack; } catch { }
-        throw new InvalidOperationException(
-            "UndoStack is not available. Pass a file_path to access a file-level undo stack.");
-    }
+    private readonly Dictionary<string, string> _undoGroups =
+        new(StringComparer.OrdinalIgnoreCase);
 
     public async Task<UndoStackInfo> GetUndoStackAsync(string? filePath = null)
     {
         EnsureConnected();
-        return await Task.Run(() =>
+        return await Task.Run(() => new UndoStackInfo
         {
-            var stack = GetUndoStack(filePath);
-            var info  = new UndoStackInfo
-            {
-                FilePath     = filePath,
-                CanUndo      = TryGetBool(stack, "CanUndo"),
-                CanRedo      = TryGetBool(stack, "CanRedo"),
-                NumUndoItems = 0,
-                NumRedoItems = 0
-            };
-
-            try
-            {
-                info.NumUndoItems = Convert.ToInt32((object)stack.NumUndoItems);
-                for (int i = 0; i < info.NumUndoItems; i++)
-                {
-                    try
-                    {
-                        dynamic item = stack.GetUndoItem((object)i);
-                        info.UndoItems.Add(new UndoItemInfo
-                        {
-                            Index       = i,
-                            Name        = TryGetString(item, "Name"),
-                            Description = TryGetString(item, "Description")
-                        });
-                    }
-                    catch { }
-                }
-            }
-            catch { }
-
-            try
-            {
-                info.NumRedoItems = Convert.ToInt32((object)stack.NumRedoItems);
-                for (int i = 0; i < info.NumRedoItems; i++)
-                {
-                    try
-                    {
-                        dynamic item = stack.GetRedoItem((object)i);
-                        info.RedoItems.Add(new UndoItemInfo
-                        {
-                            Index       = i,
-                            Name        = TryGetString(item, "Name"),
-                            Description = TryGetString(item, "Description")
-                        });
-                    }
-                    catch { }
-                }
-            }
-            catch { }
-
-            return info;
+            FilePath     = filePath,
+            CanUndo      = false,
+            CanRedo      = false,
+            NumUndoItems = 0,
+            NumRedoItems = 0
         });
     }
 
     public async Task<bool> UndoAsync(string? filePath = null)
     {
         EnsureConnected();
-        return await Task.Run(() =>
-        {
-            var stack = GetUndoStack(filePath);
-            if (!TryGetBool(stack, "CanUndo")) return false;
-            stack.Undo();
-            return true;
-        });
+        // No automatic undo stack in the headless Engine API → nothing to undo.
+        return await Task.FromResult(false);
     }
 
     public async Task<bool> RedoAsync(string? filePath = null)
     {
         EnsureConnected();
-        return await Task.Run(() =>
-        {
-            var stack = GetUndoStack(filePath);
-            if (!TryGetBool(stack, "CanRedo")) return false;
-            stack.Redo();
-            return true;
-        });
+        // No automatic redo stack in the headless Engine API → nothing to redo.
+        return await Task.FromResult(false);
     }
 
     public async Task BeginUndoGroupAsync(string groupName, string? filePath = null)
     {
         EnsureConnected();
-        await Task.Run(() => GetUndoStack(filePath).BeginUndoGroup((object)groupName));
+        await Task.Run(() =>
+            _undoGroups[string.IsNullOrEmpty(filePath) ? "<engine>" : filePath!] = groupName);
     }
 
     public async Task EndUndoGroupAsync(string? filePath = null)
     {
         EnsureConnected();
-        await Task.Run(() => GetUndoStack(filePath).EndUndoGroup());
+        await Task.Run(() =>
+            _undoGroups.Remove(string.IsNullOrEmpty(filePath) ? "<engine>" : filePath!));
     }
 
     public async Task CancelUndoGroupAsync(string? filePath = null)
     {
         EnsureConnected();
         await Task.Run(() =>
-        {
-            var stack = GetUndoStack(filePath);
-            try { stack.CancelUndoGroup(); }
-            catch { stack.EndUndoGroup(); }
-        });
+            _undoGroups.Remove(string.IsNullOrEmpty(filePath) ? "<engine>" : filePath!));
     }
 
     // ── Sequence File Comparison ──────────────────────────────────────────────
@@ -4850,23 +4874,24 @@ public class TestStandService : ITestStandService
         EnsureConnected();
         return await Task.Run(() =>
         {
-            var adapters = _engine!.Adapters;
-            int count = (int)adapters.Count;
+            string resolvedKey = ResolveAdapterKeyName(adapterName);
+            int count = (int)_engine!.NumAdapters;
             for (int i = 0; i < count; i++)
             {
-                dynamic adapter = adapters[(object)i];
+                dynamic adapter = _engine!.GetAdapter((object)i);
                 string key = TryGetString(adapter, "KeyName");
-                string name = TryGetString(adapter, "Name");
+                string name = TryGetString(adapter, "DisplayName");
 
                 if (!string.Equals(key, adapterName, StringComparison.OrdinalIgnoreCase) &&
-                    !string.Equals(name, adapterName, StringComparison.OrdinalIgnoreCase))
+                    !string.Equals(name, adapterName, StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(key, resolvedKey, StringComparison.OrdinalIgnoreCase))
                     continue;
 
                 var info = new AdapterDetailInfo
                 {
                     KeyName     = key,
-                    DisplayName = TryGetString(adapter, "DisplayName"),
-                    Type        = TryGetString(adapter, "Type"),
+                    DisplayName = name,
+                    Type        = key,
                     IsConfigurable        = TryGetBool(adapter, "IsConfigurable"),
                     IsSupported           = TryGetBool(adapter, "IsSupported"),
                     Hidden                = TryGetBool(adapter, "Hidden"),

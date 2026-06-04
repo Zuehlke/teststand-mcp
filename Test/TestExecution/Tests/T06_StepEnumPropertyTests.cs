@@ -76,11 +76,12 @@ public class T06_StepEnumPropertyTests : TestBase
 
     // ── ModuleUnloadOption ────────────────────────────────────────────────────
 
+    // Note: "UseStepUnloadOption" (enum value 5) is only valid at the sequence-file /
+    // model level — TestStand rejects it on an individual step — so it is not tested here.
     [TestCase("OnPreconditionFailure")]
     [TestCase("AfterStepExecution")]
     [TestCase("AfterSequenceExecution")]
     [TestCase("WithSequenceFile")]
-    [TestCase("UseStepUnloadOption")]
     public async Task SetStepModuleUnloadOption_AllOptions_DoNotThrow(string option)
     {
         await SetupWithStepAsync("s");
