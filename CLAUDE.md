@@ -96,5 +96,8 @@ Label  →  Only as a target for the mentioned Goto exceptions
 
 - **Sequence file for tests:** Always use `DemoTestsequenz.seq`
 - **MCP server restart:** After code changes always rebuild yourself:
-  `taskkill //F //IM TestStandMCP.exe` + `dotnet build --configuration Debug --framework net48 -p:Platform=x86`
+  `taskkill //F //IM TestStandMCP.exe` + `dotnet build --configuration Debug --framework net8.0-windows -p:Platform=x86`
+  (Target framework is **net8.0-windows / x86**. The TestStand engine requires the host's
+  runtimeconfig to declare `Microsoft.WindowsDesktop.App` + `Microsoft.AspNetCore.App` — both
+  are wired via `FrameworkReference` in the .csproj. Output: `bin\x86\Debug\net8.0-windows\`.)
 - **After every sequence change:** Call `save_sequence_file`

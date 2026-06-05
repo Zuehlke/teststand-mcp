@@ -2,11 +2,17 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net48</TargetFramework>
+    <!-- net8.0-windows: COM interop (TestStand engine) is a Windows-only feature.
+         The TestStand engine COM server is 32-bit, so the host process must stay x86;
+         an x86 .NET 8 runtime is installed under "C:\Program Files (x86)\dotnet". -->
+    <TargetFramework>net8.0-windows</TargetFramework>
     <LangVersion>latest</LangVersion>
     <AssemblyName>TestStandMCP</AssemblyName>
     <RootNamespace>TestStandMCP</RootNamespace>
     <Nullable>enable</Nullable>
+    <!-- PlatformTarget x86 + the x86 .NET SDK produce a 32-bit apphost (TestStandMCP.exe)
+         so the process loads the in-process 32-bit TestStand COM server. (No RuntimeIdentifier
+         on purpose — keeps the output path bin\x86\Debug\net8.0-windows\ clean.) -->
     <PlatformTarget>x86</PlatformTarget>
     <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
@@ -25,12 +31,25 @@
     <EmbeddedResource Remove="Test\**" />
   </ItemGroup>
 
+  <!-- NI's official requirement for hosting the TestStand engine under .NET Core/8: the engine
+       loads the .NET Core runtime in-process and the host app's runtimeconfig.json MUST declare
+       BOTH of these shared frameworks (mirrors <TestStand>\AdapterSupport\DotNetSupport\
+       DotnetCore.runtimeconfig.json). Without them the engine raises "The TestStand Engine cannot
+       be initialized — Error occurred when loading .NET Core runtime" and ConnectAsync fails.
+       WindowsDesktop.App also supplies `stdole`, which the NI interop assembly references. -->
   <ItemGroup>
-    <Reference Include="Microsoft.CSharp" />
-    <Reference Include="NationalInstruments.TestStand.Interop.API">
-      <HintPath>C:\Program Files (x86)\National Instruments\TestStand 2026\API\DotNET\Assemblies\CurrentVersion\NationalInstruments.TestStand.Interop.API.dll</HintPath>
-      <EmbedInteropTypes>false</EmbedInteropTypes>
-    </Reference>
+    <FrameworkReference Include="Microsoft.WindowsDesktop.App" />
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Microsoft.CSharp provides the runtime binder for `dynamic` (late-bound IDispatch COM). -->
+    <PackageReference Include="Microsoft.CSharp" Version="4.7.0" />
+    <!-- NI TestStand interop, netstandard2.0 build (loads under .NET 8). Same namespaces/types
+         as the .NET-Framework PIA, so the source compiles unchanged. Replaces the old direct
+         HintPath reference to the .NET-Framework PIA, which does NOT load under .NET Core/8 —
+         that was the root cause of the engine "Connect" failure on .NET Core. -->
+    <PackageReference Include="NationalInstruments.TestStand.API" Version="23.0.0" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="8.0.1" />
     <PackageReference Include="Microsoft.Extensions.Logging" Version="8.0.1" />
     <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="8.0.1" />
@@ -39,8 +58,6 @@
     <PackageReference Include="Microsoft.Extensions.Configuration.CommandLine" Version="8.0.0" />
     <PackageReference Include="Microsoft.Extensions.Configuration.EnvironmentVariables" Version="8.0.0" />
     <PackageReference Include="System.Text.Json" Version="8.0.6" />
-    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" PrivateAssets="all" Version="1.0.3" />
-    <PackageReference Include="System.Runtime.InteropServices.RuntimeInformation" Version="4.3.0" />
   </ItemGroup>
 
 </Project>
