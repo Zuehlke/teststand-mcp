@@ -87,6 +87,10 @@ This MCP Server can be used with any AI tool that supports MCPs. The instruction
 - Load/unload adapters (LabVIEW, CVI, .NET, Python)
 - Inspect adapter details and module parameters
 - List step types from loaded type palettes
+- **Typed code-module configuration** — dedicated tools to configure a step's module per adapter
+  (`configure_dotnet_module`, `configure_dll_module`, `configure_labview_module`,
+  `configure_python_module`, `configure_sequence_call_module`); the step's adapter is switched
+  automatically when needed
 
 ### Reporting & Results
 - Generate HTML/XML/TXT reports for completed executions
@@ -103,7 +107,16 @@ This MCP Server can be used with any AI tool that supports MCPs. The instruction
 
 ### Search & Analysis
 - Search steps by name, type, expression, or comment
+- **Native find / replace** (`find_in_file`, `replace_in_file`) using the TestStand search engine —
+  regex, whole-word and case options; replace operates on string-valued properties
 - Run the NI Sequence Analyzer and return messages sorted by severity
+- **Detailed analysis** (`analyze_sequence_file`) — typed messages with severity counts and a
+  minimum-severity filter
+
+### User & Privilege Management
+- List users and read the currently logged-in user
+- Create and delete users, set passwords, check whether a login name exists
+- List a user's enabled privileges and test a specific privilege
 
 ---
 
@@ -126,6 +139,21 @@ TestStandMCP.exe --list-tools  # Print all registered tool names and description
 ---
 
 ## Release Notes
+
+### V0.0.3
+Closes the highest-value gaps against the TestStand gRPC / NuGet API surface — **16 new tools**:
+- **User & privilege management** (`get_users`, `get_current_user`, `user_name_exists`,
+  `create_user`, `delete_user`, `set_user_password`, `get_user_privileges`,
+  `check_user_privilege`) via `Engine.UsersFile` / `User`.
+- **Native find / replace** (`find_in_file`, `replace_in_file`) via `PropertyObject.Search` /
+  `SearchMatch`, with regex, whole-word and case options. Find covers names, comments and values;
+  replace operates on string-valued properties.
+- **Typed code-module configuration** (`configure_dotnet_module`, `configure_dll_module`,
+  `configure_labview_module`, `configure_python_module`, `configure_sequence_call_module`) —
+  dedicated, adapter-aware tools instead of only the generic `set_module_parameter`.
+- **Detailed sequence analysis** (`analyze_sequence_file`) — severity counts and a
+  minimum-severity filter on top of the existing analyzer run.
+- Each area is covered by integration tests (fixtures `T11`–`T14`).
 
 ### V0.0.2
 - Added `teststand-sequence-builder` subagent for guided sequence creation from flowcharts or test descriptions.

@@ -11,6 +11,11 @@ using NiPropertyObject    = NationalInstruments.TestStand.Interop.API.PropertyOb
 using NiPropValueTypes    = NationalInstruments.TestStand.Interop.API.PropertyValueTypes;
 using NiEngine            = NationalInstruments.TestStand.Interop.API.IEngine;
 using PropertyObjectFile  = NationalInstruments.TestStand.Interop.API.PropertyObjectFile;
+using NiWriteFileFormat   = NationalInstruments.TestStand.Interop.API.WriteFileFormat;
+using NiPropOptions       = NationalInstruments.TestStand.Interop.API.PropertyOptions;
+using NiSearchOptions     = NationalInstruments.TestStand.Interop.API.SearchOptions;
+using NiSearchElements    = NationalInstruments.TestStand.Interop.API.SearchElements;
+using NiSearchFilter      = NationalInstruments.TestStand.Interop.API.SearchFilterOptions;
 
 namespace TestStandMCP.Services;
 
@@ -306,6 +311,46 @@ public interface ITestStandService : IDisposable
         string? title = null, string buttons = "OK", double timeout = -1);
     Task ConfigurePropertyLoaderAsync(string filePath, string sequenceName,
         string stepGroup, string stepName, string filePathExpr, string mode = "Read");
+
+    // ── User & Privilege Management (Engine.UsersFile / User) ────────────────
+    Task<List<UserInfo>> GetUsersAsync();
+    Task<UserInfo?> GetCurrentUserAsync();
+    Task<bool> UserNameExistsAsync(string loginName);
+    Task CreateUserAsync(string loginName, string fullName, string password,
+        bool persist = true);
+    Task DeleteUserAsync(string loginName, bool persist = true);
+    Task SetUserPasswordAsync(string loginName, string password, bool persist = true);
+    Task<List<string>> GetUserPrivilegesAsync(string loginName);
+    Task<bool> CheckUserPrivilegeAsync(string loginName, string privilege);
+
+    // ── Native Find / Replace (PropertyObject.Search / SearchMatch) ──────────
+    Task<FindReplaceResult> FindInFileAsync(string filePath, string pattern,
+        bool matchCase = false, bool wholeWord = false, bool regex = false,
+        string elements = "all", int maxResults = 500);
+    Task<FindReplaceResult> ReplaceInFileAsync(string filePath, string pattern,
+        string replacement, bool matchCase = false, bool wholeWord = false,
+        bool regex = false, string elements = "all", bool save = true);
+
+    // ── Typed Adapter / Code-Module Configuration ───────────────────────────
+    Task<ModuleConfigResult> ConfigureDotNetModuleAsync(string filePath,
+        string sequenceName, string stepGroup, string stepName, string assemblyPath,
+        string className, string methodName, bool save = true);
+    Task<ModuleConfigResult> ConfigureDllModuleAsync(string filePath,
+        string sequenceName, string stepGroup, string stepName, string dllPath,
+        string functionName, bool save = true);
+    Task<ModuleConfigResult> ConfigureLabViewModuleAsync(string filePath,
+        string sequenceName, string stepGroup, string stepName, string viPath,
+        bool save = true);
+    Task<ModuleConfigResult> ConfigurePythonModuleAsync(string filePath,
+        string sequenceName, string stepGroup, string stepName, string modulePath,
+        string functionName, bool save = true);
+    Task<ModuleConfigResult> ConfigureSequenceCallModuleAsync(string filePath,
+        string sequenceName, string stepGroup, string stepName,
+        string targetSequenceName, string targetSequenceFile = "", bool save = true);
+
+    // ── Sequence Analyzer (detailed) ─────────────────────────────────────────
+    Task<AnalyzerResult> RunSequenceAnalyzerDetailedAsync(string filePath,
+        string minSeverity = "Information");
 }
 
 // ── Implementation ────────────────────────────────────────────────────────────
@@ -1968,6 +2013,9 @@ public class TestStandService : ITestStandService
             string sevStr  = GetSubProp("Severity") ?? "";
             string ruleId  = GetSubProp("RuleId")   ?? "";
             string text    = GetSubProp("Text")      ?? "";
+            string loc     = GetSubProp("Location")  ?? GetSubProp("LocationString") ?? "";
+            string seqName = GetSubProp("SequenceName") ?? GetSubProp("SeqName") ?? "";
+            string stepName = GetSubProp("StepName") ?? "";
 
             if (string.IsNullOrEmpty(ruleId) && string.IsNullOrEmpty(text))
                 continue; // skip empty/sentinel objects
@@ -1981,7 +2029,15 @@ public class TestStandService : ITestStandService
                 _ => "Information"   // 3 = Default (use rule's own default)
             };
 
-            result.Add(new AnalyzerMessage { Severity = sevLabel, RuleId = ruleId, Text = text });
+            result.Add(new AnalyzerMessage
+            {
+                Severity     = sevLabel,
+                RuleId       = ruleId,
+                Text         = text,
+                Location     = loc,
+                SequenceName = seqName,
+                StepName     = stepName
+            });
         }
 
         return result;
@@ -4158,6 +4214,572 @@ public class TestStandService : ITestStandService
                 return $"Report not available for execution {executionId}.";
             }
         });
+    }
+
+    // ── User & Privilege Management ───────────────────────────────────────────
+
+    public async Task<List<UserInfo>> GetUsersAsync()
+    {
+        EnsureConnected();
+        return await Task.Run(() =>
+        {
+            var result = new List<UserInfo>();
+            dynamic usersFile = _engine!.UsersFile;
+            dynamic userList  = usersFile.UserList;
+            int count = CountArrayElements(userList);
+
+            for (int i = 0; i < count; i++)
+            {
+                try
+                {
+                    dynamic user = userList.GetPropertyObjectByOffset((object)i, (object)0);
+                    result.Add(MapUser(user));
+                }
+                catch { }
+            }
+            return result;
+        });
+    }
+
+    public async Task<UserInfo?> GetCurrentUserAsync()
+    {
+        EnsureConnected();
+        return await Task.Run(() =>
+        {
+            try
+            {
+                dynamic user = _engine!.CurrentUser;
+                if (user == null) return (UserInfo?)null;
+                return MapUser(user);
+            }
+            catch { return null; }
+        });
+    }
+
+    public async Task<bool> UserNameExistsAsync(string loginName)
+    {
+        EnsureConnected();
+        return await Task.Run(() =>
+        {
+            try { return (bool)_engine!.UserNameExists(loginName); }
+            catch { return false; }
+        });
+    }
+
+    public async Task CreateUserAsync(string loginName, string fullName,
+        string password, bool persist = true)
+    {
+        EnsureConnected();
+        await Task.Run(() =>
+        {
+            if (string.IsNullOrWhiteSpace(loginName))
+                throw new ArgumentException("loginName must not be empty.");
+            if ((bool)_engine!.UserNameExists(loginName))
+                throw new InvalidOperationException($"User '{loginName}' already exists.");
+
+            dynamic usersFile = _engine!.UsersFile;
+            dynamic userList  = usersFile.UserList;
+
+            // NewUser expects a User interface pointer. A null passed through the dynamic
+            // binder fails to convert (the static type is erased), so call it through the
+            // statically-typed IEngine interface where the compiler marshals null correctly.
+            dynamic newUser = ((NiEngine)_engine!).NewUser(null);
+            newUser.LoginName = loginName;
+            newUser.FullName  = fullName ?? "";
+            if (!string.IsNullOrEmpty(password)) newUser.Password = password;
+
+            // UserList is an array PropertyObject; its element count comes from
+            // offset enumeration, NOT GetNumSubProperties (which returns 0 for arrays).
+            int n = CountArrayElements(userList);
+
+            // Grow the array by one element and store the (shared) new user object there.
+            userList.InsertElements((object)n, (object)1, (object)0);
+            userList.SetPropertyObject($"[{n}]", (object)0, newUser.AsPropertyObject());
+
+            if (persist) PersistUsersFile(usersFile);
+        });
+    }
+
+    public async Task DeleteUserAsync(string loginName, bool persist = true)
+    {
+        EnsureConnected();
+        await Task.Run(() =>
+        {
+            dynamic usersFile = _engine!.UsersFile;
+            dynamic userList  = usersFile.UserList;
+            int count = CountArrayElements(userList);
+
+            for (int i = 0; i < count; i++)
+            {
+                dynamic user = userList.GetPropertyObjectByOffset((object)i, (object)0);
+                string ln = TryGetString(user, "LoginName");
+                if (string.Equals(ln, loginName, StringComparison.OrdinalIgnoreCase))
+                {
+                    userList.DeleteElements((object)i, (object)1, (object)0);
+                    if (persist) PersistUsersFile(usersFile);
+                    return;
+                }
+            }
+            throw new KeyNotFoundException($"User '{loginName}' not found.");
+        });
+    }
+
+    public async Task SetUserPasswordAsync(string loginName, string password,
+        bool persist = true)
+    {
+        EnsureConnected();
+        await Task.Run(() =>
+        {
+            dynamic user = FindUser(loginName)
+                ?? throw new KeyNotFoundException($"User '{loginName}' not found.");
+            user.Password = password ?? "";
+            if (persist) PersistUsersFile(_engine!.UsersFile);
+        });
+    }
+
+    public async Task<List<string>> GetUserPrivilegesAsync(string loginName)
+    {
+        EnsureConnected();
+        return await Task.Run(() =>
+        {
+            dynamic user = FindUser(loginName)
+                ?? throw new KeyNotFoundException($"User '{loginName}' not found.");
+            var enabled = new List<string>();
+            try
+            {
+                dynamic privileges = user.Privileges;
+                CollectEnabledPrivileges((object)privileges, "", enabled);
+            }
+            catch { }
+            return enabled;
+        });
+    }
+
+    public async Task<bool> CheckUserPrivilegeAsync(string loginName, string privilege)
+    {
+        EnsureConnected();
+        return await Task.Run(() =>
+        {
+            dynamic user = FindUser(loginName)
+                ?? throw new KeyNotFoundException($"User '{loginName}' not found.");
+            try { return (bool)user.HasPrivilege(privilege); }
+            catch { return false; }
+        });
+    }
+
+    private UserInfo MapUser(dynamic user)
+    {
+        var info = new UserInfo
+        {
+            LoginName = TryGetString(user, "LoginName"),
+            FullName  = TryGetString(user, "FullName")
+        };
+        // User-group entries use the "%GroupName" login-name convention.
+        info.IsGroup = info.LoginName.StartsWith("%");
+        return info;
+    }
+
+    private dynamic? FindUser(string loginName)
+    {
+        try { return _engine!.GetUser(loginName); }
+        catch { }
+        // Fallback: linear scan of the user list (offset-based, arrays have no named subprops).
+        dynamic usersFile = _engine!.UsersFile;
+        dynamic userList  = usersFile.UserList;
+        int count = CountArrayElements(userList);
+        for (int i = 0; i < count; i++)
+        {
+            dynamic user = userList.GetPropertyObjectByOffset((object)i, (object)0);
+            if (string.Equals(TryGetString(user, "LoginName"), loginName,
+                    StringComparison.OrdinalIgnoreCase))
+                return user;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Returns the number of elements in a one-dimensional array PropertyObject.
+    /// Array elements are indexed, not named, so GetNumSubProperties returns 0 — we
+    /// enumerate by offset until GetPropertyObjectByOffset fails.
+    /// </summary>
+    private static int CountArrayElements(dynamic arr)
+    {
+        int c = 0;
+        while (true)
+        {
+            try
+            {
+                var e = arr.GetPropertyObjectByOffset((object)c, (object)0);
+                if (e == null) break;
+                c++;
+            }
+            catch { break; }
+        }
+        return c;
+    }
+
+    private void CollectEnabledPrivileges(object node, string prefix, List<string> sink)
+    {
+        int count;
+        try
+        {
+            count = Convert.ToInt32(node.GetType().InvokeMember(
+                "GetNumSubProperties", _comFlags, null, node, new object[] { "" }));
+        }
+        catch { return; }
+
+        for (int i = 0; i < count; i++)
+        {
+            try
+            {
+                string name = (string)node.GetType().InvokeMember(
+                    "GetNthSubPropertyName", _comFlags, null, node, new object[] { "", i, 0 });
+                string path = string.IsNullOrEmpty(prefix) ? name : $"{prefix}.{name}";
+                dynamic child = node.GetType().InvokeMember(
+                    "GetNthSubProperty", _comFlags, null, node, new object[] { "", i, 0 });
+                var childObj = (object)child;
+
+                bool isBoolLeaf = false;
+                try
+                {
+                    bool val = (bool)childObj.GetType().InvokeMember(
+                        "GetValBoolean", _comFlags, null, childObj, new object[] { "", 0 });
+                    isBoolLeaf = true;
+                    if (val) sink.Add(path);
+                }
+                catch { }
+
+                if (!isBoolLeaf)
+                    CollectEnabledPrivileges(childObj, path, sink);
+            }
+            catch { }
+        }
+    }
+
+    private void PersistUsersFile(dynamic usersFile)
+    {
+        try
+        {
+            dynamic pof = usersFile.AsPropertyObjectFile();
+            pof.WriteFile((object)NiWriteFileFormat.WriteFileFormat_Current);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not persist users file to disk");
+        }
+    }
+
+    // ── Native Find / Replace ─────────────────────────────────────────────────
+
+    public async Task<FindReplaceResult> FindInFileAsync(string filePath, string pattern,
+        bool matchCase = false, bool wholeWord = false, bool regex = false,
+        string elements = "all", int maxResults = 500)
+        => await RunFindReplaceAsync(filePath, pattern, null, matchCase, wholeWord,
+            regex, elements, false, maxResults);
+
+    public async Task<FindReplaceResult> ReplaceInFileAsync(string filePath, string pattern,
+        string replacement, bool matchCase = false, bool wholeWord = false,
+        bool regex = false, string elements = "all", bool save = true)
+        => await RunFindReplaceAsync(filePath, pattern, replacement, matchCase, wholeWord,
+            regex, elements, save, int.MaxValue);
+
+    private async Task<FindReplaceResult> RunFindReplaceAsync(string filePath,
+        string pattern, string? replacement, bool matchCase, bool wholeWord,
+        bool regex, string elements, bool save, int maxResults)
+    {
+        EnsureConnected();
+        return await Task.Run(() =>
+        {
+            var sf  = GetOrLoadSeqFile(filePath);
+            dynamic root = sf.AsPropertyObject();
+
+            int options = 0;
+            if (matchCase) options |= (int)NiSearchOptions.SearchOptions_MatchCase;
+            if (wholeWord) options |= (int)NiSearchOptions.SearchOptions_WholeWordOnly;
+            if (regex)     options |= (int)NiSearchOptions.SearchOptions_RegExpr;
+
+            int elementMask = elements.ToLowerInvariant() switch
+            {
+                "name"     => (int)NiSearchElements.SearchElement_Name,
+                "comment"  => (int)NiSearchElements.SearchElement_Comment,
+                "value"    => (int)NiSearchElements.SearchElement_AllValues,
+                "values"   => (int)NiSearchElements.SearchElement_AllValues,
+                _          => (int)NiSearchElements.SearchElement_All
+            };
+
+            var empty = new string[0];
+            // PropertyObject.Search(lookupString, searchString, searchOptions,
+            //   filterOptions, elementsToSearch, limitToAdapters, limitToNamedProps,
+            //   limitToPropsOfNamedTypes, subpropLookupStringsToExclude)
+            dynamic search = root.Search("", pattern, (object)options,
+                (object)(int)NiSearchFilter.SearchFilterOptions_All, (object)elementMask,
+                empty, empty, empty, empty);
+
+            // Wait for the asynchronous search to finish.
+            try { search.IsComplete(true, false); } catch { }
+
+            var res = new FindReplaceResult
+            {
+                Pattern     = pattern,
+                Replacement = replacement
+            };
+            try { res.StatusMessage = (string)search.StatusMessage; } catch { }
+
+            int numMatches = 0;
+            try { numMatches = Convert.ToInt32((object)search.NumMatches); } catch { }
+            res.TotalMatches = numMatches;
+
+            for (int i = 0; i < numMatches && i < maxResults; i++)
+            {
+                try
+                {
+                    dynamic m = search.GetMatch((object)i);
+                    var fm = new FindMatch
+                    {
+                        FilePath     = TryGetString(m, "FilePath"),
+                        MatchedText  = TryGetString(m, "MatchedText"),
+                        ValueType    = TryGetString(m, "PropertyValueType")
+                    };
+                    string editPath = "";
+                    try { editPath = (string)m.GetPropertyPath(false); } catch { }
+                    try { fm.PropertyPath = (string)m.GetPropertyPath(true); } catch { fm.PropertyPath = editPath; }
+
+                    if (replacement != null && !string.IsNullOrEmpty(editPath))
+                    {
+                        // SearchMatch.UpdateForReplace does NOT edit the file — it only keeps
+                        // neighbouring match offsets consistent. We must edit the property's
+                        // string value ourselves, then notify the match.
+                        if (TryReplacePropertyValue(root, editPath, pattern, replacement,
+                                matchCase, wholeWord, regex))
+                        {
+                            fm.Replaced = true;
+                            res.ReplacedCount++;
+                            try { m.UpdateForReplace(replacement); } catch { }
+                        }
+                    }
+                    res.Matches.Add(fm);
+                }
+                catch { }
+            }
+
+            if (replacement != null && res.ReplacedCount > 0 && save)
+            {
+                sf.Save(filePath);
+                _loadedSequenceFiles[filePath] = sf;
+            }
+
+            return res;
+        });
+    }
+
+    /// <summary>
+    /// Reads the string value of the property at <paramref name="path"/> (relative to
+    /// <paramref name="root"/>), replaces occurrences of <paramref name="pattern"/> with
+    /// <paramref name="replacement"/>, and writes it back. Returns true if the value changed.
+    /// </summary>
+    private bool TryReplacePropertyValue(dynamic root, string path, string pattern,
+        string replacement, bool matchCase, bool wholeWord, bool regex)
+    {
+        string current;
+        try { current = (string)root.GetValString(path, (object)0); }
+        catch { return false; }   // property has no string value (e.g. a name/comment match handled below)
+
+        string updated = ReplaceString(current, pattern, replacement, matchCase, wholeWord, regex);
+        if (updated == current) return false;
+
+        try { root.SetValString(path, (object)0, updated); return true; }
+        catch { return false; }
+    }
+
+    private static string ReplaceString(string input, string pattern, string replacement,
+        bool matchCase, bool wholeWord, bool regex)
+    {
+        if (string.IsNullOrEmpty(input)) return input;
+
+        var options = matchCase
+            ? System.Text.RegularExpressions.RegexOptions.None
+            : System.Text.RegularExpressions.RegexOptions.IgnoreCase;
+
+        string corePattern = regex ? pattern : System.Text.RegularExpressions.Regex.Escape(pattern);
+        if (wholeWord) corePattern = $@"\b(?:{corePattern})\b";
+
+        try
+        {
+            return System.Text.RegularExpressions.Regex.Replace(input, corePattern, replacement, options);
+        }
+        catch
+        {
+            // Fall back to a plain (case-sensitive) replace if the regex is invalid.
+            return input.Replace(pattern, replacement);
+        }
+    }
+
+    // ── Typed Adapter / Code-Module Configuration ─────────────────────────────
+
+    public Task<ModuleConfigResult> ConfigureDotNetModuleAsync(string filePath,
+        string sequenceName, string stepGroup, string stepName, string assemblyPath,
+        string className, string methodName, bool save = true)
+        => ConfigureModuleAsync(filePath, sequenceName, stepGroup, stepName, "DotNet", save,
+            mod =>
+            {
+                var applied = new Dictionary<string, object>();
+                try { mod.SetAssembly((object)assemblyPath, (object)true); }
+                catch { TrySetModuleProp(mod, "Assembly", assemblyPath); }
+                applied["assemblyPath"] = assemblyPath;
+                if (TrySetModuleProp(mod, "ClassName", className)) applied["className"] = className;
+                // The member to invoke — property name differs across builds.
+                if (TrySetModuleProp(mod, "NameOfMethodToCreate", methodName) ||
+                    TrySetModuleProp(mod, "MemberName", methodName))
+                    applied["methodName"] = methodName;
+                return applied;
+            });
+
+    public Task<ModuleConfigResult> ConfigureDllModuleAsync(string filePath,
+        string sequenceName, string stepGroup, string stepName, string dllPath,
+        string functionName, bool save = true)
+        => ConfigureModuleAsync(filePath, sequenceName, stepGroup, stepName, "CVI", save,
+            mod =>
+            {
+                var applied = new Dictionary<string, object>();
+                // The path/function live on the CommonCModule base interface, which is
+                // not the default dispatch interface of a CVI step's Module.
+                dynamic target = mod;
+                try { target = mod.AsCommonCModule(); } catch { }
+                if (TrySetModuleProp(target, "ModulePath", dllPath) ||
+                    TrySetModuleProp(mod, "ModulePath", dllPath))
+                    applied["dllPath"] = dllPath;
+                if (TrySetModuleProp(target, "FunctionName", functionName) ||
+                    TrySetModuleProp(mod, "FunctionName", functionName))
+                    applied["functionName"] = functionName;
+                return applied;
+            });
+
+    public Task<ModuleConfigResult> ConfigureLabViewModuleAsync(string filePath,
+        string sequenceName, string stepGroup, string stepName, string viPath,
+        bool save = true)
+        => ConfigureModuleAsync(filePath, sequenceName, stepGroup, stepName, "LabVIEW", save,
+            mod =>
+            {
+                var applied = new Dictionary<string, object>();
+                if (TrySetModuleProp(mod, "VIPath", viPath) ||
+                    TrySetModuleProp(mod, "ModulePath", viPath))
+                    applied["viPath"] = viPath;
+                return applied;
+            });
+
+    public Task<ModuleConfigResult> ConfigurePythonModuleAsync(string filePath,
+        string sequenceName, string stepGroup, string stepName, string modulePath,
+        string functionName, bool save = true)
+        => ConfigureModuleAsync(filePath, sequenceName, stepGroup, stepName, "Python", save,
+            mod =>
+            {
+                var applied = new Dictionary<string, object>();
+                if (TrySetModuleProp(mod, "ModulePath", modulePath))
+                    applied["modulePath"] = modulePath;
+                if (TrySetModuleProp(mod, "FunctionOrAttributeName", functionName) ||
+                    TrySetModuleProp(mod, "FunctionName", functionName))
+                    applied["functionName"] = functionName;
+                return applied;
+            });
+
+    public Task<ModuleConfigResult> ConfigureSequenceCallModuleAsync(string filePath,
+        string sequenceName, string stepGroup, string stepName,
+        string targetSequenceName, string targetSequenceFile = "", bool save = true)
+        => ConfigureModuleAsync(filePath, sequenceName, stepGroup, stepName, "SequenceCall", save,
+            mod =>
+            {
+                var applied = new Dictionary<string, object>();
+                mod.SequenceName   = targetSequenceName;
+                mod.UseCurrentFile = string.IsNullOrEmpty(targetSequenceFile);
+                applied["targetSequenceName"] = targetSequenceName;
+                if (!string.IsNullOrEmpty(targetSequenceFile))
+                {
+                    string rel = MakeRelativePath(
+                        Path.GetDirectoryName(filePath) ?? "", targetSequenceFile);
+                    mod.SequenceFilePath = rel;
+                    applied["targetSequenceFile"] = rel;
+                }
+                return applied;
+            });
+
+    /// <summary>
+    /// Shared driver for the typed adapter-configuration tools: resolves the step,
+    /// switches its adapter (when needed), applies the adapter-specific settings via
+    /// the supplied callback, and saves the file.
+    /// </summary>
+    private async Task<ModuleConfigResult> ConfigureModuleAsync(string filePath,
+        string sequenceName, string stepGroup, string stepName, string adapterKey,
+        bool save, Func<dynamic, Dictionary<string, object>> apply)
+    {
+        EnsureConnected();
+        return await Task.Run(() =>
+        {
+            var sf    = GetOrLoadSeqFile(filePath);
+            var seq   = sf.GetSequenceByName(sequenceName);
+            int sgVal = ParseStepGroup(stepGroup);
+            var step  = seq.GetStepByName(stepName, (object)sgVal);
+
+            // Ensure the step uses the requested adapter before configuring its module.
+            string resolvedKey = ResolveAdapterKeyName(adapterKey);
+            string currentKey  = TryGetString(step, "AdapterName");
+            if (!string.Equals(currentKey, resolvedKey, StringComparison.OrdinalIgnoreCase))
+            {
+                try { step.ChangeAdapter((object)resolvedKey); } catch { }
+            }
+
+            dynamic mod = step.Module;
+            var applied = apply(mod);
+
+            if (save)
+            {
+                sf.Save(filePath);
+                _loadedSequenceFiles[filePath] = sf;
+            }
+
+            return new ModuleConfigResult
+            {
+                StepName       = stepName,
+                Adapter        = resolvedKey,
+                AppliedSettings = applied
+            };
+        });
+    }
+
+    private static bool TrySetModuleProp(dynamic mod, string propName, object value)
+    {
+        try
+        {
+            ((object)mod).GetType().InvokeMember(propName,
+                System.Reflection.BindingFlags.SetProperty,
+                null, mod, new[] { value });
+            return true;
+        }
+        catch { return false; }
+    }
+
+    // ── Sequence Analyzer (detailed) ──────────────────────────────────────────
+
+    public async Task<AnalyzerResult> RunSequenceAnalyzerDetailedAsync(string filePath,
+        string minSeverity = "Information")
+    {
+        var messages = await RunSequenceAnalyzerAsync(filePath);
+
+        int Rank(string s) => s switch
+        {
+            "Error" => 3, "Warning" => 2, "Information" => 1, _ => 0
+        };
+        int threshold = Rank(minSeverity);
+        var filtered = messages.Where(m => Rank(m.Severity) >= threshold).ToList();
+
+        return new AnalyzerResult
+        {
+            FilePath         = filePath,
+            TotalMessages    = filtered.Count,
+            ErrorCount       = filtered.Count(m => m.Severity == "Error"),
+            WarningCount     = filtered.Count(m => m.Severity == "Warning"),
+            InformationCount = filtered.Count(m => m.Severity == "Information"),
+            Messages         = filtered
+        };
     }
 
     // ── Private Helpers (new) ─────────────────────────────────────────────────

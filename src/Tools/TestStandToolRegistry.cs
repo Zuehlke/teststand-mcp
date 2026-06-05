@@ -1473,6 +1473,170 @@ public class TestStandToolRegistry
             s => s
                 .AddRequired("execution_id", "string", "Execution ID"),
             GetExecutionTimeAsync);
+
+        // ── User & Privilege Management ────────────────────────────────────────
+
+        Register("get_users",
+            "List all users defined in the TestStand users file (login name, full name).",
+            s => { },
+            GetUsersAsync);
+
+        Register("get_current_user",
+            "Get the currently logged-in TestStand user.",
+            s => { },
+            GetCurrentUserAsync);
+
+        Register("user_name_exists",
+            "Check whether a user with the given login name exists.",
+            s => s.AddRequired("login_name", "string", "Login name to check"),
+            UserNameExistsAsync);
+
+        Register("create_user",
+            "Create a new TestStand user and add it to the users file.",
+            s => s
+                .AddRequired("login_name", "string", "Unique login name for the new user")
+                .AddOptional("full_name", "string", "Full display name", "")
+                .AddOptional("password", "string", "Initial password (stored scrambled)", "")
+                .AddOptional("persist", "boolean",
+                    "Write the users file to disk (default true). Set false to only modify in memory.", true),
+            CreateUserAsync);
+
+        Register("delete_user",
+            "Delete a user from the TestStand users file by login name.",
+            s => s
+                .AddRequired("login_name", "string", "Login name of the user to delete")
+                .AddOptional("persist", "boolean", "Write the users file to disk (default true)", true),
+            DeleteUserAsync);
+
+        Register("set_user_password",
+            "Set (reset) the password of an existing user.",
+            s => s
+                .AddRequired("login_name", "string", "Login name of the user")
+                .AddRequired("password", "string", "New password (stored scrambled)")
+                .AddOptional("persist", "boolean", "Write the users file to disk (default true)", true),
+            SetUserPasswordAsync);
+
+        Register("get_user_privileges",
+            "List the enabled privilege paths for a user.",
+            s => s.AddRequired("login_name", "string", "Login name of the user"),
+            GetUserPrivilegesAsync);
+
+        Register("check_user_privilege",
+            "Check whether a user has a specific privilege (e.g. 'OperatorInterface.Run').",
+            s => s
+                .AddRequired("login_name", "string", "Login name of the user")
+                .AddRequired("privilege", "string", "Privilege lookup string to test"),
+            CheckUserPrivilegeAsync);
+
+        // ── Native Find / Replace ──────────────────────────────────────────────
+
+        Register("find_in_file",
+            "Search a sequence file using the native TestStand search engine. Returns the " +
+            "matches with their full property paths. Supports regex, whole-word and case options.",
+            s => s
+                .AddRequired("file_path", "string", "Path to the sequence file")
+                .AddRequired("pattern", "string", "Text or regular expression to search for")
+                .AddOptional("match_case", "boolean", "Case-sensitive search (default false)", false)
+                .AddOptional("whole_word", "boolean", "Match whole words only (default false)", false)
+                .AddOptional("regex", "boolean", "Treat pattern as a regular expression (default false)", false)
+                .AddOptional("elements", "string",
+                    "What to search: 'all' (default), 'name', 'comment', or 'values'", "all",
+                    new[] { "all", "name", "comment", "values" })
+                .AddOptional("max_results", "integer", "Maximum matches to return (default 500)", 500),
+            FindInFileAsync);
+
+        Register("replace_in_file",
+            "Find and replace text across a sequence file using the native TestStand search " +
+            "engine, then save the file. Returns the number of replacements made.",
+            s => s
+                .AddRequired("file_path", "string", "Path to the sequence file")
+                .AddRequired("pattern", "string", "Text or regular expression to search for")
+                .AddRequired("replacement", "string", "Replacement text")
+                .AddOptional("match_case", "boolean", "Case-sensitive search (default false)", false)
+                .AddOptional("whole_word", "boolean", "Match whole words only (default false)", false)
+                .AddOptional("regex", "boolean", "Treat pattern as a regular expression (default false)", false)
+                .AddOptional("elements", "string",
+                    "What to search: 'all' (default), 'name', 'comment', or 'values'", "all",
+                    new[] { "all", "name", "comment", "values" })
+                .AddOptional("save", "boolean", "Save the file after replacing (default true)", true),
+            ReplaceInFileAsync);
+
+        // ── Typed Adapter / Code-Module Configuration ──────────────────────────
+
+        Register("configure_dotnet_module",
+            "Configure a step's .NET code module: assembly, class and method. " +
+            "Switches the step to the .NET adapter if needed.",
+            s => s
+                .AddRequired("file_path", "string", "Path to the sequence file")
+                .AddRequired("sequence_name", "string", "Name of the sequence")
+                .AddRequired("step_group", "string", "Step group: 'Setup', 'Main', or 'Cleanup'")
+                .AddRequired("step_name", "string", "Name of the step")
+                .AddRequired("assembly_path", "string", "Path to the .NET assembly (DLL)")
+                .AddRequired("class_name", "string", "Fully-qualified class name")
+                .AddRequired("method_name", "string", "Name of the method to call")
+                .AddOptional("save", "boolean", "Save the file (default true)", true),
+            ConfigureDotNetModuleAsync);
+
+        Register("configure_dll_module",
+            "Configure a step's C/DLL code module: DLL path and function name (C/CVI adapter).",
+            s => s
+                .AddRequired("file_path", "string", "Path to the sequence file")
+                .AddRequired("sequence_name", "string", "Name of the sequence")
+                .AddRequired("step_group", "string", "Step group: 'Setup', 'Main', or 'Cleanup'")
+                .AddRequired("step_name", "string", "Name of the step")
+                .AddRequired("dll_path", "string", "Path to the DLL")
+                .AddRequired("function_name", "string", "Exported function name to call")
+                .AddOptional("save", "boolean", "Save the file (default true)", true),
+            ConfigureDllModuleAsync);
+
+        Register("configure_labview_module",
+            "Configure a step's LabVIEW code module: the VI path (LabVIEW adapter).",
+            s => s
+                .AddRequired("file_path", "string", "Path to the sequence file")
+                .AddRequired("sequence_name", "string", "Name of the sequence")
+                .AddRequired("step_group", "string", "Step group: 'Setup', 'Main', or 'Cleanup'")
+                .AddRequired("step_name", "string", "Name of the step")
+                .AddRequired("vi_path", "string", "Path to the VI")
+                .AddOptional("save", "boolean", "Save the file (default true)", true),
+            ConfigureLabViewModuleAsync);
+
+        Register("configure_python_module",
+            "Configure a step's Python code module: module path and function name (Python adapter).",
+            s => s
+                .AddRequired("file_path", "string", "Path to the sequence file")
+                .AddRequired("sequence_name", "string", "Name of the sequence")
+                .AddRequired("step_group", "string", "Step group: 'Setup', 'Main', or 'Cleanup'")
+                .AddRequired("step_name", "string", "Name of the step")
+                .AddRequired("module_path", "string", "Path to the Python module (.py)")
+                .AddRequired("function_name", "string", "Name of the function to call")
+                .AddOptional("save", "boolean", "Save the file (default true)", true),
+            ConfigurePythonModuleAsync);
+
+        Register("configure_sequence_call_module",
+            "Configure a step's SequenceCall module: target sequence and (optional) target file. " +
+            "Prefer this typed tool over set_sequence_call_target for new code.",
+            s => s
+                .AddRequired("file_path", "string", "Path to the sequence file")
+                .AddRequired("sequence_name", "string", "Name of the sequence")
+                .AddRequired("step_group", "string", "Step group: 'Setup', 'Main', or 'Cleanup'")
+                .AddRequired("step_name", "string", "Name of the step")
+                .AddRequired("target_sequence_name", "string", "Name of the target sequence")
+                .AddOptional("target_sequence_file", "string",
+                    "Target sequence file (empty = current file). Stored as a relative path.", "")
+                .AddOptional("save", "boolean", "Save the file (default true)", true),
+            ConfigureSequenceCallModuleAsync);
+
+        // ── Sequence Analyzer (detailed) ───────────────────────────────────────
+
+        Register("analyze_sequence_file",
+            "Run the TestStand Sequence Analyzer on a file and return typed messages with " +
+            "severity counts. Filter by minimum severity.",
+            s => s
+                .AddRequired("file_path", "string", "Path to the sequence file to analyze")
+                .AddOptional("min_severity", "string",
+                    "Minimum severity to include: 'Information' (default), 'Warning', or 'Error'",
+                    "Information", new[] { "Information", "Warning", "Error" }),
+            AnalyzeSequenceFileAsync);
     }
 
     private void Register(string name, string description,
@@ -2729,6 +2893,173 @@ public class TestStandToolRegistry
         var searchIn      = args!.Value.GetStringOrDefault("search_in", "all");
         var caseSensitive = args!.Value.GetBoolOrDefault("case_sensitive", false);
         var result        = await _ts.SearchStepsAsync(filePath, pattern, searchIn, caseSensitive);
+        return OkJson(result);
+    }
+
+    // ── User & Privilege Handlers ─────────────────────────────────────────────
+
+    private async Task<CallToolResult> GetUsersAsync(JsonElement? _)
+        => OkJson(await _ts.GetUsersAsync());
+
+    private async Task<CallToolResult> GetCurrentUserAsync(JsonElement? _)
+    {
+        var user = await _ts.GetCurrentUserAsync();
+        return user == null ? Ok("No user is currently logged in.") : OkJson(user);
+    }
+
+    private async Task<CallToolResult> UserNameExistsAsync(JsonElement? args)
+    {
+        var login  = args!.Value.GetRequiredString("login_name");
+        var exists = await _ts.UserNameExistsAsync(login);
+        return OkJson(new { loginName = login, exists });
+    }
+
+    private async Task<CallToolResult> CreateUserAsync(JsonElement? args)
+    {
+        var login    = args!.Value.GetRequiredString("login_name");
+        var fullName = args!.Value.GetStringOrDefault("full_name", "");
+        var password = args!.Value.GetStringOrDefault("password", "");
+        var persist  = args!.Value.GetBoolOrDefault("persist", true);
+        await _ts.CreateUserAsync(login, fullName, password, persist);
+        return Ok($"User '{login}' created.");
+    }
+
+    private async Task<CallToolResult> DeleteUserAsync(JsonElement? args)
+    {
+        var login   = args!.Value.GetRequiredString("login_name");
+        var persist = args!.Value.GetBoolOrDefault("persist", true);
+        await _ts.DeleteUserAsync(login, persist);
+        return Ok($"User '{login}' deleted.");
+    }
+
+    private async Task<CallToolResult> SetUserPasswordAsync(JsonElement? args)
+    {
+        var login    = args!.Value.GetRequiredString("login_name");
+        var password = args!.Value.GetRequiredString("password");
+        var persist  = args!.Value.GetBoolOrDefault("persist", true);
+        await _ts.SetUserPasswordAsync(login, password, persist);
+        return Ok($"Password updated for user '{login}'.");
+    }
+
+    private async Task<CallToolResult> GetUserPrivilegesAsync(JsonElement? args)
+    {
+        var login = args!.Value.GetRequiredString("login_name");
+        return OkJson(new { loginName = login, privileges = await _ts.GetUserPrivilegesAsync(login) });
+    }
+
+    private async Task<CallToolResult> CheckUserPrivilegeAsync(JsonElement? args)
+    {
+        var login     = args!.Value.GetRequiredString("login_name");
+        var privilege = args!.Value.GetRequiredString("privilege");
+        var has       = await _ts.CheckUserPrivilegeAsync(login, privilege);
+        return OkJson(new { loginName = login, privilege, hasPrivilege = has });
+    }
+
+    // ── Native Find / Replace Handlers ────────────────────────────────────────
+
+    private async Task<CallToolResult> FindInFileAsync(JsonElement? args)
+    {
+        var filePath  = args!.Value.GetRequiredString("file_path");
+        var pattern   = args!.Value.GetRequiredString("pattern");
+        var matchCase = args!.Value.GetBoolOrDefault("match_case", false);
+        var wholeWord = args!.Value.GetBoolOrDefault("whole_word", false);
+        var regex     = args!.Value.GetBoolOrDefault("regex", false);
+        var elements  = args!.Value.GetStringOrDefault("elements", "all");
+        var maxRes    = args!.Value.GetIntOrDefault("max_results", 500);
+        var result    = await _ts.FindInFileAsync(filePath, pattern, matchCase, wholeWord,
+            regex, elements, maxRes);
+        return OkJson(result);
+    }
+
+    private async Task<CallToolResult> ReplaceInFileAsync(JsonElement? args)
+    {
+        var filePath    = args!.Value.GetRequiredString("file_path");
+        var pattern     = args!.Value.GetRequiredString("pattern");
+        var replacement = args!.Value.GetRequiredString("replacement");
+        var matchCase   = args!.Value.GetBoolOrDefault("match_case", false);
+        var wholeWord   = args!.Value.GetBoolOrDefault("whole_word", false);
+        var regex       = args!.Value.GetBoolOrDefault("regex", false);
+        var elements    = args!.Value.GetStringOrDefault("elements", "all");
+        var save        = args!.Value.GetBoolOrDefault("save", true);
+        var result      = await _ts.ReplaceInFileAsync(filePath, pattern, replacement,
+            matchCase, wholeWord, regex, elements, save);
+        return OkJson(result);
+    }
+
+    // ── Adapter / Code-Module Configuration Handlers ──────────────────────────
+
+    private async Task<CallToolResult> ConfigureDotNetModuleAsync(JsonElement? args)
+    {
+        var result = await _ts.ConfigureDotNetModuleAsync(
+            args!.Value.GetRequiredString("file_path"),
+            args!.Value.GetRequiredString("sequence_name"),
+            args!.Value.GetRequiredString("step_group"),
+            args!.Value.GetRequiredString("step_name"),
+            args!.Value.GetRequiredString("assembly_path"),
+            args!.Value.GetRequiredString("class_name"),
+            args!.Value.GetRequiredString("method_name"),
+            args!.Value.GetBoolOrDefault("save", true));
+        return OkJson(result);
+    }
+
+    private async Task<CallToolResult> ConfigureDllModuleAsync(JsonElement? args)
+    {
+        var result = await _ts.ConfigureDllModuleAsync(
+            args!.Value.GetRequiredString("file_path"),
+            args!.Value.GetRequiredString("sequence_name"),
+            args!.Value.GetRequiredString("step_group"),
+            args!.Value.GetRequiredString("step_name"),
+            args!.Value.GetRequiredString("dll_path"),
+            args!.Value.GetRequiredString("function_name"),
+            args!.Value.GetBoolOrDefault("save", true));
+        return OkJson(result);
+    }
+
+    private async Task<CallToolResult> ConfigureLabViewModuleAsync(JsonElement? args)
+    {
+        var result = await _ts.ConfigureLabViewModuleAsync(
+            args!.Value.GetRequiredString("file_path"),
+            args!.Value.GetRequiredString("sequence_name"),
+            args!.Value.GetRequiredString("step_group"),
+            args!.Value.GetRequiredString("step_name"),
+            args!.Value.GetRequiredString("vi_path"),
+            args!.Value.GetBoolOrDefault("save", true));
+        return OkJson(result);
+    }
+
+    private async Task<CallToolResult> ConfigurePythonModuleAsync(JsonElement? args)
+    {
+        var result = await _ts.ConfigurePythonModuleAsync(
+            args!.Value.GetRequiredString("file_path"),
+            args!.Value.GetRequiredString("sequence_name"),
+            args!.Value.GetRequiredString("step_group"),
+            args!.Value.GetRequiredString("step_name"),
+            args!.Value.GetRequiredString("module_path"),
+            args!.Value.GetRequiredString("function_name"),
+            args!.Value.GetBoolOrDefault("save", true));
+        return OkJson(result);
+    }
+
+    private async Task<CallToolResult> ConfigureSequenceCallModuleAsync(JsonElement? args)
+    {
+        var result = await _ts.ConfigureSequenceCallModuleAsync(
+            args!.Value.GetRequiredString("file_path"),
+            args!.Value.GetRequiredString("sequence_name"),
+            args!.Value.GetRequiredString("step_group"),
+            args!.Value.GetRequiredString("step_name"),
+            args!.Value.GetRequiredString("target_sequence_name"),
+            args!.Value.GetStringOrDefault("target_sequence_file", ""),
+            args!.Value.GetBoolOrDefault("save", true));
+        return OkJson(result);
+    }
+
+    // ── Sequence Analyzer Handler ─────────────────────────────────────────────
+
+    private async Task<CallToolResult> AnalyzeSequenceFileAsync(JsonElement? args)
+    {
+        var filePath    = args!.Value.GetRequiredString("file_path");
+        var minSeverity = args!.Value.GetStringOrDefault("min_severity", "Information");
+        var result      = await _ts.RunSequenceAnalyzerDetailedAsync(filePath, minSeverity);
         return OkJson(result);
     }
 

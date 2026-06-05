@@ -282,6 +282,30 @@ public class AnalyzerMessage
     public string Severity { get; set; } = "";
     public string RuleId { get; set; } = "";
     public string Text { get; set; } = "";
+    public string Location { get; set; } = "";
+    public string SequenceName { get; set; } = "";
+    public string StepName { get; set; } = "";
+}
+
+/// <summary>Aggregated result of a sequence-analyzer run, incl. severity counts.</summary>
+public class AnalyzerResult
+{
+    public string FilePath { get; set; } = "";
+    public int TotalMessages { get; set; }
+    public int ErrorCount { get; set; }
+    public int WarningCount { get; set; }
+    public int InformationCount { get; set; }
+    public List<AnalyzerMessage> Messages { get; set; } = new();
+}
+
+// ── User / Privilege Models ──────────────────────────────────────────────────
+
+public class UserInfo
+{
+    public string LoginName { get; set; } = "";
+    public string FullName { get; set; } = "";
+    public bool IsGroup { get; set; }
+    public List<string> GroupMemberships { get; set; } = new();
 }
 
 // ── Engine / Station Models ──────────────────────────────────────────────────
@@ -416,6 +440,39 @@ public class SearchResult
     public string SearchPattern { get; set; } = "";
     public string SearchIn { get; set; } = "";
     public List<SearchMatch> Matches { get; set; } = new();
+}
+
+// ── Native Find/Replace Models (PropertyObject.Search) ───────────────────────
+
+/// <summary>A single match returned by the native TestStand search engine.</summary>
+public class FindMatch
+{
+    public string FilePath { get; set; } = "";
+    public string PropertyPath { get; set; } = "";
+    public string MatchedText { get; set; } = "";
+    public string ValueType { get; set; } = "";
+    public bool Replaced { get; set; }
+}
+
+/// <summary>Result of a native find or find/replace operation across a file.</summary>
+public class FindReplaceResult
+{
+    public string Pattern { get; set; } = "";
+    public string? Replacement { get; set; }
+    public int TotalMatches { get; set; }
+    public int ReplacedCount { get; set; }
+    public string StatusMessage { get; set; } = "";
+    public List<FindMatch> Matches { get; set; } = new();
+}
+
+// ── Adapter Module Configuration Models ──────────────────────────────────────
+
+/// <summary>Result of configuring a step's code module via a typed adapter tool.</summary>
+public class ModuleConfigResult
+{
+    public string StepName { get; set; } = "";
+    public string Adapter { get; set; } = "";
+    public Dictionary<string, object> AppliedSettings { get; set; } = new();
 }
 
 // ── Thread Models ────────────────────────────────────────────────────────────
