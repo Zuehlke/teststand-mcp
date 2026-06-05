@@ -19,6 +19,8 @@ internal class Program
     [DllImport("kernel32.dll")] private static extern bool AllocConsole();
     [DllImport("kernel32.dll")] private static extern bool SetConsoleTitle(string title);
     [DllImport("kernel32.dll")] private static extern bool SetConsoleOutputCP(uint cp);
+    [DllImport("kernel32.dll")] private static extern bool TerminateProcess(IntPtr hProcess, uint uExitCode);
+    [DllImport("kernel32.dll")] private static extern IntPtr GetCurrentProcess();
     [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
     private static extern IntPtr CreateFile(string name, uint access, uint share,
         IntPtr security, uint creation, uint flags, IntPtr template);
@@ -120,27 +122,39 @@ internal class Program
 
         var server = sp.GetRequiredService<McpServer>();
 
+        int exitCode;
         try
         {
             await server.RunAsync(cts.Token);
-            return 0;
+            exitCode = 0;
         }
         catch (OperationCanceledException)
         {
             logger.LogInformation("Server shut down cleanly.");
-            return 0;
+            exitCode = 0;
         }
         catch (Exception ex)
         {
             logger.LogCritical(ex, "Fatal error");
-            return 1;
+            exitCode = 1;
         }
         finally
         {
-            // Ensure TestStand engine is released
+            // Ensure TestStand engine is released (ShutDown + suppress the last engine's RCW
+            // finalization — see DisconnectAsync).
             var ts = sp.GetService<ITestStandService>();
             ts?.Dispose();
         }
+
+        // Hard-terminate to skip CLR shutdown finalization. After the engine has been ShutDown,
+        // the lingering TestStand / NI License-Manager (NILM) COM RCWs otherwise crash the .NET 8
+        // runtime during finalization at process exit (fast-fail 0xC0000409) and can raise a
+        // Windows Error Reporting dialog. TerminateProcess exits immediately with our exit code,
+        // before the runtime touches those RCWs. (Mirrors the integration-test ProcessExit guard.)
+        Console.Out.Flush();
+        Console.Error.Flush();
+        TerminateProcess(GetCurrentProcess(), (uint)exitCode);
+        return exitCode; // not reached
     }
 
     private static LogLevel ParseLogLevel(string level) => level.ToLowerInvariant() switch

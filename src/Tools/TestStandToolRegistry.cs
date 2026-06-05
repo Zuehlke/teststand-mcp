@@ -1543,11 +1543,16 @@ public class TestStandToolRegistry
             UserNameExistsAsync);
 
         Register("create_user",
-            "Create a new TestStand user and add it to the users file.",
+            "Create a new TestStand user and add it to the users file. Pass 'profile' to grant a "
+            + "privilege level: the new user is seeded from the named user profile (e.g. 'Administrator'). "
+            + "Use get_user_profiles to list valid profile names. Omit/empty = minimal default privileges.",
             s => s
                 .AddRequired("login_name", "string", "Unique login name for the new user")
                 .AddOptional("full_name", "string", "Full display name", "")
                 .AddOptional("password", "string", "Initial password (stored scrambled)", "")
+                .AddOptional("profile", "string",
+                    "User profile to seed privileges from (e.g. 'Administrator', 'Developer', "
+                    + "'Technician', 'Operator'). Empty = minimal default privileges.", "")
                 .AddOptional("persist", "boolean",
                     "Write the users file to disk (default true). Set false to only modify in memory.", true),
             CreateUserAsync);
@@ -1578,6 +1583,13 @@ public class TestStandToolRegistry
                 .AddRequired("login_name", "string", "Login name of the user")
                 .AddRequired("privilege", "string", "Privilege lookup string to test"),
             CheckUserPrivilegeAsync);
+
+        Register("get_user_profiles",
+            "List the available user profiles (privilege templates such as Administrator, Developer, "
+            + "Technician, Operator) defined in the users file. Use one of these names as the 'profile' "
+            + "argument of create_user.",
+            s => { },
+            GetUserProfilesAsync);
 
         // ── Native Find / Replace ──────────────────────────────────────────────
 
@@ -3144,9 +3156,13 @@ public class TestStandToolRegistry
         var login    = args!.Value.GetRequiredString("login_name");
         var fullName = args!.Value.GetStringOrDefault("full_name", "");
         var password = args!.Value.GetStringOrDefault("password", "");
+        var profile  = args!.Value.GetStringOrDefault("profile", "");
         var persist  = args!.Value.GetBoolOrDefault("persist", true);
-        await _ts.CreateUserAsync(login, fullName, password, persist);
-        return Ok($"User '{login}' created.");
+        var profileName = string.IsNullOrWhiteSpace(profile) ? null : profile;
+        await _ts.CreateUserAsync(login, fullName, password, profileName, persist);
+        return Ok(profileName == null
+            ? $"User '{login}' created."
+            : $"User '{login}' created with profile '{profileName}'.");
     }
 
     private async Task<CallToolResult> DeleteUserAsync(JsonElement? args)
@@ -3179,6 +3195,9 @@ public class TestStandToolRegistry
         var has       = await _ts.CheckUserPrivilegeAsync(login, privilege);
         return OkJson(new { loginName = login, privilege, hasPrivilege = has });
     }
+
+    private async Task<CallToolResult> GetUserProfilesAsync(JsonElement? args)
+        => OkJson(new { profiles = await _ts.GetUserProfilesAsync() });
 
     // ── Native Find / Replace Handlers ────────────────────────────────────────
 

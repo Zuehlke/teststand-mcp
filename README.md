@@ -11,9 +11,9 @@ Developed by [Zühlke](https://www.zuehlke.com/en/industries/industrial-sector).
 | Requirement | Details |
 |---|---|
 | NI TestStand | 2019 or later (2026 recommended) |
-| .NET Framework | 4.8 |
-| Build toolchain | .NET SDK (for building from source) |
-| Platform | Windows x86 / x64 |
+| .NET runtime | .NET 8 — x86 build of `Microsoft.NETCore.App`, `Microsoft.WindowsDesktop.App` and `Microsoft.AspNetCore.App` (all three required by the TestStand engine) |
+| Build toolchain | .NET 8 SDK (x86) — `dotnet --info` should report `Architecture: x86` |
+| Platform | Windows **x86** (the TestStand engine COM server is 32-bit) |
 | Any AI of your choice | E.g. a paid version of Claude with access to Claude Code in the Desktop App |
 
 
@@ -151,6 +151,21 @@ TestStandMCP.exe --list-tools  # Print all registered tool names and description
 
 ## Release Notes
 
+### V0.2.0
+Migrated the server from **.NET Framework 4.8 to .NET 8** (`net8.0-windows`, x86):
+- NI interop now via the `NationalInstruments.TestStand.API` NuGet (netstandard2.0) instead of
+  the .NET-Framework PIA, which does not load under .NET 8 (root cause of the engine connect failure).
+- Host declares the `Microsoft.WindowsDesktop.App` + `Microsoft.AspNetCore.App` framework references
+  the engine requires to load the .NET Core runtime in-process.
+- Clean shutdown: the process now hard-terminates on exit, avoiding the `0xC0000409` crash and WER
+  dialog caused by finalizing lingering TestStand / NILM COM objects.
+
+Also adds **user-profile privilege support**:
+- `create_user` gains an optional `profile` argument — the new user is seeded from the named user
+  profile (e.g. `Administrator`), granting that profile's full privilege set. Empty = minimal defaults.
+- New `get_user_profiles` tool lists the available profiles (`Operator` / `Technician` /
+  `Developer` / `Administrator`).
+
 ### V0.0.4
 Adds the medium-priority API gaps plus UI messages — **16 new tools**:
 - **Output & UI messages**: `post_output_message`, `get_output_messages`,
@@ -197,21 +212,23 @@ See `LICENSE` file in this repository.
 
 ## Build
 
+Build with the **x86 .NET 8 SDK** (the TestStand engine COM server is 32-bit):
+
 ```bat
-dotnet build --configuration Debug --framework net48 -p:Platform=x86
+dotnet build --configuration Debug --framework net8.0-windows -p:Platform=x86
 ```
 
 The output executable is placed at:
 
 ```
-bin\x86\Debug\net48\TestStandMCP.exe
+bin\x86\Debug\net8.0-windows\TestStandMCP.exe
 ```
 
 To rebuild after code changes, kill any running instance first:
 
 ```bat
 taskkill /F /IM TestStandMCP.exe
-dotnet build --configuration Debug --framework net48 -p:Platform=x86
+dotnet build --configuration Debug --framework net8.0-windows -p:Platform=x86
 ```
 
 ---

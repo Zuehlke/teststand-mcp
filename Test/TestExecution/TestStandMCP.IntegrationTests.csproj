@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net48</TargetFramework>
+    <TargetFramework>net8.0-windows</TargetFramework>
     <LangVersion>latest</LangVersion>
     <PlatformTarget>x86</PlatformTarget>
     <Nullable>enable</Nullable>
@@ -33,20 +33,20 @@
     <PackageReference Include="NUnit"                                       Version="3.14.0" />
     <PackageReference Include="NUnit3TestAdapter"                           Version="4.5.0" />
     <PackageReference Include="Microsoft.NET.Test.Sdk"                     Version="17.8.0" />
-    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
     <PackageReference Include="Microsoft.CSharp"                           Version="4.7.0" />
     <PackageReference Include="Microsoft.Extensions.Logging"               Version="8.0.1" />
     <PackageReference Include="Microsoft.Extensions.Logging.Console"       Version="8.0.1" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions"  Version="8.0.2" />
   </ItemGroup>
 
-  <!-- ── TestStand COM reference ────────────────────────────────────────── -->
+  <!-- ── TestStand interop (same netstandard2.0 NuGet as the main project) ── -->
+  <!-- The test host connects to the TestStand engine in AssemblySetup, so the testhost's
+       runtimeconfig MUST declare the same two shared frameworks the engine requires when it
+       loads the .NET Core runtime in-process (WindowsDesktop.App also supplies `stdole`). -->
   <ItemGroup>
-    <Reference Include="Microsoft.CSharp" />
-    <Reference Include="NationalInstruments.TestStand.Interop.API">
-      <HintPath>C:\Program Files (x86)\National Instruments\TestStand 2026\API\DotNET\Assemblies\CurrentVersion\NationalInstruments.TestStand.Interop.API.dll</HintPath>
-      <EmbedInteropTypes>false</EmbedInteropTypes>
-    </Reference>
+    <FrameworkReference Include="Microsoft.WindowsDesktop.App" />
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <PackageReference Include="NationalInstruments.TestStand.API" Version="23.0.0" />
   </ItemGroup>
 
 </Project>
