@@ -506,17 +506,25 @@ public class TestStandService : ITestStandService
                 // shared engine, so transient instances use final:false.
                 bool isLast = System.Threading.Interlocked.Decrement(ref _liveEngineCount) <= 0;
                 try { _engine.ShutDown(isLast); } catch { }
-                // FinalReleaseComObject drops ALL outstanding RCW references in one go;
-                // ReleaseComObject only decrements by one and can leave the engine RCW (and
-                // its COM threads) alive, which keeps the host process from exiting after a
-                // transient second engine is torn down.
-                try { System.Runtime.InteropServices.Marshal.FinalReleaseComObject(_engine); } catch { }
-                _engine = null;
 
-                // Flush the RCW finalizers so the released engine's COM threads are reaped
-                // promptly (helps the test host exit cleanly when a second engine was used).
-                GC.Collect();
-                GC.WaitForPendingFinalizers();
+                if (isLast)
+                {
+                    // Releasing the LAST engine's RCW synchronously triggers the NI
+                    // License-Manager (NILM) teardown over COM/RPC to the out-of-process
+                    // NilmCompatibilityServer, which can block for a long time (threads park in
+                    // EventPairLow LPC waits) and stalls process shutdown. The engine has
+                    // already been ShutDown and the process is ending, so we intentionally do
+                    // NOT release the RCW and suppress its finalization — this avoids the
+                    // blocking COM teardown so the host can exit promptly.
+                    try { GC.SuppressFinalize((object)_engine!); } catch { }
+                }
+                else
+                {
+                    // Transient second engine: NILM stays alive (the primary engine holds it),
+                    // so a full release is cheap and keeps the instance from leaking.
+                    try { System.Runtime.InteropServices.Marshal.FinalReleaseComObject(_engine); } catch { }
+                }
+                _engine = null;
             }
         });
     }

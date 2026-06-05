@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Run settings for the TestStand integration tests.
+
+  DisableAppDomain=true is the important one. By default vstest/NUnit run the test
+  assembly in a *child* AppDomain and unload it when the run finishes. Unloading that
+  domain finalizes the lingering TestStand engine / NI License-Manager (NILM) COM RCWs,
+  which parks the finalizer on NILM LPC waits — NUnit's domain-unload thread then times
+  out after 30 s ("NUnitEngineUnloadException: Unable to unload application domain") and
+  the host hangs. Running in the test host's default AppDomain removes that mid-run unload:
+  the COM objects live until process exit, where AssemblySetup's ProcessExit handler
+  hard-terminates the host (exit 0) before the CLR can hang finalizing them.
+
+  DisableParallelization keeps fixtures strictly sequential so the single shared STA COM
+  engine is never touched from two threads at once.
+-->
+<RunSettings>
+  <RunConfiguration>
+    <DisableAppDomain>true</DisableAppDomain>
+    <DisableParallelization>true</DisableParallelization>
+  </RunConfiguration>
+</RunSettings>

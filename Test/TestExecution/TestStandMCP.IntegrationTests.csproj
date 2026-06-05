@@ -11,6 +11,10 @@
     <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
     <!-- Source files from main project compiled directly (main project OutputType=Exe has no DLL) -->
     <EnableDefaultCompileItems>true</EnableDefaultCompileItems>
+    <!-- Auto-apply the run settings (DisableAppDomain) for both `dotnet test` and the VS Test
+         Explorer, so the COM-engine teardown no longer hangs the host on a child-AppDomain unload.
+         Removes the need to pass the settings flag on the command line. -->
+    <RunSettingsFilePath>$(MSBuildProjectDirectory)\test.runsettings</RunSettingsFilePath>
   </PropertyGroup>
 
   <!-- ── Source files shared from main project ─────────────────────────── -->
