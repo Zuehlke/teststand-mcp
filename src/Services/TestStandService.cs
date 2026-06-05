@@ -13,6 +13,7 @@ using NiEngine            = NationalInstruments.TestStand.Interop.API.IEngine;
 using PropertyObjectFile  = NationalInstruments.TestStand.Interop.API.PropertyObjectFile;
 using NiWriteFileFormat   = NationalInstruments.TestStand.Interop.API.WriteFileFormat;
 using NiPropOptions       = NationalInstruments.TestStand.Interop.API.PropertyOptions;
+using NiEvalOptions       = NationalInstruments.TestStand.Interop.API.EvaluationOptions;
 using NiOutputSeverity    = NationalInstruments.TestStand.Interop.API.OutputMessageSeverityTypes;
 using NiUIMessageCodes    = NationalInstruments.TestStand.Interop.API.UIMessageCodes;
 using NiCsvOut            = NationalInstruments.TestStand.Interop.API.CsvFileOutputRecordStream;
@@ -80,6 +81,14 @@ public interface ITestStandService : IDisposable
     // Variables & Properties
     Task<PropertyValue> GetPropertyAsync(string lookupString);
     Task SetPropertyAsync(string lookupString, object value);
+    Task<ExpressionResult> EvaluateExpressionAsync(string expression,
+        string? sequenceFilePath = null);
+    Task<PropertyObjectInfo> GetPropertyObjectAsync(string filePath,
+        string? sequenceName, string propertyName);
+    Task SetPropertyValueAsync(string filePath, string? sequenceName,
+        string propertyName, string valueType, string? value);
+    Task DeleteSubPropertyAsync(string filePath, string? sequenceName,
+        string propertyName);
     Task<List<VariableInfo>> GetFileGlobalsAsync(string sequenceFilePath);
     Task<List<VariableInfo>> GetStationGlobalsAsync();
     Task SetFileGlobalAsync(string sequenceFilePath, string variableName, object value);
@@ -1164,6 +1173,200 @@ public class TestStandService : ITestStandService
         // Fallback: treat as a station global variable name
         subPath = lookupString;
         return GetStationGlobals();
+    }
+
+    // ── Expression evaluation & structured property access ─────────────────────
+
+    public async Task<ExpressionResult> EvaluateExpressionAsync(string expression,
+        string? sequenceFilePath = null)
+    {
+        EnsureConnected();
+        return await Task.Run(() =>
+        {
+            var result = new ExpressionResult { Expression = expression };
+            try
+            {
+                // Evaluation context: a sequence file's FileGlobals when a path is given,
+                // otherwise the engine's StationGlobals. The expression can reference the
+                // subproperties of that context by name (e.g. a station-global variable),
+                // plus literals, operators and built-in expression functions.
+                NiPropertyObject context = sequenceFilePath is { Length: > 0 }
+                    ? GetFileGlobals(GetOrLoadSeqFile(sequenceFilePath))
+                    : GetStationGlobals();
+
+                // EvaluateEx returns the result as a PropertyObject of any type.
+                NiPropertyObject resultPo =
+                    context.EvaluateEx(expression, (int)NiEvalOptions.EvalOption_NoOptions);
+
+                if (resultPo == null)
+                {
+                    result.ValueType = "Empty";
+                    result.Value     = null;
+                }
+                else
+                {
+                    result.ValueType = InferValueKind(resultPo, out _, out _);
+                    result.Value     = TryGetValue(resultPo);
+                }
+                result.IsValid = true;
+            }
+            catch (Exception ex)
+            {
+                result.IsValid      = false;
+                result.ErrorMessage = $"{ex.GetType().Name}: {ex.Message}";
+            }
+            return result;
+        });
+    }
+
+    public async Task<PropertyObjectInfo> GetPropertyObjectAsync(string filePath,
+        string? sequenceName, string propertyName)
+    {
+        EnsureConnected();
+        return await Task.Run(() =>
+        {
+            var sf        = GetOrLoadSeqFile(filePath);
+            var container = ResolveValueContainer(sf, sequenceName);
+            NiPropertyObject prop =
+                (NiPropertyObject)(object)container.GetPropertyObject(propertyName, 0);
+
+            var info = new PropertyObjectInfo { Name = propertyName };
+            info.ValueType = InferValueKind(prop, out bool isArray, out int numElements);
+            info.IsArray   = isArray;
+            if (isArray) info.NumElements = numElements;
+
+            // Named-type name, if this property is an instance of a custom type.
+            try { info.TypeName = NullIfEmpty((string)((dynamic)prop).Type.Name); } catch { }
+
+            if (info.ValueType == "Container")
+            {
+                int numSub = 0;
+                try { numSub = (int)prop.GetNumSubProperties(""); } catch { }
+                for (int i = 0; i < numSub; i++)
+                {
+                    try
+                    {
+                        string subName = (string)prop.GetNthSubPropertyName("", i, 0);
+                        NiPropertyObject sub =
+                            (NiPropertyObject)(object)prop.GetPropertyObject(subName, 0);
+                        info.SubProperties.Add(new PropertySubInfo
+                        {
+                            Name      = subName,
+                            ValueType = InferValueKind(sub, out _, out _),
+                            Value     = TryGetValue(sub)
+                        });
+                    }
+                    catch { /* skip unreadable subproperty */ }
+                }
+            }
+            else if (!isArray)
+            {
+                info.Value = TryGetValue(prop);
+            }
+            return info;
+        });
+    }
+
+    public async Task SetPropertyValueAsync(string filePath, string? sequenceName,
+        string propertyName, string valueType, string? value)
+    {
+        EnsureConnected();
+        await Task.Run(() =>
+        {
+            var sf   = GetOrLoadSeqFile(filePath);
+            var root = ResolveValueContainer(sf, sequenceName);
+
+            // Create the property if it does not exist yet. NewSubProperty takes a simple
+            // name, so split a dotted path into its parent container and the leaf name.
+            if (!PropertyExists(root, propertyName))
+            {
+                int last = propertyName.LastIndexOf('.');
+                string parentPath = last >= 0 ? propertyName.Substring(0, last) : "";
+                string leaf       = last >= 0 ? propertyName.Substring(last + 1) : propertyName;
+                NiPropertyObject parent = string.IsNullOrEmpty(parentPath)
+                    ? root
+                    : (NiPropertyObject)(object)root.GetPropertyObject(parentPath, 0);
+                parent.NewSubProperty(leaf, (NiPropValueTypes)MapPropValueType(valueType),
+                    false, "", 0);
+            }
+
+            switch (valueType.ToLowerInvariant())
+            {
+                case "container":
+                    break; // structural only — no scalar value to assign
+                case "boolean":
+                case "bool":
+                    root.SetValBoolean(propertyName, 0,
+                        value != null && (value.Equals("true", StringComparison.OrdinalIgnoreCase)
+                                          || value == "1"));
+                    break;
+                case "number":
+                case "double":
+                case "float":
+                case "int":
+                case "integer":
+                    root.SetValNumber(propertyName, 0, double.Parse(value ?? "0",
+                        System.Globalization.NumberStyles.Any,
+                        System.Globalization.CultureInfo.InvariantCulture));
+                    break;
+                default: // string
+                    root.SetValString(propertyName, 0, value ?? "");
+                    break;
+            }
+
+            ((NiSequenceFile)(object)sf).Save(filePath);
+            _loadedSequenceFiles[filePath] = sf;
+        });
+    }
+
+    public async Task DeleteSubPropertyAsync(string filePath, string? sequenceName,
+        string propertyName)
+    {
+        EnsureConnected();
+        await Task.Run(() =>
+        {
+            var sf   = GetOrLoadSeqFile(filePath);
+            var root = ResolveValueContainer(sf, sequenceName);
+            root.DeleteSubProperty(propertyName, 0);
+            ((NiSequenceFile)(object)sf).Save(filePath);
+            _loadedSequenceFiles[filePath] = sf;
+        });
+    }
+
+    // Resolves the value container for the structured-property tools: a sequence's Locals
+    // (when sequenceName is given) or the file's FileGlobals (when it is omitted).
+    private NiPropertyObject ResolveValueContainer(dynamic sf, string? sequenceName)
+    {
+        if (string.IsNullOrEmpty(sequenceName))
+            return GetFileGlobals(sf);
+        var seq = sf.GetSequenceByName(sequenceName);
+        return (NiPropertyObject)(object)seq.Locals;
+    }
+
+    private static string? NullIfEmpty(string? s) => string.IsNullOrEmpty(s) ? null : s;
+
+    private static int MapPropValueType(string valueType) => valueType.ToLowerInvariant() switch
+    {
+        "boolean" or "bool"                                   => (int)NiPropValueTypes.PropValType_Boolean,
+        "number" or "double" or "float" or "int" or "integer" => (int)NiPropValueTypes.PropValType_Number,
+        "container"                                           => (int)NiPropValueTypes.PropValType_Container,
+        _                                                     => (int)NiPropValueTypes.PropValType_String,
+    };
+
+    // Best-effort classification of a PropertyObject's value kind, mirroring the probing
+    // style used elsewhere for COM PropertyObjects (avoids the obsolete GetType overload).
+    private static string InferValueKind(dynamic prop, out bool isArray, out int numElements)
+    {
+        isArray = false; numElements = 0;
+        if (prop == null) return "Empty";
+        try { numElements = Convert.ToInt32((object)prop.GetNumElements()); isArray = true; return "Array"; } catch { }
+        int numSub = 0;
+        try { numSub = Convert.ToInt32((object)prop.GetNumSubProperties("")); } catch { }
+        if (numSub > 0) return "Container";
+        try { _ = (double)prop.GetValNumber("", 0);  return "Number";  } catch { }
+        try { _ = (bool)  prop.GetValBoolean("", 0); return "Boolean"; } catch { }
+        try { _ = (string)prop.GetValString("", 0);  return "String";  } catch { }
+        return "Unknown";
     }
 
     public async Task<List<VariableInfo>> GetFileGlobalsAsync(string sequenceFilePath)

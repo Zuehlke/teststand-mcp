@@ -22,7 +22,10 @@
     <Compile Include="..\..\src\Models\TestStandModels.cs"   Link="Shared\TestStandModels.cs" />
     <Compile Include="..\..\src\Models\McpModels.cs"         Link="Shared\McpModels.cs" />
     <Compile Include="..\..\src\Services\TestStandService.cs" Link="Shared\TestStandService.cs" />
+    <Compile Include="..\..\src\Services\SequenceEditorService.cs" Link="Shared\SequenceEditorService.cs" />
     <Compile Include="..\..\src\Tools\SequencePlanValidator.cs" Link="Shared\SequencePlanValidator.cs" />
+    <Compile Include="..\..\src\Tools\SchemaBuilder.cs" Link="Shared\SchemaBuilder.cs" />
+    <Compile Include="..\..\src\Tools\TestStandToolRegistry.cs" Link="Shared\TestStandToolRegistry.cs" />
   </ItemGroup>
 
   <!-- ── NuGet packages ────────────────────────────────────────────────── -->

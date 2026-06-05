@@ -588,6 +588,18 @@ public class TestStandToolRegistry
                     "Optional sequence file path for context"),
             CheckExpressionAsync);
 
+        Register("evaluate_expression",
+            "Evaluate a TestStand expression and return its computed value (not just a syntax " +
+            "check). The expression is evaluated in the StationGlobals context by default, or in " +
+            "a sequence file's FileGlobals context when 'sequence_file_path' is given. It can " +
+            "reference variables in that context by name plus literals, operators and built-in " +
+            "expression functions (e.g. 'Str(123) + \"V\"', 'MyGlobal * 2').",
+            s => s
+                .AddRequired("expression", "string", "TestStand expression to evaluate")
+                .AddOptional("sequence_file_path", "string",
+                    "Optional sequence file path — evaluate in its FileGlobals context"),
+            EvaluateExpressionAsync);
+
         Register("expand_path_macros",
             "Expand TestStand path macros (e.g. <TestStand>) in a path string.",
             s => s.AddRequired("path", "string", "Path string containing macros to expand"),
@@ -1305,6 +1317,45 @@ public class TestStandToolRegistry
                 .AddRequired("variable_name", "string", "Name of the array variable")
                 .AddRequired("new_size", "integer", "New number of elements"),
             ResizeArrayVariableAsync);
+
+        Register("get_property_object",
+            "Inspect a property (local variable or file global) in a structured way: its value " +
+            "type, scalar value, named type, and — for containers/structs — its immediate " +
+            "subproperties with their types and values.",
+            s => s
+                .AddRequired("file_path", "string", "Path to the sequence file")
+                .AddOptional("sequence_name", "string",
+                    "Name of the sequence containing the local variable. Omit for a file global.")
+                .AddRequired("property_name", "string",
+                    "Property name or dotted lookup path (e.g. 'MyContainer.Sub')"),
+            GetPropertyObjectAsync);
+
+        Register("set_property_value",
+            "Set a property value with an explicit type, creating the property if it does not " +
+            "exist yet. value_type 'container' creates an empty container/struct (no value). " +
+            "Targets a sequence's local variable (with sequence_name) or a file global (without).",
+            s => s
+                .AddRequired("file_path", "string", "Path to the sequence file")
+                .AddOptional("sequence_name", "string",
+                    "Name of the sequence. Omit to target a file global.")
+                .AddRequired("property_name", "string",
+                    "Property name or dotted lookup path (e.g. 'MyContainer.Sub')")
+                .AddRequired("value_type", "string",
+                    "Value type to create/set",
+                    new[] { "number", "boolean", "string", "container" })
+                .AddOptional("value", "string",
+                    "Value to assign (omitted/ignored for 'container')"),
+            SetPropertyValueAsync);
+
+        Register("delete_sub_property",
+            "Delete a subproperty (local variable or file global) by name or dotted lookup path.",
+            s => s
+                .AddRequired("file_path", "string", "Path to the sequence file")
+                .AddOptional("sequence_name", "string",
+                    "Name of the sequence. Omit to target a file global.")
+                .AddRequired("property_name", "string",
+                    "Property name or dotted lookup path to delete"),
+            DeleteSubPropertyAsync);
 
         // ── Data Type Operations ───────────────────────────────────────────────
 
@@ -2384,6 +2435,44 @@ public class TestStandToolRegistry
         var seqFile    = args!.Value.GetStringOrNull("sequence_file_path");
         var result     = await _ts.CheckExpressionAsync(expression, seqFile);
         return OkJson(result);
+    }
+
+    private async Task<CallToolResult> EvaluateExpressionAsync(JsonElement? args)
+    {
+        var expression = args!.Value.GetRequiredString("expression");
+        var seqFile    = args!.Value.GetStringOrNull("sequence_file_path");
+        var result     = await _ts.EvaluateExpressionAsync(expression, seqFile);
+        return OkJson(result);
+    }
+
+    private async Task<CallToolResult> GetPropertyObjectAsync(JsonElement? args)
+    {
+        var filePath = args!.Value.GetRequiredString("file_path");
+        var seqName  = args!.Value.GetStringOrNull("sequence_name");
+        var propName = args!.Value.GetRequiredString("property_name");
+        var result   = await _ts.GetPropertyObjectAsync(filePath, seqName, propName);
+        return OkJson(result);
+    }
+
+    private async Task<CallToolResult> SetPropertyValueAsync(JsonElement? args)
+    {
+        var filePath  = args!.Value.GetRequiredString("file_path");
+        var seqName   = args!.Value.GetStringOrNull("sequence_name");
+        var propName  = args!.Value.GetRequiredString("property_name");
+        var valueType = args!.Value.GetRequiredString("value_type");
+        var value     = args!.Value.GetStringOrNull("value");
+        await _ts.SetPropertyValueAsync(filePath, seqName, propName, valueType, value);
+        return Ok($"Property '{propName}' ({valueType}) set in " +
+                  $"{(seqName is null ? "FileGlobals" : $"sequence '{seqName}'")}.");
+    }
+
+    private async Task<CallToolResult> DeleteSubPropertyAsync(JsonElement? args)
+    {
+        var filePath = args!.Value.GetRequiredString("file_path");
+        var seqName  = args!.Value.GetStringOrNull("sequence_name");
+        var propName = args!.Value.GetRequiredString("property_name");
+        await _ts.DeleteSubPropertyAsync(filePath, seqName, propName);
+        return Ok($"Deleted property '{propName}'.");
     }
 
     private async Task<CallToolResult> ExpandPathMacrosAsync(JsonElement? args)

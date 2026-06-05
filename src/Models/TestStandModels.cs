@@ -378,6 +378,41 @@ public class ExpressionCheckResult
     public string ErrorMessage { get; set; } = "";
 }
 
+/// <summary>Result of evaluating a TestStand expression (PropertyObject.EvaluateEx).</summary>
+public class ExpressionResult
+{
+    public string Expression { get; set; } = "";
+    public bool IsValid { get; set; }
+    /// <summary>The computed value (number/boolean/string) or null for container/empty results.</summary>
+    public object? Value { get; set; }
+    /// <summary>Number / Boolean / String / Container / Array / Empty / Unknown.</summary>
+    public string ValueType { get; set; } = "";
+    public string? ErrorMessage { get; set; }
+}
+
+/// <summary>Structured view of a PropertyObject: its value type, scalar value and (for
+/// containers) its immediate subproperties.</summary>
+public class PropertyObjectInfo
+{
+    public string Name { get; set; } = "";
+    /// <summary>Number / Boolean / String / Container / Array / Unknown.</summary>
+    public string ValueType { get; set; } = "";
+    /// <summary>Named-type name if the property is an instance of a custom type, else null.</summary>
+    public string? TypeName { get; set; }
+    /// <summary>Scalar value for simple properties; null for containers/arrays.</summary>
+    public object? Value { get; set; }
+    public bool IsArray { get; set; }
+    public int? NumElements { get; set; }
+    public List<PropertySubInfo> SubProperties { get; set; } = new();
+}
+
+public class PropertySubInfo
+{
+    public string Name { get; set; } = "";
+    public string ValueType { get; set; } = "";
+    public object? Value { get; set; }
+}
+
 // ── Undo/Redo Models ─────────────────────────────────────────────────────────
 
 public class UndoItemInfo
