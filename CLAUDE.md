@@ -101,3 +101,73 @@ Label  →  Only as a target for the mentioned Goto exceptions
   runtimeconfig to declare `Microsoft.WindowsDesktop.App` + `Microsoft.AspNetCore.App` — both
   are wired via `FrameworkReference` in the .csproj. Output: `bin\x86\Debug\net8.0-windows\`.)
 - **After every sequence change:** Call `save_sequence_file`
+
+---
+
+## TestStand Behavioral Facts (proven by the integration tests)
+
+These are hard-won behaviors from the `Test/TestExecution` suite (T01–T21,
+`TestBase`, `TestDataBuilder`). Treat them as **known solution paths** — do not
+re-discover them by trial-and-error. Per-tool gotchas already live in the tool
+descriptions; the cross-cutting rules below apply regardless of which tool you call.
+
+### Engine lifecycle & file handling
+- **Single in-process engine only.** A second engine cannot be torn down cleanly
+  while the first one lives → the host hangs on exit. The MCP server uses exactly
+  one engine; never spin up a second. (`T01`, see also memory `teststand-testhost-teardown-hang`.)
+- **Recreating a `.seq` that already exists:** the engine releases the OS file
+  handle *asynchronously*. The working pattern (from `TestDataBuilder.Step00`):
+  1. `close_sequence_file` for any loaded file matching the path,
+  2. delete from disk inside a short retry loop (≈5× with a ~300 ms back-off),
+  3. then `create_sequence_file`. Deleting without closing first throws a sharing violation.
+- **Verify persistence by re-opening:** after `save_sequence_file`, call
+  `open_sequence_file` again and read back to confirm the write→save→reload round-trip.
+
+### Expressions
+- **`check_expression` effectively requires a loaded file as context.** Pass
+  `sequence_file_path` to an already created/open file; without it even a valid
+  expression can fail to validate. (`T01`, `T08`.)
+- **`evaluate_expression` context:** StationGlobals by default; FileGlobals when a
+  file path is given. To reference a FileGlobal by name, create it first via
+  `set_property_value` (e.g. `value_type="number"`). (`T20`.)
+
+### Properties & variables
+- `set_property_value` with **`sequence_name=null` → FileGlobals**; with a sequence
+  name → that sequence's **Locals**. (`T20`.)
+- **Containers:** create with `value_type="container"`, then set nested members via a
+  dotted path, e.g. `"MyCont.Inner"`. `delete_sub_property` removes a global/subproperty. (`T20`.)
+- **A step's "comment" IS its `Description`** — `set_step_comment` writes the field
+  that reads back as `Description`. (`T04`, `TestDataBuilder`.)
+- **Numeric limits:** `get_numeric_limits` returns the public contract keys
+  `low_limit` / `high_limit` (not the raw TS property names). One-sided limits use a
+  `null` limit + a comparison like `"LT"`/`"GT"`; two-sided uses `"GELE"` etc. (`T05`, `TestDataBuilder`.)
+
+### Headless limitations = EXPECTED outcomes (not bugs)
+- `create_sync_object` / `create_batch_sync_object`: headless has no SyncManager →
+  `InvalidOperationException` / `NotSupportedException` are expected. (`T19`.)
+- `post_ui_message` / `add_report_section`: require a **live `execution_id`**; an
+  unknown id raises `KeyNotFoundException`. Only meaningful during an execution. (`T15`, `T19`.)
+- `post_output_message` **does** work headless and appears in the engine output list. (`T15`.)
+- **Undo/redo is not auto-recorded** by the headless API (it's a Sequence Editor
+  feature). `CanUndo` is false on a fresh file; MCP edits won't be undoable. Revert by
+  performing the inverse operation explicitly. (`T08`.)
+
+### Step-type / enum specifics
+- **`UseStepUnloadOption` (module unload, value 5) is only valid at file/model level —
+  TestStand rejects it on an individual step.** Use values 1–4 per step. (`T06`.)
+- The enum string sets accepted by `set_step_*` tools are enumerated in their tool
+  descriptions and exercised in `T05`/`T06` — use those, don't guess.
+- **`NI_Flow_Break` / `NI_Flow_Continue` must be physically inside a loop block**, or
+  the plan validator raises `E_JUMP_OUTSIDE_LOOP`. (`T04`, `T10`.)
+
+### User management
+- **Always use `persist:false`** for test/experimental users — it edits only the
+  in-memory users file and never touches `users.ini` on disk. (`T11`.)
+
+### Pre-build validation
+- `validate_sequence_plan` is engine-free; run it on the exact `steps` array before
+  `insert_steps_bulk`. Error codes: `E_UNCLOSED_BLOCK`, `E_UNMATCHED_END`,
+  `E_ELSE_WITHOUT_IF`, `E_JUMP_OUTSIDE_LOOP`, `E_FORBIDDEN_TYPE` (Goto/Label),
+  `E_UNDECLARED_LOCAL`, `E_DUP_NAME`. Warnings (advisory only): `W_UNLINKED_CALLS`
+  (unlinked `SequenceCall` placeholders are fine), `W_UNUSED_LOCAL`. Build only when
+  `valid==true`. (`T10`.)

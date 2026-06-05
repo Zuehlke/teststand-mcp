@@ -93,6 +93,9 @@ public interface ITestStandService : IDisposable
     Task<List<VariableInfo>> GetStationGlobalsAsync();
     Task SetFileGlobalAsync(string sequenceFilePath, string variableName, object value);
     Task SetStationGlobalAsync(string variableName, object value);
+    /// <summary>Delete a StationGlobal and commit the change to disk. The delete counterpart
+    /// to <see cref="SetStationGlobalAsync"/> (no-op if the global does not exist).</summary>
+    Task DeleteStationGlobalAsync(string variableName);
     Task InsertFileGlobalAsync(string sequenceFilePath, string variableName, string dataType);
 
     // Steps
@@ -1111,7 +1114,11 @@ public class TestStandService : ITestStandService
                 return new PropertyValue
                 {
                     Name         = lookupString,
-                    DataType     = prop.GetType().Name,
+                    // Cast to object first: 'prop' is a dynamic COM PropertyObject whose own
+                    // GetType(lookupString, options) method would otherwise shadow
+                    // object.GetType() and throw "Error while invoking GetType." (same idiom
+                    // used by TryGetString/InvokeMember helpers below).
+                    DataType     = ((object)prop).GetType().Name,
                     Value        = TryGetValue(prop),
                     LookupString = lookupString
                 };
@@ -1465,6 +1472,19 @@ public class TestStandService : ITestStandService
         });
     }
 
+    public async Task DeleteStationGlobalAsync(string variableName)
+    {
+        EnsureConnected();
+        await Task.Run(() =>
+        {
+            var sg = GetStationGlobals();
+            if (PropertyExists(sg, variableName))
+                sg.DeleteSubProperty(variableName, 0);
+            // Persist the removal so the StationGlobals.ini on disk matches in-memory state.
+            ((NiEngine)(object)_engine!).CommitGlobalsToDisk();
+        });
+    }
+
     public async Task InsertFileGlobalAsync(string sequenceFilePath, string variableName,
         string dataType)
     {
@@ -1472,15 +1492,23 @@ public class TestStandService : ITestStandService
         await Task.Run(() =>
         {
             var sf = GetOrLoadSeqFile(sequenceFilePath);
+            // Detect an array suffix ("number[]", "array:string", …) — same convention as
+            // InsertLocalVariableAsync — so array file globals can be created for the
+            // get/set/resize_array_variable tools to operate on.
+            string rawType = dataType.ToLowerInvariant().Trim();
+            bool   isArray = rawType.EndsWith("[]") || rawType.StartsWith("array:");
+            string baseDataType = isArray
+                ? rawType.Replace("[]", "").Replace("array:", "").Trim()
+                : rawType;
             // PropValType: String=1, Boolean=2, Number=3
-            int propType = dataType.ToLowerInvariant() switch
+            int propType = baseDataType switch
             {
-                "number" or "double" or "float" or "int" => 3,
-                "boolean" or "bool"                      => 2,
-                _                                        => 1
+                "number" or "double" or "float" or "int" or "integer" => 3,
+                "boolean" or "bool"                                   => 2,
+                _                                                     => 1
             };
             var fg2 = GetFileGlobals(sf);
-            fg2.NewSubProperty(variableName, (NiPropValueTypes)propType, false, "", 0);
+            fg2.NewSubProperty(variableName, (NiPropValueTypes)propType, isArray, "", 0);
             ((NiSequenceFile)(object)sf).Save(sequenceFilePath);
         });
     }
@@ -3257,6 +3285,11 @@ public class TestStandService : ITestStandService
         });
     }
 
+    // The PropertyObjectFile root carries these system entries alongside any user-created
+    // data types; they must be filtered out when listing a file's custom data types.
+    private static readonly HashSet<string> _fileRootSystemProps =
+        new(StringComparer.OrdinalIgnoreCase) { "ChangeCount", "LastSavedChangeCount", "Path", "Data" };
+
     public async Task<List<DataTypeInfo>> GetDataTypesAsync(string? sequenceFilePath = null)
     {
         EnsureConnected();
@@ -3265,14 +3298,37 @@ public class TestStandService : ITestStandService
             var result = new List<DataTypeInfo>();
             try
             {
-                // If a sequence file is given, use its custom data types only
-                if (!string.IsNullOrEmpty(sequenceFilePath) &&
-                    _loadedSequenceFiles.TryGetValue(sequenceFilePath, out var seqFile))
+                // File context: a file's custom data types are stored as named subproperties on
+                // the file's root PropertyObject — the same store CreateDataTypeAsync writes to and
+                // DeleteDataTypeAsync removes from. Enumerate those (minus the file's own system
+                // entries) so create → list → delete is coherent.
+                if (!string.IsNullOrEmpty(sequenceFilePath))
                 {
-                    int cnt = (int)seqFile.GetNumSubProperties((object)"");
-                    // fall through to engine-level approach
+                    var sf = GetOrLoadSeqFile(sequenceFilePath);
+                    dynamic sfPo = sf.AsPropertyObjectFile();
+                    int cnt = Convert.ToInt32((object)sfPo.GetNumSubProperties((object)""));
+                    for (int i = 0; i < cnt; i++)
+                    {
+                        string name;
+                        try { name = (string)sfPo.GetNthSubPropertyName((object)"", (object)i, (object)0); }
+                        catch { continue; }
+                        if (_fileRootSystemProps.Contains(name)) continue;
+
+                        string kind = "Container";
+                        bool isArr = false;
+                        int  numEl = 0;
+                        try
+                        {
+                            dynamic prop = sfPo.GetPropertyObject((object)name, (object)0);
+                            kind = InferValueKind(prop, out isArr, out numEl);
+                        }
+                        catch { }
+                        result.Add(new DataTypeInfo { Name = name, BaseType = kind, IsArray = isArr });
+                    }
+                    return result;
                 }
 
+                // No file context: enumerate the engine-level type list.
                 var names = (string[])_engine!.GetTypeNames();
                 foreach (var name in names)
                 {
