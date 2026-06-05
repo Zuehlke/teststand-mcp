@@ -282,6 +282,69 @@ public class AnalyzerMessage
     public string Severity { get; set; } = "";
     public string RuleId { get; set; } = "";
     public string Text { get; set; } = "";
+    public string Location { get; set; } = "";
+    public string SequenceName { get; set; } = "";
+    public string StepName { get; set; } = "";
+}
+
+/// <summary>Aggregated result of a sequence-analyzer run, incl. severity counts.</summary>
+public class AnalyzerResult
+{
+    public string FilePath { get; set; } = "";
+    public int TotalMessages { get; set; }
+    public int ErrorCount { get; set; }
+    public int WarningCount { get; set; }
+    public int InformationCount { get; set; }
+    public List<AnalyzerMessage> Messages { get; set; } = new();
+}
+
+// ── User / Privilege Models ──────────────────────────────────────────────────
+
+public class UserInfo
+{
+    public string LoginName { get; set; } = "";
+    public string FullName { get; set; } = "";
+    public bool IsGroup { get; set; }
+    public List<string> GroupMemberships { get; set; } = new();
+}
+
+// ── Output Message Models ────────────────────────────────────────────────────
+
+public class OutputMessageInfo
+{
+    public int Id { get; set; }
+    public string Category { get; set; } = "";
+    public string Message { get; set; } = "";
+    public string Severity { get; set; } = "";
+    public double TimeInSeconds { get; set; }
+}
+
+// ── Search Directory Models ──────────────────────────────────────────────────
+
+public class SearchDirectoryInfo
+{
+    public int Index { get; set; }
+    public string Path { get; set; } = "";
+    public string Type { get; set; } = "";
+    public bool Disabled { get; set; }
+    public bool SearchSubdirectories { get; set; }
+}
+
+// ── Data-Type Field Models ───────────────────────────────────────────────────
+
+public class TypeFieldInfo
+{
+    public string Name { get; set; } = "";
+    public string DataType { get; set; } = "";
+}
+
+// ── CSV Stream Models ────────────────────────────────────────────────────────
+
+public class CsvReadResult
+{
+    public string FilePath { get; set; } = "";
+    public int LineCount { get; set; }
+    public List<string> Lines { get; set; } = new();
 }
 
 // ── Engine / Station Models ──────────────────────────────────────────────────
@@ -313,6 +376,41 @@ public class ExpressionCheckResult
 {
     public bool IsValid { get; set; }
     public string ErrorMessage { get; set; } = "";
+}
+
+/// <summary>Result of evaluating a TestStand expression (PropertyObject.EvaluateEx).</summary>
+public class ExpressionResult
+{
+    public string Expression { get; set; } = "";
+    public bool IsValid { get; set; }
+    /// <summary>The computed value (number/boolean/string) or null for container/empty results.</summary>
+    public object? Value { get; set; }
+    /// <summary>Number / Boolean / String / Container / Array / Empty / Unknown.</summary>
+    public string ValueType { get; set; } = "";
+    public string? ErrorMessage { get; set; }
+}
+
+/// <summary>Structured view of a PropertyObject: its value type, scalar value and (for
+/// containers) its immediate subproperties.</summary>
+public class PropertyObjectInfo
+{
+    public string Name { get; set; } = "";
+    /// <summary>Number / Boolean / String / Container / Array / Unknown.</summary>
+    public string ValueType { get; set; } = "";
+    /// <summary>Named-type name if the property is an instance of a custom type, else null.</summary>
+    public string? TypeName { get; set; }
+    /// <summary>Scalar value for simple properties; null for containers/arrays.</summary>
+    public object? Value { get; set; }
+    public bool IsArray { get; set; }
+    public int? NumElements { get; set; }
+    public List<PropertySubInfo> SubProperties { get; set; } = new();
+}
+
+public class PropertySubInfo
+{
+    public string Name { get; set; } = "";
+    public string ValueType { get; set; } = "";
+    public object? Value { get; set; }
 }
 
 // ── Undo/Redo Models ─────────────────────────────────────────────────────────
@@ -416,6 +514,39 @@ public class SearchResult
     public string SearchPattern { get; set; } = "";
     public string SearchIn { get; set; } = "";
     public List<SearchMatch> Matches { get; set; } = new();
+}
+
+// ── Native Find/Replace Models (PropertyObject.Search) ───────────────────────
+
+/// <summary>A single match returned by the native TestStand search engine.</summary>
+public class FindMatch
+{
+    public string FilePath { get; set; } = "";
+    public string PropertyPath { get; set; } = "";
+    public string MatchedText { get; set; } = "";
+    public string ValueType { get; set; } = "";
+    public bool Replaced { get; set; }
+}
+
+/// <summary>Result of a native find or find/replace operation across a file.</summary>
+public class FindReplaceResult
+{
+    public string Pattern { get; set; } = "";
+    public string? Replacement { get; set; }
+    public int TotalMatches { get; set; }
+    public int ReplacedCount { get; set; }
+    public string StatusMessage { get; set; } = "";
+    public List<FindMatch> Matches { get; set; } = new();
+}
+
+// ── Adapter Module Configuration Models ──────────────────────────────────────
+
+/// <summary>Result of configuring a step's code module via a typed adapter tool.</summary>
+public class ModuleConfigResult
+{
+    public string StepName { get; set; } = "";
+    public string Adapter { get; set; } = "";
+    public Dictionary<string, object> AppliedSettings { get; set; } = new();
 }
 
 // ── Thread Models ────────────────────────────────────────────────────────────

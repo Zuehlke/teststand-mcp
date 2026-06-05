@@ -40,6 +40,17 @@ public class AssemblySetup
                 "Ensure TestStand is installed and licensed.");
     }
 
+    // Hard process termination that skips CLR shutdown finalization entirely. The lingering
+    // TestStand engine / NI License-Manager (NILM) COM RCWs otherwise park the finalizer thread
+    // on EventPairLow LPC waits during normal shutdown, hanging the test host long after every
+    // result has been reported. TerminateProcess(GetCurrentProcess(), 0) exits cleanly (code 0)
+    // without running those finalizers.
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    private static extern bool TerminateProcess(IntPtr hProcess, uint uExitCode);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    private static extern IntPtr GetCurrentProcess();
+
     [OneTimeTearDown]
     public void DisconnectOnce()
     {
@@ -47,6 +58,21 @@ public class AssemblySetup
         _ts = null;
         _loggerFactory?.Dispose();
         _loggerFactory = null;
+
+        Console.Out.Flush();
+        Console.Error.Flush();
+
+        // Do NOT call Environment.Exit() here: OneTimeTearDown runs BEFORE the NUnit adapter
+        // sends its ExecutionComplete message to the vstest runner, so terminating now drops the
+        // socket mid-session and vstest reports "Test host process crashed" (exit 1) even though
+        // every test passed. Instead we let teardown return normally so the adapter completes the
+        // protocol, then hard-terminate from ProcessExit — which fires only once the CLR has begun
+        // shutting the host down (i.e. after ExecutionComplete was delivered), right before it
+        // would otherwise hang finalizing the TestStand/NILM COM RCWs.
+        AppDomain.CurrentDomain.ProcessExit += (_, __) =>
+        {
+            TerminateProcess(GetCurrentProcess(), 0);
+        };
     }
 }
 
