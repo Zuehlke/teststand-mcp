@@ -308,6 +308,45 @@ public class UserInfo
     public List<string> GroupMemberships { get; set; } = new();
 }
 
+// ── Output Message Models ────────────────────────────────────────────────────
+
+public class OutputMessageInfo
+{
+    public int Id { get; set; }
+    public string Category { get; set; } = "";
+    public string Message { get; set; } = "";
+    public string Severity { get; set; } = "";
+    public double TimeInSeconds { get; set; }
+}
+
+// ── Search Directory Models ──────────────────────────────────────────────────
+
+public class SearchDirectoryInfo
+{
+    public int Index { get; set; }
+    public string Path { get; set; } = "";
+    public string Type { get; set; } = "";
+    public bool Disabled { get; set; }
+    public bool SearchSubdirectories { get; set; }
+}
+
+// ── Data-Type Field Models ───────────────────────────────────────────────────
+
+public class TypeFieldInfo
+{
+    public string Name { get; set; } = "";
+    public string DataType { get; set; } = "";
+}
+
+// ── CSV Stream Models ────────────────────────────────────────────────────────
+
+public class CsvReadResult
+{
+    public string FilePath { get; set; } = "";
+    public int LineCount { get; set; }
+    public List<string> Lines { get; set; } = new();
+}
+
 // ── Engine / Station Models ──────────────────────────────────────────────────
 
 public class EnginePaths

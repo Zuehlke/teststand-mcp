@@ -1637,6 +1637,142 @@ public class TestStandToolRegistry
                     "Minimum severity to include: 'Information' (default), 'Warning', or 'Error'",
                     "Information", new[] { "Information", "Warning", "Error" }),
             AnalyzeSequenceFileAsync);
+
+        // ── Output & UI Messages ───────────────────────────────────────────────
+
+        Register("post_output_message",
+            "Post a message to the TestStand engine output-message list (visible in the " +
+            "sequence editor's Output pane).",
+            s => s
+                .AddRequired("message", "string", "Message text")
+                .AddOptional("category", "string", "Optional category/grouping label", "")
+                .AddOptional("severity", "string", "Severity: 'Information' (default), 'Warning', 'Error'",
+                    "Information", new[] { "Information", "Warning", "Error" }),
+            PostOutputMessageAsync);
+
+        Register("get_output_messages",
+            "List the messages currently in the engine output-message list.",
+            s => s.AddOptional("max_messages", "integer", "Maximum messages to return (default 200)", 200),
+            GetOutputMessagesAsync);
+
+        Register("clear_output_messages",
+            "Clear all messages from the engine output-message list.",
+            s => { },
+            ClearOutputMessagesAsync);
+
+        Register("post_ui_message",
+            "Post a UI message to a running execution's main thread (for custom operator " +
+            "interfaces). Requires an active execution_id.",
+            s => s
+                .AddRequired("execution_id", "string", "ID of the target execution")
+                .AddRequired("message_code", "string",
+                    "UIMessageCodes constant (e.g. 'UserMessageBase') or full 'UIMsg_*' name")
+                .AddOptional("numeric_data", "number", "Optional numeric payload", 0)
+                .AddOptional("string_data", "string", "Optional string payload", ""),
+            PostUiMessageAsync);
+
+        // ── Search Directories ──────────────────────────────────────────────────
+
+        Register("get_search_directories",
+            "List the TestStand engine search directories (used to resolve relative file paths).",
+            s => { },
+            GetSearchDirectoriesAsync);
+
+        Register("add_search_directory",
+            "Add a directory to the TestStand engine search-directory list.",
+            s => s
+                .AddRequired("path", "string", "Absolute directory path to add")
+                .AddOptional("index", "integer", "Insertion index; -1 appends at the end (default)", -1)
+                .AddOptional("search_subdirectories", "boolean",
+                    "Include subdirectories in the search (default true)", true),
+            AddSearchDirectoryAsync);
+
+        Register("remove_search_directory",
+            "Remove a directory from the TestStand engine search-directory list by path.",
+            s => s.AddRequired("path", "string", "Directory path to remove"),
+            RemoveSearchDirectoryAsync);
+
+        // ── Data-Type Field Editing ─────────────────────────────────────────────
+
+        Register("add_data_type_field",
+            "Add a field (subproperty) to a custom data type in a sequence file.",
+            s => s
+                .AddRequired("file_path", "string", "Path to the sequence file")
+                .AddRequired("type_name", "string", "Name of the custom data type")
+                .AddRequired("field_name", "string", "Name of the new field")
+                .AddRequired("field_type", "string",
+                    "Field type: 'Number', 'String', 'Boolean', or the name of another custom type")
+                .AddOptional("save", "boolean", "Save the file (default true)", true),
+            AddDataTypeFieldAsync);
+
+        Register("get_data_type_fields",
+            "List the fields (subproperties) of a custom data type.",
+            s => s
+                .AddRequired("file_path", "string", "Path to the sequence file")
+                .AddRequired("type_name", "string", "Name of the custom data type"),
+            GetDataTypeFieldsAsync);
+
+        Register("remove_data_type_field",
+            "Remove a field (subproperty) from a custom data type.",
+            s => s
+                .AddRequired("file_path", "string", "Path to the sequence file")
+                .AddRequired("type_name", "string", "Name of the custom data type")
+                .AddRequired("field_name", "string", "Name of the field to remove")
+                .AddOptional("save", "boolean", "Save the file (default true)", true),
+            RemoveDataTypeFieldAsync);
+
+        // ── CSV Record Streams ──────────────────────────────────────────────────
+
+        Register("write_csv_lines",
+            "Write lines to a CSV file using the TestStand CSV output record stream.",
+            s => s
+                .AddRequired("file_path", "string", "Absolute path to the CSV file")
+                .AddArray("lines", "Lines to write (each becomes one CSV row)",
+                    item => item.AddRequired("value", "string", "A single CSV line")),
+            WriteCsvLinesAsync);
+
+        Register("read_csv_lines",
+            "Read lines from a CSV file using the TestStand CSV input record stream.",
+            s => s
+                .AddRequired("file_path", "string", "Absolute path to the CSV file")
+                .AddOptional("max_lines", "integer", "Maximum lines to read (default 1000)", 1000),
+            ReadCsvLinesAsync);
+
+        // ── Result Logging / Batch / Interactive / Report Sections ──────────────
+
+        Register("create_result_log",
+            "Create a TestStand ResultLog helper object (logging used by process models). " +
+            "Headless this confirms the object can be created.",
+            s => s
+                .AddOptional("file_path", "string", "Associated file path (optional)", "")
+                .AddOptional("format", "string", "Log format hint (default 'ASCII')", "ASCII"),
+            CreateResultLogAsync);
+
+        Register("create_batch_sync_object",
+            "Create a Batch synchronization object. Note: batch sync is normally provided by " +
+            "the batch process model and may not be available as a standalone object.",
+            s => s.AddRequired("name", "string", "Name for the batch sync object"),
+            CreateBatchSyncObjectAsync);
+
+        Register("run_steps_interactively",
+            "Set up interactive execution of selected steps (NewInteractiveArgs). Full " +
+            "interactive runs require an active editor context.",
+            s => s
+                .AddRequired("file_path", "string", "Path to the sequence file")
+                .AddRequired("sequence_name", "string", "Name of the sequence")
+                .AddRequired("step_group", "string", "Step group: 'Setup', 'Main', or 'Cleanup'")
+                .AddArray("step_names", "Names of the steps to run interactively",
+                    item => item.AddRequired("value", "string", "A step name"))
+                .AddOptional("timeout_seconds", "integer", "Timeout in seconds (default 60)", 60),
+            RunStepsInteractivelyAsync);
+
+        Register("add_report_section",
+            "Append a custom section to a running/completed execution's report.",
+            s => s
+                .AddRequired("execution_id", "string", "ID of the target execution")
+                .AddRequired("title", "string", "Section title")
+                .AddOptional("body", "string", "Section body text", ""),
+            AddReportSectionAsync);
     }
 
     private void Register(string name, string description,
@@ -3061,6 +3197,158 @@ public class TestStandToolRegistry
         var minSeverity = args!.Value.GetStringOrDefault("min_severity", "Information");
         var result      = await _ts.RunSequenceAnalyzerDetailedAsync(filePath, minSeverity);
         return OkJson(result);
+    }
+
+    // ── Output & UI Message Handlers ──────────────────────────────────────────
+
+    private async Task<CallToolResult> PostOutputMessageAsync(JsonElement? args)
+    {
+        var message  = args!.Value.GetRequiredString("message");
+        var category = args!.Value.GetStringOrDefault("category", "");
+        var severity = args!.Value.GetStringOrDefault("severity", "Information");
+        return OkJson(await _ts.PostOutputMessageAsync(message, category, severity));
+    }
+
+    private async Task<CallToolResult> GetOutputMessagesAsync(JsonElement? args)
+    {
+        var max = args.HasValue ? args.Value.GetIntOrDefault("max_messages", 200) : 200;
+        return OkJson(await _ts.GetOutputMessagesAsync(max));
+    }
+
+    private async Task<CallToolResult> ClearOutputMessagesAsync(JsonElement? _)
+    {
+        await _ts.ClearOutputMessagesAsync();
+        return Ok("Output messages cleared.");
+    }
+
+    private async Task<CallToolResult> PostUiMessageAsync(JsonElement? args)
+    {
+        var execId  = args!.Value.GetRequiredString("execution_id");
+        var code    = args!.Value.GetRequiredString("message_code");
+        var numeric = args!.Value.TryGetProperty("numeric_data", out var n) && n.TryGetDouble(out var d) ? d : 0;
+        var str     = args!.Value.GetStringOrDefault("string_data", "");
+        await _ts.PostUiMessageAsync(execId, code, numeric, str);
+        return Ok($"UI message '{code}' posted to execution {execId}.");
+    }
+
+    // ── Search Directory Handlers ─────────────────────────────────────────────
+
+    private async Task<CallToolResult> GetSearchDirectoriesAsync(JsonElement? _)
+        => OkJson(await _ts.GetSearchDirectoriesAsync());
+
+    private async Task<CallToolResult> AddSearchDirectoryAsync(JsonElement? args)
+    {
+        var path = args!.Value.GetRequiredString("path");
+        var idx  = args!.Value.GetIntOrDefault("index", -1);
+        var sub  = args!.Value.GetBoolOrDefault("search_subdirectories", true);
+        await _ts.AddSearchDirectoryAsync(path, idx, sub);
+        return Ok($"Search directory added: {path}");
+    }
+
+    private async Task<CallToolResult> RemoveSearchDirectoryAsync(JsonElement? args)
+    {
+        var path = args!.Value.GetRequiredString("path");
+        await _ts.RemoveSearchDirectoryAsync(path);
+        return Ok($"Search directory removed: {path}");
+    }
+
+    // ── Data-Type Field Handlers ──────────────────────────────────────────────
+
+    private async Task<CallToolResult> AddDataTypeFieldAsync(JsonElement? args)
+    {
+        await _ts.AddDataTypeFieldAsync(
+            args!.Value.GetRequiredString("file_path"),
+            args!.Value.GetRequiredString("type_name"),
+            args!.Value.GetRequiredString("field_name"),
+            args!.Value.GetRequiredString("field_type"),
+            args!.Value.GetBoolOrDefault("save", true));
+        return Ok("Data-type field added.");
+    }
+
+    private async Task<CallToolResult> GetDataTypeFieldsAsync(JsonElement? args)
+    {
+        var fields = await _ts.GetDataTypeFieldsAsync(
+            args!.Value.GetRequiredString("file_path"),
+            args!.Value.GetRequiredString("type_name"));
+        return OkJson(fields);
+    }
+
+    private async Task<CallToolResult> RemoveDataTypeFieldAsync(JsonElement? args)
+    {
+        await _ts.RemoveDataTypeFieldAsync(
+            args!.Value.GetRequiredString("file_path"),
+            args!.Value.GetRequiredString("type_name"),
+            args!.Value.GetRequiredString("field_name"),
+            args!.Value.GetBoolOrDefault("save", true));
+        return Ok("Data-type field removed.");
+    }
+
+    // ── CSV Stream Handlers ───────────────────────────────────────────────────
+
+    private async Task<CallToolResult> WriteCsvLinesAsync(JsonElement? args)
+    {
+        var filePath = args!.Value.GetRequiredString("file_path");
+        var lines    = ExtractStringArray(args!.Value, "lines");
+        await _ts.WriteCsvLinesAsync(filePath, lines);
+        return Ok($"Wrote {lines.Count} line(s) to {filePath}");
+    }
+
+    private async Task<CallToolResult> ReadCsvLinesAsync(JsonElement? args)
+    {
+        var filePath = args!.Value.GetRequiredString("file_path");
+        var max      = args!.Value.GetIntOrDefault("max_lines", 1000);
+        return OkJson(await _ts.ReadCsvLinesAsync(filePath, max));
+    }
+
+    // ── Result Log / Batch / Interactive / Report Section Handlers ────────────
+
+    private async Task<CallToolResult> CreateResultLogAsync(JsonElement? args)
+    {
+        var filePath = args.HasValue ? args.Value.GetStringOrDefault("file_path", "") : "";
+        var format   = args.HasValue ? args.Value.GetStringOrDefault("format", "ASCII") : "ASCII";
+        return Ok(await _ts.CreateResultLogAsync(filePath, format));
+    }
+
+    private async Task<CallToolResult> CreateBatchSyncObjectAsync(JsonElement? args)
+    {
+        var name = args!.Value.GetRequiredString("name");
+        await _ts.CreateBatchSyncObjectAsync(name);
+        return Ok($"Batch sync object '{name}' created.");
+    }
+
+    private async Task<CallToolResult> RunStepsInteractivelyAsync(JsonElement? args)
+    {
+        var filePath = args!.Value.GetRequiredString("file_path");
+        var seqName  = args!.Value.GetRequiredString("sequence_name");
+        var group    = args!.Value.GetRequiredString("step_group");
+        var steps    = ExtractStringArray(args!.Value, "step_names");
+        var timeout  = args!.Value.GetIntOrDefault("timeout_seconds", 60);
+        return Ok(await _ts.RunStepsInteractivelyAsync(filePath, seqName, group, steps, timeout));
+    }
+
+    private async Task<CallToolResult> AddReportSectionAsync(JsonElement? args)
+    {
+        var execId = args!.Value.GetRequiredString("execution_id");
+        var title  = args!.Value.GetRequiredString("title");
+        var body   = args!.Value.GetStringOrDefault("body", "");
+        return Ok(await _ts.AddReportSectionAsync(execId, title, body));
+    }
+
+    // Extracts a list of strings from an array argument whose items are either bare
+    // strings or objects of the form { "value": "..." }.
+    private static List<string> ExtractStringArray(JsonElement args, string key)
+    {
+        var result = new List<string>();
+        if (!args.TryGetProperty(key, out var arr) || arr.ValueKind != JsonValueKind.Array)
+            return result;
+        foreach (var el in arr.EnumerateArray())
+        {
+            if (el.ValueKind == JsonValueKind.String)
+                result.Add(el.GetString() ?? "");
+            else if (el.ValueKind == JsonValueKind.Object && el.TryGetProperty("value", out var v))
+                result.Add(v.GetString() ?? "");
+        }
+        return result;
     }
 
     // ── Thread-Level Execution Control Handlers ───────────────────────────────
