@@ -197,13 +197,16 @@ public class TestStandToolRegistry
             ValidateSequencePlanAsync);
 
         Register("insert_local_variable",
-            "Insert a new local variable into a sequence.",
+            "Insert a new local variable into a sequence. To create an ARRAY local (required " +
+            "before get_array_variable/set_array_element/resize_array_variable can be used), " +
+            "append '[]' to the type (e.g. 'number[]') or prefix 'array:' (e.g. 'array:string').",
             s => s
                 .AddRequired("file_path", "string", "Path to the sequence file")
                 .AddRequired("sequence_name", "string", "Name of the sequence")
                 .AddRequired("variable_name", "string", "Name of the local variable")
                 .AddRequired("data_type", "string",
-                    "Data type: 'string', 'number', 'boolean'")
+                    "Data type: 'string', 'number', 'boolean'. Append '[]' (or prefix 'array:') " +
+                    "for an array, e.g. 'number[]', 'array:string'.")
                 .AddOptional("default_value", "string", "Optional default value"),
             InsertLocalVariableAsync);
 
@@ -344,11 +347,14 @@ public class TestStandToolRegistry
             GetStationGlobalsAsync);
 
         Register("insert_file_global",
-            "Insert a new FileGlobal variable into a sequence file.",
+            "Insert a new FileGlobal variable into a sequence file. To create an ARRAY file " +
+            "global (required before the array tools can operate on it), append '[]' to the " +
+            "type (e.g. 'number[]') or prefix 'array:' (e.g. 'array:string').",
             s => s
                 .AddRequired("sequence_file_path", "string", "Path to the sequence file")
                 .AddRequired("variable_name", "string", "Name of the new FileGlobal variable")
-                .AddRequired("data_type", "string", "Data type: 'string', 'number', 'boolean'"),
+                .AddRequired("data_type", "string", "Data type: 'string', 'number', 'boolean'. " +
+                    "Append '[]' (or prefix 'array:') for an array, e.g. 'number[]', 'array:string'."),
             InsertFileGlobalAsync);
 
         Register("set_file_global",
@@ -581,11 +587,16 @@ public class TestStandToolRegistry
             GetEnginePathsAsync);
 
         Register("check_expression",
-            "Validate a TestStand expression for syntax correctness.",
+            "Validate a TestStand expression for syntax correctness. " +
+            "NOTE: the engine's CheckExprSyntax needs a LOADED sequence file as context — " +
+            "in practice pass 'sequence_file_path' pointing at an already created/open file " +
+            "(create_sequence_file first). Without a loaded file even a valid expression can " +
+            "fail to validate.",
             s => s
                 .AddRequired("expression", "string", "TestStand expression to validate")
                 .AddOptional("sequence_file_path", "string",
-                    "Optional sequence file path for context"),
+                    "Path to a loaded sequence file used as evaluation context. " +
+                    "Effectively required — the file must already be open/created."),
             CheckExpressionAsync);
 
         Register("evaluate_expression",
@@ -912,7 +923,9 @@ public class TestStandToolRegistry
 
         Register("set_step_module_unload_option",
             "Set the module unload option of a step. " +
-            "Options: 'OnPreconditionFailure' (1), 'AfterStepExecution' (2), 'AfterSequenceExecution' (3), 'WithSequenceFile' (4), 'UseStepUnloadOption' (5).",
+            "Options: 'OnPreconditionFailure' (1), 'AfterStepExecution' (2), 'AfterSequenceExecution' (3), 'WithSequenceFile' (4), 'UseStepUnloadOption' (5). " +
+            "CAVEAT: 'UseStepUnloadOption' (5) is only valid at the sequence-file / model level — " +
+            "TestStand REJECTS it on an individual step. Use one of (1)-(4) for a per-step setting.",
             s => s
                 .AddRequired("file_path", "string", "Path to the sequence file")
                 .AddRequired("sequence_name", "string", "Name of the sequence")
@@ -979,14 +992,20 @@ public class TestStandToolRegistry
         Register("get_undo_stack",
             "Get the current undo/redo stack status: whether undo/redo is available, " +
             "and the list of undo and redo items with their names. " +
-            "Pass file_path for a file-level undo stack, omit for the engine-level stack.",
+            "Pass file_path for a file-level undo stack, omit for the engine-level stack. " +
+            "NOTE: the headless Engine API does NOT auto-record edits made via these MCP tools — " +
+            "automatic undo recording is a Sequence Editor feature. On a freshly created file " +
+            "CanUndo is false and there is nothing to undo. Do not rely on undo to revert MCP edits.",
             s => s.AddOptional("file_path", "string",
                 "Optional sequence file path for a file-level undo stack"),
             GetUndoStackAsync);
 
         Register("undo",
             "Undo the last operation on the undo stack. " +
-            "Returns true if an undo was performed, false if nothing to undo.",
+            "Returns true if an undo was performed, false if nothing to undo. " +
+            "NOTE: edits made through the headless MCP tools are NOT auto-recorded onto the " +
+            "undo stack, so this will normally return false right after such edits. To revert " +
+            "an MCP edit, perform the inverse operation explicitly.",
             s => s.AddOptional("file_path", "string",
                 "Optional sequence file path for a file-level undo"),
             UndoAsync);
@@ -1043,7 +1062,10 @@ public class TestStandToolRegistry
             "Create a TestStand synchronization object. " +
             "Types: 'Semaphore', 'Mutex', 'Queue', 'Notification', 'Rendezvous'. " +
             "initial_value: start count for Semaphore / num threads for Rendezvous. " +
-            "max_value: max count for Semaphore / max queue size for Queue.",
+            "max_value: max count for Semaphore / max queue size for Queue. " +
+            "NOTE: a headless engine has no execution context and may not expose a SyncManager — " +
+            "an InvalidOperationException ('SyncManager unavailable') is then EXPECTED, not a bug. " +
+            "Sync objects are normally created/used from within a running execution.",
             s => s
                 .AddRequired("name", "string", "Unique name for the sync object")
                 .AddRequired("type", "string",
@@ -1286,7 +1308,9 @@ public class TestStandToolRegistry
 
         Register("get_array_variable",
             "Read elements of an array local variable or file global. " +
-            "Returns an array of {index, value, type} objects.",
+            "Returns an array of {index, value, type} objects. The variable must already be an " +
+            "array — create one with insert_local_variable/insert_file_global using a 'number[]' " +
+            "(or 'array:number') data type.",
             s => s
                 .AddRequired("file_path", "string", "Path to the sequence file")
                 .AddOptional("sequence_name", "string",
@@ -1298,7 +1322,9 @@ public class TestStandToolRegistry
             GetArrayVariableAsync);
 
         Register("set_array_element",
-            "Set one element of an array local variable or file global.",
+            "Set one element of an array local variable or file global. The variable must " +
+            "already be an array (see insert_local_variable/insert_file_global with a 'number[]' " +
+            "type); grow it first with resize_array_variable if the index is out of range.",
             s => s
                 .AddRequired("file_path", "string", "Path to the sequence file")
                 .AddOptional("sequence_name", "string",
@@ -1309,7 +1335,10 @@ public class TestStandToolRegistry
             SetArrayElementAsync);
 
         Register("resize_array_variable",
-            "Resize an array local variable or file global to a new number of elements.",
+            "Resize an array local variable or file global to a new number of elements. The " +
+            "variable must already be an array (create one via insert_local_variable/" +
+            "insert_file_global with a 'number[]' or 'array:number' data type) — this does not " +
+            "convert a scalar into an array.",
             s => s
                 .AddRequired("file_path", "string", "Path to the sequence file")
                 .AddOptional("sequence_name", "string",
@@ -1725,7 +1754,8 @@ public class TestStandToolRegistry
 
         Register("post_ui_message",
             "Post a UI message to a running execution's main thread (for custom operator " +
-            "interfaces). Requires an active execution_id.",
+            "interfaces). Requires an active execution_id — only meaningful during a LIVE run. " +
+            "An unknown/stale execution_id raises a clear error (KeyNotFoundException).",
             s => s
                 .AddRequired("execution_id", "string", "ID of the target execution")
                 .AddRequired("message_code", "string",
@@ -1813,7 +1843,9 @@ public class TestStandToolRegistry
 
         Register("create_batch_sync_object",
             "Create a Batch synchronization object. Note: batch sync is normally provided by " +
-            "the batch process model and may not be available as a standalone object.",
+            "the batch process model and may not be available as a standalone object. " +
+            "A NotSupportedException (no standalone batch sync) or InvalidOperationException " +
+            "(no SyncManager headless) is EXPECTED in a headless engine — not a bug.",
             s => s.AddRequired("name", "string", "Name for the batch sync object"),
             CreateBatchSyncObjectAsync);
 
@@ -1830,7 +1862,9 @@ public class TestStandToolRegistry
             RunStepsInteractivelyAsync);
 
         Register("add_report_section",
-            "Append a custom section to a running/completed execution's report.",
+            "Append a custom section to a running/completed execution's report. " +
+            "Requires a real execution_id — an unknown/stale id raises a clear error " +
+            "(KeyNotFoundException). Only meaningful once an execution exists.",
             s => s
                 .AddRequired("execution_id", "string", "ID of the target execution")
                 .AddRequired("title", "string", "Section title")
