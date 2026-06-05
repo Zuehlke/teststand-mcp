@@ -335,11 +335,12 @@ public interface ITestStandService : IDisposable
     Task<UserInfo?> GetCurrentUserAsync();
     Task<bool> UserNameExistsAsync(string loginName);
     Task CreateUserAsync(string loginName, string fullName, string password,
-        bool persist = true);
+        string? profileName = null, bool persist = true);
     Task DeleteUserAsync(string loginName, bool persist = true);
     Task SetUserPasswordAsync(string loginName, string password, bool persist = true);
     Task<List<string>> GetUserPrivilegesAsync(string loginName);
     Task<bool> CheckUserPrivilegeAsync(string loginName, string privilege);
+    Task<List<string>> GetUserProfilesAsync();
 
     // ── Native Find / Replace (PropertyObject.Search / SearchMatch) ──────────
     Task<FindReplaceResult> FindInFileAsync(string filePath, string pattern,
@@ -4534,7 +4535,7 @@ public class TestStandService : ITestStandService
     }
 
     public async Task CreateUserAsync(string loginName, string fullName,
-        string password, bool persist = true)
+        string password, string? profileName = null, bool persist = true)
     {
         EnsureConnected();
         await Task.Run(() =>
@@ -4548,7 +4549,18 @@ public class TestStandService : ITestStandService
             NiUsersFile usersFile     = eng.UsersFile;
             NiPropertyObject userList = usersFile.UserList;
 
-            NiUser newUser    = eng.NewUser(null);
+            // Engine.NewUser(profile) seeds the new user with the privileges of the given
+            // user profile (e.g. "Administrator"); NewUser(null) yields minimal defaults.
+            NiUser? profile = null;
+            if (!string.IsNullOrWhiteSpace(profileName))
+            {
+                profile = ResolveUserProfile(eng, profileName!)
+                    ?? throw new ArgumentException(
+                        $"User profile '{profileName}' not found. Available profiles: " +
+                        string.Join(", ", EnumerateUserProfileNames(eng)));
+            }
+
+            NiUser newUser    = eng.NewUser(profile);
             newUser.LoginName = loginName;
             newUser.FullName  = fullName ?? "";
             if (!string.IsNullOrEmpty(password)) newUser.Password = password;
@@ -4625,6 +4637,51 @@ public class TestStandService : ITestStandService
             try { return user.HasPrivilege(privilege); }
             catch { return false; }
         });
+    }
+
+    public async Task<List<string>> GetUserProfilesAsync()
+    {
+        EnsureConnected();
+        return await Task.Run(() => EnumerateUserProfileNames((NiEngine)_engine!));
+    }
+
+    /// <summary>
+    /// Resolve a user profile (privilege template) by name — exact match first, then
+    /// case-insensitive against the UserProfileList. Returns null if no profile matches.
+    /// </summary>
+    private static NiUser? ResolveUserProfile(NiEngine eng, string profileName)
+    {
+        try { var p = eng.GetUserProfile(profileName); if (p != null) return p; } catch { }
+        foreach (var name in EnumerateUserProfileNames(eng))
+        {
+            if (string.Equals(name, profileName, StringComparison.OrdinalIgnoreCase))
+            {
+                try { return eng.GetUserProfile(name); } catch { }
+            }
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Login names of the user profiles defined in the users file (e.g. Administrator,
+    /// Developer, Technician, Operator). Profiles live in UsersFile.UserProfileList, an
+    /// array PropertyObject, so element count comes from offset enumeration.
+    /// </summary>
+    private static List<string> EnumerateUserProfileNames(NiEngine eng)
+    {
+        var names = new List<string>();
+        try
+        {
+            NiPropertyObject profiles = eng.UsersFile.UserProfileList;
+            int n = CountArrayElements(profiles);
+            for (int i = 0; i < n; i++)
+            {
+                try { names.Add(profiles.GetPropertyObjectByOffset(i, 0).GetValString("LoginName", 0)); }
+                catch { }
+            }
+        }
+        catch { }
+        return names;
     }
 
     private UserInfo MapUser(NiPropertyObject userPo)

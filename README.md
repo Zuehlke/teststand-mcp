@@ -160,6 +160,12 @@ Migrated the server from **.NET Framework 4.8 to .NET 8** (`net8.0-windows`, x86
 - Clean shutdown: the process now hard-terminates on exit, avoiding the `0xC0000409` crash and WER
   dialog caused by finalizing lingering TestStand / NILM COM objects.
 
+Also adds **user-profile privilege support**:
+- `create_user` gains an optional `profile` argument — the new user is seeded from the named user
+  profile (e.g. `Administrator`), granting that profile's full privilege set. Empty = minimal defaults.
+- New `get_user_profiles` tool lists the available profiles (`Operator` / `Technician` /
+  `Developer` / `Administrator`).
+
 ### V0.0.4
 Adds the medium-priority API gaps plus UI messages — **16 new tools**:
 - **Output & UI messages**: `post_output_message`, `get_output_messages`,
