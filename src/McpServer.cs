@@ -24,7 +24,7 @@ public class McpServer
     private readonly ILogger<McpServer> _logger;
     private bool _initialized;
     private readonly Queue<string> _commandHistory = new();
-    private int _panelLinesWritten = 0;
+    private int _panelLinesWritten;
 
     private static readonly JsonSerializerOptions _jsonOpts = new()
     {
@@ -34,6 +34,7 @@ public class McpServer
             System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
     };
 
+    /// <summary>Creates the MCP server with its tool registry, providers and logger.</summary>
     public McpServer(
         TestStandToolRegistry tools,
         TestStandResourceProvider resources,
@@ -46,6 +47,7 @@ public class McpServer
         _logger    = logger;
     }
 
+    /// <summary>Runs the stdio JSON-RPC read/dispatch/write loop until cancelled or EOF.</summary>
     public async Task RunAsync(CancellationToken ct = default)
     {
         _logger.LogInformation("TestStand MCP Server starting (stdio transport)...");
@@ -245,14 +247,17 @@ public class McpServer
                 Console.Error.WriteLine();
         }
 
-        _panelLinesWritten = 11; // 1 Headerzeile + 10 Slots
+        _panelLinesWritten = 11; // 1 header line + 10 slots
     }
 }
 
 // ── Custom Exception ──────────────────────────────────────────────────────────
 
+/// <summary>An MCP/JSON-RPC error carrying a numeric error code.</summary>
 public class McpException : Exception
 {
+    /// <summary>The JSON-RPC error code.</summary>
     public int Code { get; }
+    /// <summary>Creates an exception with the given JSON-RPC code and message.</summary>
     public McpException(int code, string message) : base(message) { Code = code; }
 }

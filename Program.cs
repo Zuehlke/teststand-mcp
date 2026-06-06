@@ -92,7 +92,7 @@ internal class Program
         var logger = sp.GetRequiredService<ILogger<Program>>();
         logger.LogInformation("TestStand MCP Server v1.0.0 starting...");
         logger.LogInformation("Platform: {OS}", Environment.OSVersion);
-        logger.LogInformation("Runtime: {Runtime}", System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription);
+        logger.LogInformation("Runtime: {Runtime}", RuntimeInformation.FrameworkDescription);
 
         // Handle --version flag
         if (args.Contains("--version"))

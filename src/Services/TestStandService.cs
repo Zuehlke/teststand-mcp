@@ -4,12 +4,19 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Text.RegularExpressions;
 using TestStandMCP.Models;
 using Microsoft.Extensions.Logging;
+using Microsoft.Win32;
 using NiSequenceFile      = NationalInstruments.TestStand.Interop.API.SequenceFile;
+using NiSequence          = NationalInstruments.TestStand.Interop.API.Sequence;
+using NiStep              = NationalInstruments.TestStand.Interop.API.Step;
 using NiPropertyObject    = NationalInstruments.TestStand.Interop.API.PropertyObject;
 using NiPropValueTypes    = NationalInstruments.TestStand.Interop.API.PropertyValueTypes;
-using NiEngine            = NationalInstruments.TestStand.Interop.API.IEngine;
+using NiEngine            = NationalInstruments.TestStand.Interop.API.Engine;
+using NiConflictHandler   = NationalInstruments.TestStand.Interop.API.TypeConflictHandlerTypes;
+using NiExecution         = NationalInstruments.TestStand.Interop.API.Execution;
+using NiStepGroups        = NationalInstruments.TestStand.Interop.API.StepGroups;
 using PropertyObjectFile  = NationalInstruments.TestStand.Interop.API.PropertyObjectFile;
 using NiWriteFileFormat   = NationalInstruments.TestStand.Interop.API.WriteFileFormat;
 using NiPropOptions       = NationalInstruments.TestStand.Interop.API.PropertyOptions;
@@ -31,394 +38,599 @@ namespace TestStandMCP.Services;
 
 // ── Interface ────────────────────────────────────────────────────────────────
 
+/// <summary>Defines the contract for interacting with the NI TestStand engine.</summary>
 public interface ITestStandService : IDisposable
 {
     // Engine
+    /// <summary>Returns station and engine information for the currently connected TestStand engine.</summary>
     Task<StationInfo> GetStationInfoAsync();
+    /// <summary>Connects to (or creates) the TestStand engine, optionally using the specified engine path.</summary>
     Task<bool> ConnectAsync(string? enginePath = null);
+    /// <summary>Disconnects from and shuts down the TestStand engine.</summary>
     Task DisconnectAsync();
+    /// <summary>Gets a value indicating whether the service is currently connected to a TestStand engine.</summary>
     bool IsConnected { get; }
 
     // Sequence Files
+    /// <summary>Opens the sequence file at the given path and returns its metadata.</summary>
     Task<SequenceFileInfo> OpenSequenceFileAsync(string filePath);
+    /// <summary>Closes and releases the sequence file at the given path.</summary>
     Task CloseSequenceFileAsync(string filePath);
+    /// <summary>Returns the list of all currently loaded sequence files.</summary>
     Task<List<SequenceFileInfo>> GetLoadedSequenceFilesAsync();
+    /// <summary>Returns a summary list of all currently loaded sequence files.</summary>
     Task<List<SequenceFileSummary>> GetLoadedSequenceFilesSummaryAsync();
+    /// <summary>Returns the details of the named sequence within the given sequence file.</summary>
     Task<SequenceInfo> GetSequenceAsync(string filePath, string sequenceName);
+    /// <summary>Saves the sequence file at the given path to disk.</summary>
     Task SaveSequenceFileAsync(string filePath);
+    /// <summary>Creates a new empty sequence file at the given path and returns the path.</summary>
     Task<string> CreateSequenceFileAsync(string filePath);
+    /// <summary>Inserts a new sequence with the given name into the specified sequence file.</summary>
     Task InsertSequenceAsync(string filePath, string sequenceName);
+    /// <summary>Inserts a single step into the specified sequence and step group at the given index.</summary>
     Task InsertStepAsync(string filePath, string sequenceName, string stepGroup,
         string stepType, string stepName, int index = -1, string? adapterName = null);
+    /// <summary>Bulk-inserts multiple steps into the specified sequence in a single operation.</summary>
     Task<BulkInsertResult> InsertStepsBulkAsync(string filePath, string sequenceName,
         string stepGroup, List<BulkStepSpec> steps, bool save = true);
+    /// <summary>Inserts a new local variable into the specified sequence.</summary>
     Task InsertLocalVariableAsync(string filePath, string sequenceName,
         string variableName, string dataType, string? defaultValue = null);
+    /// <summary>Sets the comment (description) on a local variable in the specified sequence.</summary>
     Task SetLocalVariableCommentAsync(string filePath, string sequenceName,
         string variableName, string comment);
+    /// <summary>Sets the value of a local variable in the specified sequence.</summary>
     Task SetLocalVariableValueAsync(string filePath, string sequenceName,
         string variableName, string value);
+    /// <summary>Returns all local variables defined in the specified sequence.</summary>
     Task<List<VariableInfo>> GetLocalVariablesAsync(string filePath, string sequenceName);
+    /// <summary>Sets the expression on the specified step (e.g. the Statement expression or condition).</summary>
     Task SetStepExpressionAsync(string filePath, string sequenceName, string stepGroup,
         string stepName, string expression, string expressionType = "Statement");
 
+    /// <summary>Configures a SequenceCall step to invoke the named target sequence (optionally in another file).</summary>
     Task SetSequenceCallTargetAsync(string filePath, string sequenceName, string stepGroup,
         string stepName, string targetSequenceName, string targetSequenceFile = "");
 
+    /// <summary>Sets the code-module path for the specified step.</summary>
     Task SetStepModulePathAsync(string filePath, string sequenceName, string stepGroup,
         string stepName, string modulePath);
 
     // Executions
+    /// <summary>Starts execution of an entry point in the given sequence file and returns execution info.</summary>
     Task<ExecutionInfo> StartExecutionAsync(string sequenceFilePath, string entryPoint,
         Dictionary<string, object>? parameters = null);
+    /// <summary>Waits for the specified execution to complete within the given timeout and returns the result.</summary>
     Task<ExecutionResult> WaitForExecutionAsync(string executionId, int timeoutSeconds = 300);
+    /// <summary>Returns the current status of the specified execution.</summary>
     Task<ExecutionInfo> GetExecutionStatusAsync(string executionId);
+    /// <summary>Returns all currently active executions.</summary>
     Task<List<ExecutionInfo>> GetActiveExecutionsAsync();
+    /// <summary>Terminates the specified execution.</summary>
     Task TerminateExecutionAsync(string executionId);
+    /// <summary>Runs a sequence synchronously and returns the result.</summary>
     Task<ExecutionResult> RunSequenceAsync(string sequenceFilePath, string sequenceName,
         Dictionary<string, object>? parameters = null, int timeoutSeconds = 300);
 
     // Variables & Properties
+    /// <summary>Gets the value of a TestStand property identified by a lookup string.</summary>
     Task<PropertyValue> GetPropertyAsync(string lookupString);
+    /// <summary>Sets the value of a TestStand property identified by a lookup string.</summary>
     Task SetPropertyAsync(string lookupString, object value);
+    /// <summary>Evaluates a TestStand expression and returns the result.</summary>
     Task<ExpressionResult> EvaluateExpressionAsync(string expression,
         string? sequenceFilePath = null);
+    /// <summary>Returns the property object (and its sub-properties) at the specified path within a sequence file.</summary>
     Task<PropertyObjectInfo> GetPropertyObjectAsync(string filePath,
         string? sequenceName, string propertyName);
+    /// <summary>Sets the typed value of a property within a sequence file or sequence.</summary>
     Task SetPropertyValueAsync(string filePath, string? sequenceName,
         string propertyName, string valueType, string? value);
+    /// <summary>Deletes a sub-property from a file global or sequence local variable container.</summary>
     Task DeleteSubPropertyAsync(string filePath, string? sequenceName,
         string propertyName);
+    /// <summary>Returns all file-global variables defined in the given sequence file.</summary>
     Task<List<VariableInfo>> GetFileGlobalsAsync(string sequenceFilePath);
+    /// <summary>Returns all station global variables for the connected engine.</summary>
     Task<List<VariableInfo>> GetStationGlobalsAsync();
+    /// <summary>Sets the value of a file-global variable in the given sequence file.</summary>
     Task SetFileGlobalAsync(string sequenceFilePath, string variableName, object value);
+    /// <summary>Sets the value of a station global variable.</summary>
     Task SetStationGlobalAsync(string variableName, object value);
     /// <summary>Delete a StationGlobal and commit the change to disk. The delete counterpart
     /// to <see cref="SetStationGlobalAsync"/> (no-op if the global does not exist).</summary>
     Task DeleteStationGlobalAsync(string variableName);
+    /// <summary>Inserts a new file-global variable of the specified data type into the given sequence file.</summary>
     Task InsertFileGlobalAsync(string sequenceFilePath, string variableName, string dataType);
 
     // Steps
+    /// <summary>Returns all steps in the specified sequence.</summary>
     Task<List<StepInfo>> GetStepsAsync(string sequenceFilePath, string sequenceName);
+    /// <summary>Returns the details of a single named step in the specified sequence.</summary>
     Task<StepInfo> GetStepAsync(string sequenceFilePath, string sequenceName, string stepName);
+    /// <summary>Enables or disables the specified step.</summary>
     Task EnableStepAsync(string sequenceFilePath, string sequenceName, string stepName, bool enabled);
+    /// <summary>Returns a dictionary of all properties for the specified step.</summary>
     Task<Dictionary<string, object>> GetStepPropertiesAsync(string sequenceFilePath,
         string sequenceName, string stepName);
 
     // Sequence Analyzer
+    /// <summary>Runs the TestStand Sequence Analyzer on the given file and returns any messages.</summary>
     Task<List<AnalyzerMessage>> RunSequenceAnalyzerAsync(string filePath);
 
     // Reports
+    /// <summary>Generates a report for the specified execution and writes it to the output path.</summary>
     Task<ReportInfo> GenerateReportAsync(string executionId, string outputPath,
         string format = "HTML");
+    /// <summary>Returns the report text for the specified execution.</summary>
     Task<string> GetReportTextAsync(string executionId);
 
     // UUT / Batch
+    /// <summary>Returns UUT (Unit Under Test) information for the specified execution.</summary>
     Task<UutInfo> GetUutInfoAsync(string executionId);
+    /// <summary>Sets the UUT serial number for the specified execution.</summary>
     Task SetUutSerialNumberAsync(string executionId, string serialNumber);
+    /// <summary>Sets the UUT part number for the specified execution.</summary>
     Task SetUutPartNumberAsync(string executionId, string partNumber);
 
     // Adapters
+    /// <summary>Returns a list of all currently loaded adapters.</summary>
     Task<List<AdapterInfo>> GetLoadedAdaptersAsync();
+    /// <summary>Loads the specified adapter into the engine.</summary>
     Task LoadAdapterAsync(string adapterName);
+    /// <summary>Unloads the specified adapter from the engine.</summary>
     Task UnloadAdapterAsync(string adapterName);
 
     // Logging
+    /// <summary>Returns the execution log entries for the specified execution.</summary>
     Task<List<LogEntry>> GetExecutionLogAsync(string executionId, int maxEntries = 100);
+    /// <summary>Clears the execution log for the specified execution.</summary>
     Task ClearLogAsync(string executionId);
 
     // Process Model
+    /// <summary>Returns the path to the current process model sequence file.</summary>
     Task<string> GetProcessModelAsync();
+    /// <summary>Sets the active process model to the specified sequence file path.</summary>
     Task SetProcessModelAsync(string processModelPath);
 
     // Database / Result Schema
+    /// <summary>Returns the names of all available result schemas.</summary>
     Task<List<string>> GetResultSchemasAsync();
+    /// <summary>Exports execution results using the specified schema to the output path.</summary>
     Task<string> ExportResultsAsync(string executionId, string schemaName, string outputPath);
 
     // Type Palettes
+    /// <summary>Returns all loaded type palettes.</summary>
     Task<List<TypePaletteInfo>> GetTypePalettesAsync();
+    /// <summary>Loads the type palette file at the specified path.</summary>
     Task LoadTypePaletteAsync(string palettePath);
+    /// <summary>Unloads the type palette file at the specified path.</summary>
     Task UnloadTypePaletteAsync(string palettePath);
+    /// <summary>Returns all step types available, optionally filtered by palette file.</summary>
     Task<List<StepTypeInfo>> GetStepTypesAsync(string? paletteFile = null);
+    /// <summary>Returns detailed information about the named step type.</summary>
     Task<StepTypeInfo> GetStepTypeAsync(string stepTypeName);
+    /// <summary>Returns all data types defined, optionally scoped to a sequence file.</summary>
     Task<List<DataTypeInfo>> GetDataTypesAsync(string? sequenceFilePath = null);
 
     // Engine Info & Control
+    /// <summary>Returns the filesystem paths used by the TestStand engine.</summary>
     Task<EnginePaths> GetEnginePathsAsync();
+    /// <summary>Checks whether the given expression is syntactically valid.</summary>
     Task<ExpressionCheckResult> CheckExpressionAsync(string expression, string? sequenceFilePath = null);
+    /// <summary>Expands TestStand path macros (e.g. &lt;TESTSTANDDIR&gt;) in the given path string.</summary>
     Task<string> ExpandPathMacrosAsync(string path);
+    /// <summary>Searches the TestStand search directories for the given filename and returns the full path.</summary>
     Task<string> FindFileAsync(string filename);
+    /// <summary>Breaks (pauses) all active executions.</summary>
     Task BreakAllAsync();
+    /// <summary>Aborts all active executions.</summary>
     Task AbortAllAsync();
+    /// <summary>Terminates all active executions.</summary>
     Task TerminateAllAsync();
+    /// <summary>Returns the current station options from the engine.</summary>
     Task<StationOptionsInfo> GetStationOptionsAsync();
+    /// <summary>Applies the given station options to the engine.</summary>
     Task SetStationOptionsAsync(StationOptionsInfo options);
 
     // Execution Debug Control
+    /// <summary>Breaks (pauses) the specified execution.</summary>
     Task BreakExecutionAsync(string executionId);
+    /// <summary>Resumes the specified paused execution.</summary>
     Task ResumeExecutionAsync(string executionId);
+    /// <summary>Aborts the specified execution.</summary>
     Task AbortExecutionAsync(string executionId);
+    /// <summary>Restarts the specified execution from the beginning.</summary>
     Task RestartExecutionAsync(string executionId);
+    /// <summary>Executes one step in the current execution and stops before the next step.</summary>
     Task StepOverAsync(string executionId);
+    /// <summary>Steps into the current step (entering a subsequence if applicable).</summary>
     Task StepIntoAsync(string executionId);
+    /// <summary>Steps out of the current subsequence back to the caller.</summary>
     Task StepOutAsync(string executionId);
 
     // Sequence File Operations
+    /// <summary>Deletes the named sequence from the specified sequence file.</summary>
     Task DeleteSequenceAsync(string filePath, string sequenceName);
+    /// <summary>Returns whether a sequence with the given name exists in the file.</summary>
     Task<bool> SequenceNameExistsAsync(string filePath, string sequenceName);
+    /// <summary>Renames a sequence within the specified sequence file.</summary>
     Task RenameSequenceAsync(string filePath, string oldName, string newName);
 
     // Sequence Operations
+    /// <summary>Deletes the named step from the specified sequence and step group.</summary>
     Task DeleteStepAsync(string filePath, string sequenceName, string stepGroup, string stepName);
+    /// <summary>Moves the named step to a new position within the step group.</summary>
     Task MoveStepAsync(string filePath, string sequenceName, string stepGroup, string stepName, int newIndex);
+    /// <summary>Returns whether a step with the given name exists in the specified sequence.</summary>
     Task<bool> StepNameExistsAsync(string filePath, string sequenceName, string stepName);
+    /// <summary>Returns all parameters defined for the specified sequence.</summary>
     Task<List<ParameterInfo>> GetSequenceParametersAsync(string filePath, string sequenceName);
+    /// <summary>Inserts a new parameter into the specified sequence. When <paramref name="passByReference"/>
+    /// is supplied it decides BY VALUE (false) vs BY REFERENCE (true); when null the legacy
+    /// <paramref name="direction"/> mapping is used (InOut/byref → by reference, else by value).</summary>
     Task InsertSequenceParameterAsync(string filePath, string sequenceName, string paramName,
-        string dataType, string direction = "Input", string? defaultValue = null);
+        string dataType, string direction = "Input", string? defaultValue = null,
+        bool? passByReference = null);
+    /// <summary>Deletes the specified local variable from the given sequence.</summary>
     Task DeleteLocalVariableAsync(string filePath, string sequenceName, string variableName);
+    /// <summary>Returns all step templates available in the specified sequence file.</summary>
     Task<List<StepTemplateInfo>> GetStepTemplatesAsync(string filePath);
+    /// <summary>Inserts a step based on the named template into the specified sequence.</summary>
     Task InsertStepFromTemplateAsync(string filePath, string sequenceName, string stepGroup,
         string templateName, string newStepName, int index = -1);
+    /// <summary>Returns sequence-level properties (e.g. run-mode, description) for the given sequence.</summary>
     Task<SequenceProperties> GetSequencePropertiesAsync(string filePath, string sequenceName);
+    /// <summary>Applies sequence-level property changes to the specified sequence.</summary>
     Task SetSequencePropertiesAsync(string filePath, string sequenceName, SequenceProperties props);
 
     // Step Property Operations
+    /// <summary>Renames the specified step within a sequence.</summary>
     Task RenameStepAsync(string filePath, string sequenceName, string stepGroup,
         string stepName, string newName);
+    /// <summary>Sets the description comment on the specified step.</summary>
     Task<string> SetStepCommentAsync(string filePath, string sequenceName, string stepGroup,
         string stepName, string comment);
+    /// <summary>Sets the run mode (Normal, Skip, etc.) for the specified step.</summary>
     Task SetStepRunModeAsync(string filePath, string sequenceName, string stepGroup,
         string stepName, string runMode);
+    /// <summary>Sets the precondition expression for the specified step.</summary>
     Task SetStepPreconditionAsync(string filePath, string sequenceName, string stepGroup,
         string stepName, string precondition);
+    /// <summary>Sets the pass action (e.g. Continue, Goto) for the specified step.</summary>
     Task SetStepPassActionAsync(string filePath, string sequenceName, string stepGroup,
         string stepName, string passAction, string? target = null);
+    /// <summary>Sets the fail action (e.g. Continue, Goto) for the specified step.</summary>
     Task SetStepFailActionAsync(string filePath, string sequenceName, string stepGroup,
         string stepName, string failAction, string? target = null);
+    /// <summary>Configures the loop settings for the specified step.</summary>
     Task SetStepLoopAsync(string filePath, string sequenceName, string stepGroup,
         string stepName, string loopType, string? initExpr = null,
         string? whileExpr = null, string? incExpr = null);
+    /// <summary>Sets the result-recording option for the specified step.</summary>
     Task SetStepRecordResultAsync(string filePath, string sequenceName, string stepGroup,
         string stepName, string recordingOption);
+    /// <summary>Sets the evaluate-precondition option for the specified step.</summary>
     Task SetStepEvalPrecondAsync(string filePath, string sequenceName, string stepGroup,
         string stepName, string option);
+    /// <summary>Sets the module load option for the specified step.</summary>
     Task SetStepModuleLoadOptionAsync(string filePath, string sequenceName, string stepGroup,
         string stepName, string option);
+    /// <summary>Sets the module unload option for the specified step.</summary>
     Task SetStepModuleUnloadOptionAsync(string filePath, string sequenceName, string stepGroup,
         string stepName, string option);
+    /// <summary>Sets the batch synchronization option for the specified step.</summary>
     Task SetStepBatchSyncOptionAsync(string filePath, string sequenceName, string stepGroup,
         string stepName, string option);
+    /// <summary>Changes the adapter associated with the specified step.</summary>
     Task ChangeStepAdapterAsync(string filePath, string sequenceName, string stepGroup,
         string stepName, string newAdapter);
+    /// <summary>Returns the unique ID assigned to the specified step.</summary>
     Task<string> GetStepUniqueIdAsync(string filePath, string sequenceName, string stepGroup,
         string stepName);
 
     // Report Operations
+    /// <summary>Saves the execution report to the specified output path.</summary>
     Task SaveReportAsync(string executionId, string outputPath, string format = "HTML");
+    /// <summary>Launches the report viewer for the specified execution.</summary>
     Task LaunchReportViewerAsync(string executionId);
+    /// <summary>Returns the full report content as a string for the specified execution.</summary>
     Task<string> GetFullReportAsync(string executionId);
 
     // Undo/Redo
+    /// <summary>Returns information about the current undo stack for the given file.</summary>
     Task<UndoStackInfo> GetUndoStackAsync(string? filePath = null);
+    /// <summary>Undoes the last operation for the given file and returns whether the undo succeeded.</summary>
     Task<bool> UndoAsync(string? filePath = null);
+    /// <summary>Redoes the last undone operation for the given file and returns whether it succeeded.</summary>
     Task<bool> RedoAsync(string? filePath = null);
+    /// <summary>Begins a named undo group so that subsequent edits can be undone as a single unit.</summary>
     Task BeginUndoGroupAsync(string groupName, string? filePath = null);
+    /// <summary>Ends the current undo group, committing it to the undo stack.</summary>
     Task EndUndoGroupAsync(string? filePath = null);
+    /// <summary>Cancels the current undo group, discarding all edits made since it was started.</summary>
     Task CancelUndoGroupAsync(string? filePath = null);
 
     // Sequence File Comparison
+    /// <summary>Compares two sequence files and returns the structural differences between them.</summary>
     Task<SequenceFileDiff> CompareSequenceFilesAsync(string filePath1, string filePath2);
 
     // Sync Manager
+    /// <summary>Returns all synchronization objects registered with the SyncManager.</summary>
     Task<List<SyncObjectInfo>> GetSyncObjectsAsync();
+    /// <summary>Creates a new synchronization object of the specified type.</summary>
     Task CreateSyncObjectAsync(string name, string type, int initialValue = 1, int maxValue = 1);
+    /// <summary>Deletes the synchronization object with the specified name.</summary>
     Task DeleteSyncObjectAsync(string name);
+    /// <summary>Waits to acquire the specified semaphore synchronization object.</summary>
     Task SyncSemaphoreWaitAsync(string name, double timeoutSeconds = 30);
+    /// <summary>Releases the specified semaphore synchronization object.</summary>
     Task SyncSemaphoreReleaseAsync(string name);
+    /// <summary>Acquires the specified mutex synchronization object.</summary>
     Task SyncMutexLockAsync(string name, double timeoutSeconds = 30);
+    /// <summary>Releases the specified mutex synchronization object.</summary>
     Task SyncMutexUnlockAsync(string name);
+    /// <summary>Enqueues a value into the specified queue synchronization object.</summary>
     Task SyncQueueEnqueueAsync(string name, string value);
+    /// <summary>Dequeues and returns the next value from the specified queue synchronization object.</summary>
     Task<string> SyncQueueDequeueAsync(string name, double timeoutSeconds = 30);
+    /// <summary>Flushes all pending values from the specified queue synchronization object.</summary>
     Task SyncQueueFlushAsync(string name);
+    /// <summary>Sets the specified notification synchronization object to the signaled state.</summary>
     Task SyncNotificationSetAsync(string name, string value = "");
+    /// <summary>Resets the specified notification synchronization object to the non-signaled state.</summary>
     Task SyncNotificationResetAsync(string name);
+    /// <summary>Waits for the specified notification synchronization object to become signaled.</summary>
     Task<string> SyncNotificationWaitAsync(string name, double timeoutSeconds = 30);
 
     // Advanced Adapter Introspection
+    /// <summary>Returns detailed information about the specified adapter.</summary>
     Task<AdapterDetailInfo> GetAdapterDetailsAsync(string adapterName);
+    /// <summary>Returns code-module information for the specified step.</summary>
     Task<StepModuleInfo> GetStepModuleInfoAsync(string filePath, string sequenceName,
         string stepGroup, string stepName);
 
     // Search
+    /// <summary>Searches for steps matching the given pattern in the specified sequence file.</summary>
     Task<SearchResult> SearchStepsAsync(string filePath, string pattern,
         string searchIn = "all", bool caseSensitive = false);
 
     // Thread-Level Execution Control
+    /// <summary>Returns all threads currently active in the specified execution.</summary>
     Task<List<ThreadInfo>> GetExecutionThreadsAsync(string executionId);
+    /// <summary>Returns the current status of the specified thread within an execution.</summary>
     Task<ThreadInfo> GetThreadStatusAsync(string executionId, string threadId);
+    /// <summary>Breaks (pauses) the specified thread within an execution.</summary>
     Task BreakThreadAsync(string executionId, string threadId);
+    /// <summary>Resumes the specified paused thread within an execution.</summary>
     Task ResumeThreadAsync(string executionId, string threadId);
+    /// <summary>Steps over the current step in the specified thread.</summary>
     Task StepOverThreadAsync(string executionId, string threadId);
+    /// <summary>Steps into the current step in the specified thread.</summary>
     Task StepIntoThreadAsync(string executionId, string threadId);
+    /// <summary>Steps out of the current subsequence in the specified thread.</summary>
     Task StepOutThreadAsync(string executionId, string threadId);
+    /// <summary>Returns the call stack for the specified thread within an execution.</summary>
     Task<List<CallStackFrame>> GetThreadCallStackAsync(string executionId, string threadId);
 
     // Numeric/String Limit Configuration
+    /// <summary>Sets the numeric limits (low, high, units, comparison) for a NumericLimitTest step.</summary>
     Task SetNumericLimitsAsync(string filePath, string sequenceName, string stepGroup,
         string stepName, double? lowLimit, double? highLimit, string? units,
         string comparisonType = "GELE");
+    /// <summary>Returns the numeric limits configured on the specified NumericLimitTest step.</summary>
     Task<Dictionary<string, object?>> GetNumericLimitsAsync(string filePath, string sequenceName,
         string stepGroup, string stepName);
+    /// <summary>Sets the measurement expression on the specified test step.</summary>
     Task SetStepMeasurementAsync(string filePath, string sequenceName, string stepGroup,
         string stepName, string expression);
+    /// <summary>Configures a StringValueTest step with the expression, expected value, and comparison type.</summary>
     Task ConfigureStringValueTestAsync(string filePath, string sequenceName, string stepGroup,
         string stepName, string expression, string expectedValue,
         string comparisonType = "CaseSensitive");
 
     // Breakpoints
+    /// <summary>Enables or disables a breakpoint on the specified step.</summary>
     Task SetStepBreakpointAsync(string filePath, string sequenceName, string stepGroup,
         string stepName, bool enabled, string breakpointType = "Before");
+    /// <summary>Returns all breakpoints defined in the specified sequence file.</summary>
     Task<List<Dictionary<string, string>>> GetBreakpointsAsync(string filePath);
 
     // Execution Results
+    /// <summary>Returns the result of the specified step within a completed execution.</summary>
     Task<Dictionary<string, object?>> GetStepResultAsync(string executionId,
         string sequenceName, string stepName);
+    /// <summary>Returns all result data for the specified execution.</summary>
     Task<Dictionary<string, object?>> GetExecutionResultsAsync(string executionId);
+    /// <summary>Returns the total elapsed time in seconds for the specified execution.</summary>
     Task<double> GetExecutionTimeAsync(string executionId);
 
     // Workspace
+    /// <summary>Opens the workspace file at the given path and returns its metadata.</summary>
     Task<WorkspaceInfo> OpenWorkspaceAsync(string workspacePath);
+    /// <summary>Returns information about the currently open workspace.</summary>
     Task<WorkspaceInfo> GetWorkspaceAsync();
 
     // Watch Expressions
+    /// <summary>Adds a watch expression and returns its assigned index.</summary>
     Task<int> AddWatchExpressionAsync(string expression, string? label = null);
+    /// <summary>Returns all currently registered watch expressions.</summary>
     Task<List<WatchExpressionInfo>> GetWatchExpressionsAsync();
+    /// <summary>Removes the watch expression at the specified index.</summary>
     Task RemoveWatchExpressionAsync(int index);
 
     // Callbacks
+    /// <summary>Returns all callbacks defined in the specified sequence file.</summary>
     Task<List<CallbackInfo>> GetCallbacksAsync(string filePath);
 
     // File Properties
+    /// <summary>Returns the file-level properties (comment, version, etc.) for the given sequence file.</summary>
     Task<FilePropertiesInfo> GetFilePropertiesAsync(string filePath);
+    /// <summary>Sets file-level properties (comment, version) on the given sequence file.</summary>
     Task SetFilePropertiesAsync(string filePath, string? comment = null, string? version = null);
 
     // Duplicate Sequence
+    /// <summary>Duplicates the named sequence into a new sequence (optionally in a different file) and returns the new sequence name.</summary>
     Task<string> DuplicateSequenceAsync(string sourceFilePath, string sourceSequenceName,
         string newSequenceName, string? targetFilePath = null);
 
     // Array Variable Operations
+    /// <summary>Returns the elements of an array variable from a sequence file or sequence.</summary>
     Task<List<ArrayElementInfo>> GetArrayVariableAsync(string filePath,
         string? sequenceName, string variableName, int maxElements = 100);
+    /// <summary>Sets the value of a single element in an array variable.</summary>
     Task SetArrayElementAsync(string filePath, string? sequenceName,
         string variableName, int index, string value);
+    /// <summary>Resizes an array variable to the specified number of elements.</summary>
     Task ResizeArrayVariableAsync(string filePath, string? sequenceName,
         string variableName, int newSize);
 
     // Data Type Operations
+    /// <summary>Creates a new custom data type in the specified sequence file.</summary>
     Task<DataTypeInfo> CreateDataTypeAsync(string filePath, string typeName,
         string baseType = "Object");
+    /// <summary>Deletes the named custom data type from the specified sequence file.</summary>
     Task DeleteDataTypeAsync(string filePath, string typeName);
 
     // Module Parameter Operations
+    /// <summary>Returns the code-module parameters for the specified step.</summary>
     Task<List<ModuleParameterInfo>> GetModuleParametersAsync(string filePath,
         string sequenceName, string stepGroup, string stepName);
+    /// <summary>Sets the value of a code-module parameter on the specified step.</summary>
     Task SetModuleParameterAsync(string filePath, string sequenceName,
         string stepGroup, string stepName, string parameterName, string value,
         bool useExpression = true);
 
     // Step Configuration
+    /// <summary>Configures a MessagePopup step with the given message, title, buttons, and timeout.</summary>
     Task ConfigureMessagePopupAsync(string filePath, string sequenceName,
         string stepGroup, string stepName, string message,
         string? title = null, string buttons = "OK", double timeout = -1);
+    /// <summary>Configures a PropertyLoader step with the specified file path expression and mode.</summary>
     Task ConfigurePropertyLoaderAsync(string filePath, string sequenceName,
         string stepGroup, string stepName, string filePathExpr, string mode = "Read");
 
     // ── User & Privilege Management (Engine.UsersFile / User) ────────────────
+    /// <summary>Returns all users defined in the TestStand users file.</summary>
     Task<List<UserInfo>> GetUsersAsync();
+    /// <summary>Returns information about the currently logged-in user, or null if no user is logged in.</summary>
     Task<UserInfo?> GetCurrentUserAsync();
+    /// <summary>Returns whether a user with the given login name exists.</summary>
     Task<bool> UserNameExistsAsync(string loginName);
+    /// <summary>Creates a new TestStand user with the specified credentials and optional profile.</summary>
     Task CreateUserAsync(string loginName, string fullName, string password,
         string? profileName = null, bool persist = true);
+    /// <summary>Deletes the user with the specified login name.</summary>
     Task DeleteUserAsync(string loginName, bool persist = true);
+    /// <summary>Changes the password for the specified user.</summary>
     Task SetUserPasswordAsync(string loginName, string password, bool persist = true);
+    /// <summary>Returns the list of privilege names assigned to the specified user.</summary>
     Task<List<string>> GetUserPrivilegesAsync(string loginName);
+    /// <summary>Checks whether the specified user has the given privilege.</summary>
     Task<bool> CheckUserPrivilegeAsync(string loginName, string privilege);
+    /// <summary>Returns the names of all available user profiles.</summary>
     Task<List<string>> GetUserProfilesAsync();
 
     // ── Native Find / Replace (PropertyObject.Search / SearchMatch) ──────────
+    /// <summary>Searches the sequence file for occurrences of the given pattern.</summary>
     Task<FindReplaceResult> FindInFileAsync(string filePath, string pattern,
         bool matchCase = false, bool wholeWord = false, bool regex = false,
         string elements = "all", int maxResults = 500);
+    /// <summary>Searches and replaces occurrences of a pattern throughout the sequence file.</summary>
     Task<FindReplaceResult> ReplaceInFileAsync(string filePath, string pattern,
         string replacement, bool matchCase = false, bool wholeWord = false,
         bool regex = false, string elements = "all", bool save = true);
 
     // ── Typed Adapter / Code-Module Configuration ───────────────────────────
+    /// <summary>Configures a step to call a .NET method by specifying the assembly, class, and method.</summary>
     Task<ModuleConfigResult> ConfigureDotNetModuleAsync(string filePath,
         string sequenceName, string stepGroup, string stepName, string assemblyPath,
         string className, string methodName, bool save = true);
+    /// <summary>Configures a step to call a native DLL function.</summary>
     Task<ModuleConfigResult> ConfigureDllModuleAsync(string filePath,
         string sequenceName, string stepGroup, string stepName, string dllPath,
         string functionName, bool save = true);
+    /// <summary>Configures a step to call a LabVIEW VI.</summary>
     Task<ModuleConfigResult> ConfigureLabViewModuleAsync(string filePath,
         string sequenceName, string stepGroup, string stepName, string viPath,
         bool save = true);
+    /// <summary>Configures a step to call a Python function.</summary>
     Task<ModuleConfigResult> ConfigurePythonModuleAsync(string filePath,
         string sequenceName, string stepGroup, string stepName, string modulePath,
         string functionName, bool save = true);
+    /// <summary>Configures a SequenceCall step to call the specified target sequence.</summary>
     Task<ModuleConfigResult> ConfigureSequenceCallModuleAsync(string filePath,
         string sequenceName, string stepGroup, string stepName,
         string targetSequenceName, string targetSequenceFile = "", bool save = true);
 
     // ── Sequence Analyzer (detailed) ─────────────────────────────────────────
+    /// <summary>Runs the Sequence Analyzer and returns a detailed result filtered by minimum severity.</summary>
     Task<AnalyzerResult> RunSequenceAnalyzerDetailedAsync(string filePath,
         string minSeverity = "Information");
 
     // ── Output & UI Messages ─────────────────────────────────────────────────
+    /// <summary>Posts a message to the engine output window.</summary>
     Task<OutputMessageInfo> PostOutputMessageAsync(string message,
         string category = "", string severity = "Information");
+    /// <summary>Returns recent messages from the engine output window.</summary>
     Task<List<OutputMessageInfo>> GetOutputMessagesAsync(int maxMessages = 200);
+    /// <summary>Clears all messages from the engine output window.</summary>
     Task ClearOutputMessagesAsync();
+    /// <summary>Posts a UI message to the specified execution (requires a live execution).</summary>
     Task PostUiMessageAsync(string executionId, string messageCode,
         double numericData = 0, string stringData = "");
 
     // ── Search Directories ───────────────────────────────────────────────────
+    /// <summary>Returns the list of file-search directories configured in the engine.</summary>
     Task<List<SearchDirectoryInfo>> GetSearchDirectoriesAsync();
+    /// <summary>Adds a directory to the engine's file-search path.</summary>
     Task AddSearchDirectoryAsync(string path, int index = -1,
         bool searchSubdirectories = true);
+    /// <summary>Removes the specified directory from the engine's file-search path.</summary>
     Task RemoveSearchDirectoryAsync(string path);
 
     // ── Data-Type Field Editing ──────────────────────────────────────────────
+    /// <summary>Adds a field of the given type to the named custom data type.</summary>
     Task AddDataTypeFieldAsync(string filePath, string typeName, string fieldName,
         string fieldType, bool save = true);
+    /// <summary>Returns all fields defined on the named custom data type.</summary>
     Task<List<TypeFieldInfo>> GetDataTypeFieldsAsync(string filePath, string typeName);
+    /// <summary>Removes the named field from the specified custom data type.</summary>
     Task RemoveDataTypeFieldAsync(string filePath, string typeName, string fieldName,
         bool save = true);
 
     // ── CSV Record Streams ───────────────────────────────────────────────────
+    /// <summary>Writes lines to a CSV file using the TestStand CSV stream API.</summary>
     Task WriteCsvLinesAsync(string filePath, List<string> lines);
+    /// <summary>Reads lines from a CSV file using the TestStand CSV stream API.</summary>
     Task<CsvReadResult> ReadCsvLinesAsync(string filePath, int maxLines = 1000);
 
     // ── Result Logging (smoke) ───────────────────────────────────────────────
+    /// <summary>Creates a result log file in the specified format and returns its path.</summary>
     Task<string> CreateResultLogAsync(string filePath, string format = "ASCII");
 
     // ── Batch Synchronization (best-effort) ──────────────────────────────────
+    /// <summary>Creates a batch synchronization object with the given name.</summary>
     Task CreateBatchSyncObjectAsync(string name);
 
     // ── Interactive Execution (smoke) ────────────────────────────────────────
+    /// <summary>Runs the specified steps interactively (as if from the Sequence Editor) and returns the execution ID.</summary>
     Task<string> RunStepsInteractivelyAsync(string filePath, string sequenceName,
         string stepGroup, List<string> stepNames, int timeoutSeconds = 60);
 
     // ── Report Sections (smoke) ──────────────────────────────────────────────
+    /// <summary>Adds a titled section with body text to the report for the specified execution.</summary>
     Task<string> AddReportSectionAsync(string executionId, string title, string body);
 }
 
 // ── Implementation ────────────────────────────────────────────────────────────
 
-public class TestStandService : ITestStandService
+/// <summary>Default implementation of <see cref="ITestStandService"/> that communicates with the NI TestStand engine via COM.</summary>
+public sealed class TestStandService : ITestStandService
 {
     private readonly ILogger<TestStandService> _logger;
-    private dynamic? _engine;         // NationalInstruments.TestStand.Interop.API.Engine
+    private NiEngine? _engine;        // NationalInstruments.TestStand.Interop.API.Engine (coclass)
     private dynamic? _engineMgr;      // EngineManager
     private bool _disposed;
 
@@ -434,14 +646,15 @@ public class TestStandService : ITestStandService
     private readonly Dictionary<string, dynamic> _syncObjects = new();
 
     // In-memory tracking (Engine API has no SequenceFiles/Executions collection)
-    private readonly Dictionary<string, dynamic> _loadedSequenceFiles = new();
-    private readonly Dictionary<string, dynamic> _activeExecutions = new();
+    private readonly Dictionary<string, NiSequenceFile> _loadedSequenceFiles = new();
+    private readonly Dictionary<string, NiExecution> _activeExecutions = new();
 
 
     // Watch expressions are an editor/GUI concept not available in the engine API;
     // we keep them in memory so Claude can manage them across calls.
     private readonly List<WatchExpressionInfo> _watchExpressions = new();
 
+    /// <inheritdoc/>
     public bool IsConnected => _engine != null;
 
     private static readonly System.Reflection.BindingFlags _comFlags =
@@ -455,6 +668,17 @@ public class TestStandService : ITestStandService
         System.Reflection.BindingFlags.Instance |
         System.Reflection.BindingFlags.Public;
 
+    // Cached, compiled regexes for analyzer-project XML rewriting/parsing.
+    // Hoisted out of the methods so the patterns compile once, not on every call.
+    private const RegexOptions XmlRx = RegexOptions.Singleline | RegexOptions.Compiled;
+    private static readonly Regex _filesBlockRx       = new(@"<Files classname='Strs'>.*?</Files>", XmlRx);
+    private static readonly Regex _messagesBlockRx    = new(@"<Messages classname='Objs'>.*?</Messages>", XmlRx);
+    private static readonly Regex _pathAtLastWriteRx  = new(@"<PathAtLastWrite classname='Str'>.*?</PathAtLastWrite>", XmlRx);
+    private static readonly Regex _messagesCaptureRx  = new(@"<Messages classname='Objs'>(.*?)</Messages>", XmlRx);
+    private static readonly Regex _firstValueRx       = new(@"<Messages classname='Objs'>\s*<value\b([^>]*)>?", XmlRx);
+    private static readonly Regex _selfClosingValueRx = new(@"<Messages classname='Objs'>\s*<value\b[^>]*/\s*>", XmlRx);
+
+    /// <summary>Creates the service with the given logger.</summary>
     public TestStandService(ILogger<TestStandService> logger)
     {
         _logger = logger;
@@ -462,6 +686,7 @@ public class TestStandService : ITestStandService
 
     // ── Engine ───────────────────────────────────────────────────────────────
 
+    /// <inheritdoc/>
     public async Task<bool> ConnectAsync(string? enginePath = null)
     {
         return await Task.Run(() =>
@@ -476,8 +701,8 @@ public class TestStandService : ITestStandService
                     throw new InvalidOperationException(
                         "TestStand Engine COM server not found. Ensure NI TestStand is installed.");
 
-                _engine = Activator.CreateInstance(engineType)
-                    ?? throw new InvalidOperationException("Failed to create TestStand Engine instance.");
+                _engine = (NiEngine)(Activator.CreateInstance(engineType)
+                    ?? throw new InvalidOperationException("Failed to create TestStand Engine instance."));
                 System.Threading.Interlocked.Increment(ref _liveEngineCount);
 
                 // Load type palette files so step types (Label, Action, etc.) are available
@@ -495,6 +720,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task DisconnectAsync()
     {
         await Task.Run(() =>
@@ -503,7 +729,7 @@ public class TestStandService : ITestStandService
             // Abandoning RCWs causes GC finalizer crashes when the engine is already gone.
             foreach (var sf in _loadedSequenceFiles.Values)
             {
-                try { System.Runtime.InteropServices.Marshal.ReleaseComObject(sf); } catch { }
+                try { System.Runtime.InteropServices.Marshal.ReleaseComObject(sf); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to release COM object for sequence file during disconnect."); }
             }
             _loadedSequenceFiles.Clear();
             _activeExecutions.Clear();
@@ -518,7 +744,7 @@ public class TestStandService : ITestStandService
                 // Passing final:true while another instance is still connected would break the
                 // shared engine, so transient instances use final:false.
                 bool isLast = System.Threading.Interlocked.Decrement(ref _liveEngineCount) <= 0;
-                try { _engine.ShutDown(isLast); } catch { }
+                try { _engine.ShutDown(isLast); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to shut down TestStand engine."); }
 
                 if (isLast)
                 {
@@ -529,19 +755,20 @@ public class TestStandService : ITestStandService
                     // already been ShutDown and the process is ending, so we intentionally do
                     // NOT release the RCW and suppress its finalization — this avoids the
                     // blocking COM teardown so the host can exit promptly.
-                    try { GC.SuppressFinalize((object)_engine!); } catch { }
+                    try { GC.SuppressFinalize((object)_engine!); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to suppress finalizer on engine COM object."); }
                 }
                 else
                 {
                     // Transient second engine: NILM stays alive (the primary engine holds it),
                     // so a full release is cheap and keeps the instance from leaking.
-                    try { System.Runtime.InteropServices.Marshal.FinalReleaseComObject(_engine); } catch { }
+                    try { System.Runtime.InteropServices.Marshal.FinalReleaseComObject(_engine); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to release engine COM object RCW."); }
                 }
                 _engine = null;
             }
         });
     }
 
+    /// <inheritdoc/>
     public async Task<StationInfo> GetStationInfoAsync()
     {
         EnsureConnected();
@@ -565,7 +792,7 @@ public class TestStandService : ITestStandService
                 // Active executions — tracked in memory
                 foreach (var exec in _activeExecutions.Values)
                 {
-                    try { info.ActiveExecutions.Add(MapExecutionInfo(exec)); } catch { }
+                    try { info.ActiveExecutions.Add(MapExecutionInfo(exec)); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to map active execution info entry."); }
                 }
 
                 return info;
@@ -580,6 +807,7 @@ public class TestStandService : ITestStandService
 
     // ── Sequence Files ────────────────────────────────────────────────────────
 
+    /// <inheritdoc/>
     public async Task<SequenceFileInfo> OpenSequenceFileAsync(string filePath)
     {
         EnsureConnected();
@@ -589,7 +817,7 @@ public class TestStandService : ITestStandService
             {
                 _logger.LogInformation("Opening sequence file: {Path}", filePath);
                 // GetSequenceFileEx(path, getSeqFileFlags=0, conflictHandler=UseGlobalType=4)
-                var sf = _engine!.GetSequenceFileEx(filePath, 0, 4);
+                var sf = _engine!.GetSequenceFileEx(filePath, 0, (NiConflictHandler)4);
                 _loadedSequenceFiles[filePath] = sf;
                 return MapSequenceFileInfo(sf, filePath);
             }
@@ -601,6 +829,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task CloseSequenceFileAsync(string filePath)
     {
         EnsureConnected();
@@ -615,7 +844,7 @@ public class TestStandService : ITestStandService
                     _loadedSequenceFiles.Remove(filePath);
                     // Explicitly release the RCW so the GC finalizer doesn't try to touch
                     // an already-released COM object after engine shutdown (crash prevention).
-                    try { System.Runtime.InteropServices.Marshal.ReleaseComObject(sf); } catch { }
+                    try { System.Runtime.InteropServices.Marshal.ReleaseComObject(sf); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to release COM object for closed sequence file."); }
                 }
                 _logger.LogInformation("Closed sequence file: {Path}", filePath);
             }
@@ -627,6 +856,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task<List<SequenceFileInfo>> GetLoadedSequenceFilesAsync()
     {
         EnsureConnected();
@@ -642,6 +872,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task<List<SequenceFileSummary>> GetLoadedSequenceFilesSummaryAsync()
     {
         EnsureConnected();
@@ -680,7 +911,7 @@ public class TestStandService : ITestStandService
                             catch { name = "Unknown"; }
                             summary.Sequences.Add(name);
                         }
-                        catch { }
+                        catch (Exception ex) { _logger.LogDebug(ex, "Failed to read sequence entry while summarizing sequence file."); }
                     }
                     summary.SequenceCount = summary.Sequences.Count;
                 }
@@ -694,6 +925,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task<SequenceInfo> GetSequenceAsync(string filePath, string sequenceName)
     {
         EnsureConnected();
@@ -701,12 +933,13 @@ public class TestStandService : ITestStandService
         {
             var sf = _loadedSequenceFiles.TryGetValue(filePath, out var cached)
                 ? cached
-                : _engine!.GetSequenceFileEx(filePath, 0, 4);
+                : _engine!.GetSequenceFileEx(filePath, 0, (NiConflictHandler)4);
             var seq = sf.GetSequenceByName(sequenceName);
             return MapSequenceInfo(seq);
         });
     }
 
+    /// <inheritdoc/>
     public async Task SaveSequenceFileAsync(string filePath)
     {
         EnsureConnected();
@@ -714,23 +947,25 @@ public class TestStandService : ITestStandService
         {
             var sf = _loadedSequenceFiles.TryGetValue(filePath, out var cached)
                 ? cached
-                : _engine!.GetSequenceFileEx(filePath, 0, 4);
-            sf.Save(filePath);
+                : _engine!.GetSequenceFileEx(filePath, 0, (NiConflictHandler)4);
+            SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
         });
     }
 
+    /// <inheritdoc/>
     public async Task<string> CreateSequenceFileAsync(string filePath)
     {
         EnsureConnected();
         return await Task.Run(() =>
         {
             var sf = _engine!.NewSequenceFile();
-            sf.Save(filePath);
+            SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
             _loadedSequenceFiles[filePath] = sf;
             return filePath;
         });
     }
 
+    /// <inheritdoc/>
     public async Task InsertSequenceAsync(string filePath, string sequenceName)
     {
         EnsureConnected();
@@ -738,17 +973,18 @@ public class TestStandService : ITestStandService
         {
             var sf  = _loadedSequenceFiles.TryGetValue(filePath, out var cached)
                 ? cached
-                : _engine!.GetSequenceFileEx(filePath, 0, 4);
+                : _engine!.GetSequenceFileEx(filePath, 0, (NiConflictHandler)4);
 
             var seq  = _engine!.NewSequence();
             seq.Name = sequenceName;
             sf.InsertSequence(seq);
-            sf.Save(filePath);
+            SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
 
             _loadedSequenceFiles[filePath] = sf;
         });
     }
 
+    /// <inheritdoc/>
     public async Task InsertStepAsync(string filePath, string sequenceName, string stepGroup,
         string stepType, string stepName, int index = -1, string? adapterName = null)
     {
@@ -757,9 +993,9 @@ public class TestStandService : ITestStandService
         {
             var sf  = _loadedSequenceFiles.TryGetValue(filePath, out var cached)
                 ? cached
-                : _engine!.GetSequenceFileEx(filePath, 0, 4);
+                : _engine!.GetSequenceFileEx(filePath, 0, (NiConflictHandler)4);
 
-            var seq  = sf.GetSequenceByName(sequenceName);
+            var seq = sf.GetSequenceByName(sequenceName);
             int sgValue = ParseStepGroup(stepGroup);
 
             var (adapterKey, internalType) = ResolveStepTypeAndAdapter(stepType, adapterName);
@@ -767,12 +1003,12 @@ public class TestStandService : ITestStandService
             var step = _engine!.NewStep(adapterKey, internalType);
             step.Name = stepName;
 
-            int insertAt = index < 0 ? (int)seq.GetNumSteps((object)sgValue) : index;
-            seq.InsertStep(step, insertAt, (object)sgValue);
+            int insertAt = index < 0 ? (int)seq.GetNumSteps((NiStepGroups)sgValue) : index;
+            seq.InsertStep(step, insertAt, (NiStepGroups)sgValue);
 
             InitStepDescriptionField(step);
 
-            sf.Save(filePath);
+            SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
             _loadedSequenceFiles[filePath] = sf;
         });
     }
@@ -828,11 +1064,12 @@ public class TestStandService : ITestStandService
     private static void InitStepDescriptionField(dynamic step)
     {
         bool tsDescInit = false;
-        try { step.SetValString("TS.Description", 0, " "); tsDescInit = true; } catch { }
+        try { step.SetValString("TS.Description", 0, " "); tsDescInit = true; } catch (Exception) { /* best-effort: initialize TS.Description placeholder field — intentionally ignored */ }
         if (!tsDescInit)
-            try { step.SetValString("TS.Description", 0x8, " "); } catch { }
+            try { step.SetValString("TS.Description", 0x8, " "); } catch (Exception) { /* best-effort: initialize TS.Description via alternate flags — intentionally ignored */ }
     }
 
+    /// <inheritdoc/>
     public async Task<BulkInsertResult> InsertStepsBulkAsync(string filePath,
         string sequenceName, string stepGroup, List<BulkStepSpec> steps, bool save = true)
     {
@@ -849,9 +1086,9 @@ public class TestStandService : ITestStandService
 
             var sf  = _loadedSequenceFiles.TryGetValue(filePath, out var cached)
                 ? cached
-                : _engine!.GetSequenceFileEx(filePath, 0, 4);
+                : _engine!.GetSequenceFileEx(filePath, 0, (NiConflictHandler)4);
 
-            var seq     = sf.GetSequenceByName(sequenceName);
+            var seq = sf.GetSequenceByName(sequenceName);
             int sgValue = ParseStepGroup(stepGroup);
 
             foreach (var spec in steps)
@@ -869,16 +1106,16 @@ public class TestStandService : ITestStandService
                 step.Name = spec.Name;
 
                 // Always append in list order (bulk builds a sequence top-to-bottom).
-                int insertAt = (int)seq.GetNumSteps((object)sgValue);
-                seq.InsertStep(step, insertAt, (object)sgValue);
+                int insertAt = (int)seq.GetNumSteps((NiStepGroups)sgValue);
+                seq.InsertStep(step, insertAt, (NiStepGroups)sgValue);
                 InitStepDescriptionField(step);
 
                 // Optional comment
                 if (!string.IsNullOrEmpty(spec.Comment))
                 {
                     bool ok = false;
-                    try { step.Comment = spec.Comment; ok = true; } catch { }
-                    if (!ok) try { step.AsPropertyObject().Comment = spec.Comment; ok = true; } catch { }
+                    try { ((dynamic)step).Comment = spec.Comment; ok = true; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to set step comment via Comment property."); }
+                    if (!ok) try { ((NiStep)(object)step).AsPropertyObject().Comment = spec.Comment; ok = true; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to set step comment via AsPropertyObject().Comment."); }
                     if (ok) result.CommentsSet++;
                     else    result.Warnings.Add($"Comment not set on '{spec.Name}'.");
                 }
@@ -894,8 +1131,8 @@ public class TestStandService : ITestStandService
                             case "post":   step.PostExpression   = spec.Expression; break;
                             case "status": step.StatusExpression = spec.Expression; break;
                             default:
-                                try { step.AsPropertyObject().SetValString("Module.Expression", 0, spec.Expression); }
-                                catch { step.PreExpression = spec.Expression; }
+                                // Statement steps: the primary expression home is the Post Expression.
+                                step.PostExpression = spec.Expression;
                                 break;
                         }
                         result.ExpressionsSet++;
@@ -924,7 +1161,7 @@ public class TestStandService : ITestStandService
                                 try { ((object)seqCallModule).GetType().InvokeMember(
                                     propName, System.Reflection.BindingFlags.SetProperty,
                                     null, seqCallModule, new object[] { false }); }
-                                catch { }
+                                catch (Exception ex) { _logger.LogDebug(ex, "Failed to clear absolute path flag '{PropName}' on SequenceCall module.", propName); }
                             }
                         }
                         result.TargetsSet++;
@@ -942,7 +1179,7 @@ public class TestStandService : ITestStandService
             // Save ONCE for the whole batch — this is the key efficiency win over
             // calling insert_step (which saves per step).
             if (save)
-                sf.Save(filePath);
+                SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
             _loadedSequenceFiles[filePath] = sf;
 
             return result;
@@ -951,6 +1188,7 @@ public class TestStandService : ITestStandService
 
     // ── Executions ────────────────────────────────────────────────────────────
 
+    /// <inheritdoc/>
     public async Task<ExecutionInfo> StartExecutionAsync(string sequenceFilePath,
         string entryPoint, Dictionary<string, object>? parameters = null)
     {
@@ -964,7 +1202,7 @@ public class TestStandService : ITestStandService
 
                 var sf = _loadedSequenceFiles.TryGetValue(sequenceFilePath, out var cached)
                     ? cached
-                    : _engine!.GetSequenceFileEx(sequenceFilePath, 0, 4);
+                    : _engine!.GetSequenceFileEx(sequenceFilePath, 0, (NiConflictHandler)4);
 
                 // NewExecution via typed IEngine interface to avoid COM argument-conversion issues.
                 // processModel=null means no process model; execTypeMask=0 = ExecTypeMask_Normal.
@@ -1010,6 +1248,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task<ExecutionResult> WaitForExecutionAsync(string executionId,
         int timeoutSeconds = 300)
     {
@@ -1055,6 +1294,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task<ExecutionInfo> GetExecutionStatusAsync(string executionId)
     {
         EnsureConnected();
@@ -1066,6 +1306,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task<List<ExecutionInfo>> GetActiveExecutionsAsync()
     {
         EnsureConnected();
@@ -1074,12 +1315,13 @@ public class TestStandService : ITestStandService
             var result = new List<ExecutionInfo>();
             foreach (var exec in _activeExecutions.Values)
             {
-                try { result.Add(MapExecutionInfo(exec)); } catch { }
+                try { result.Add(MapExecutionInfo(exec)); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to map execution info entry in active executions list."); }
             }
             return result;
         });
     }
 
+    /// <inheritdoc/>
     public async Task TerminateExecutionAsync(string executionId)
     {
         EnsureConnected();
@@ -1092,6 +1334,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task<ExecutionResult> RunSequenceAsync(string sequenceFilePath,
         string sequenceName, Dictionary<string, object>? parameters = null,
         int timeoutSeconds = 300)
@@ -1102,6 +1345,7 @@ public class TestStandService : ITestStandService
 
     // ── Variables & Properties ────────────────────────────────────────────────
 
+    /// <inheritdoc/>
     public async Task<PropertyValue> GetPropertyAsync(string lookupString)
     {
         EnsureConnected();
@@ -1131,6 +1375,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task SetPropertyAsync(string lookupString, object value)
     {
         EnsureConnected();
@@ -1185,6 +1430,7 @@ public class TestStandService : ITestStandService
 
     // ── Expression evaluation & structured property access ─────────────────────
 
+    /// <inheritdoc/>
     public async Task<ExpressionResult> EvaluateExpressionAsync(string expression,
         string? sequenceFilePath = null)
     {
@@ -1227,6 +1473,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task<PropertyObjectInfo> GetPropertyObjectAsync(string filePath,
         string? sequenceName, string propertyName)
     {
@@ -1244,12 +1491,12 @@ public class TestStandService : ITestStandService
             if (isArray) info.NumElements = numElements;
 
             // Named-type name, if this property is an instance of a custom type.
-            try { info.TypeName = NullIfEmpty((string)((dynamic)prop).Type.Name); } catch { }
+            try { info.TypeName = NullIfEmpty((string)((dynamic)prop).Type.Name); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read named type name from property object."); }
 
             if (info.ValueType == "Container")
             {
                 int numSub = 0;
-                try { numSub = (int)prop.GetNumSubProperties(""); } catch { }
+                try { numSub = (int)prop.GetNumSubProperties(""); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to get sub-property count on container property object."); }
                 for (int i = 0; i < numSub; i++)
                 {
                     try
@@ -1275,6 +1522,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task SetPropertyValueAsync(string filePath, string? sequenceName,
         string propertyName, string valueType, string? value)
     {
@@ -1322,11 +1570,12 @@ public class TestStandService : ITestStandService
                     break;
             }
 
-            ((NiSequenceFile)(object)sf).Save(filePath);
+            SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
             _loadedSequenceFiles[filePath] = sf;
         });
     }
 
+    /// <inheritdoc/>
     public async Task DeleteSubPropertyAsync(string filePath, string? sequenceName,
         string propertyName)
     {
@@ -1336,7 +1585,7 @@ public class TestStandService : ITestStandService
             var sf   = GetOrLoadSeqFile(filePath);
             var root = ResolveValueContainer(sf, sequenceName);
             root.DeleteSubProperty(propertyName, 0);
-            ((NiSequenceFile)(object)sf).Save(filePath);
+            SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
             _loadedSequenceFiles[filePath] = sf;
         });
     }
@@ -1367,16 +1616,17 @@ public class TestStandService : ITestStandService
     {
         isArray = false; numElements = 0;
         if (prop == null) return "Empty";
-        try { numElements = Convert.ToInt32((object)prop.GetNumElements()); isArray = true; return "Array"; } catch { }
+        try { numElements = Convert.ToInt32((object)prop.GetNumElements()); isArray = true; return "Array"; } catch (Exception) { /* best-effort: probe for array kind — intentionally ignored */ }
         int numSub = 0;
-        try { numSub = Convert.ToInt32((object)prop.GetNumSubProperties("")); } catch { }
+        try { numSub = Convert.ToInt32((object)prop.GetNumSubProperties("")); } catch (Exception) { /* best-effort: probe for container kind — intentionally ignored */ }
         if (numSub > 0) return "Container";
-        try { _ = (double)prop.GetValNumber("", 0);  return "Number";  } catch { }
-        try { _ = (bool)  prop.GetValBoolean("", 0); return "Boolean"; } catch { }
-        try { _ = (string)prop.GetValString("", 0);  return "String";  } catch { }
+        try { _ = (double)prop.GetValNumber("", 0);  return "Number";  } catch (Exception) { /* best-effort: probe for number kind — intentionally ignored */ }
+        try { _ = (bool)  prop.GetValBoolean("", 0); return "Boolean"; } catch (Exception) { /* best-effort: probe for boolean kind — intentionally ignored */ }
+        try { _ = (string)prop.GetValString("", 0);  return "String";  } catch (Exception) { /* best-effort: probe for string kind — intentionally ignored */ }
         return "Unknown";
     }
 
+    /// <inheritdoc/>
     public async Task<List<VariableInfo>> GetFileGlobalsAsync(string sequenceFilePath)
     {
         EnsureConnected();
@@ -1384,18 +1634,20 @@ public class TestStandService : ITestStandService
         {
             var sf = _loadedSequenceFiles.TryGetValue(sequenceFilePath, out var cached)
                 ? cached
-                : _engine!.GetSequenceFileEx(sequenceFilePath, 0, 4);
+                : _engine!.GetSequenceFileEx(sequenceFilePath, 0, (NiConflictHandler)4);
             try { return MapVariables(GetFileGlobals(sf)); }
             catch { return new List<VariableInfo>(); }
         });
     }
 
+    /// <inheritdoc/>
     public async Task<List<VariableInfo>> GetStationGlobalsAsync()
     {
         EnsureConnected();
         return await Task.Run(() => { try { return MapVariables(GetStationGlobals()); } catch { return new List<VariableInfo>(); } });
     }
 
+    /// <inheritdoc/>
     public async Task SetFileGlobalAsync(string sequenceFilePath, string variableName,
         object value)
     {
@@ -1407,7 +1659,7 @@ public class TestStandService : ITestStandService
             {
                 sf = _loadedSequenceFiles.TryGetValue(sequenceFilePath, out var cached)
                     ? cached
-                    : _engine!.GetSequenceFileEx(sequenceFilePath, 0, 4);
+                    : _engine!.GetSequenceFileEx(sequenceFilePath, 0, (NiConflictHandler)4);
             }
             catch (Exception ex) { throw new InvalidOperationException("GetSeqFile failed: " + ex.Message, ex); }
 
@@ -1432,7 +1684,7 @@ public class TestStandService : ITestStandService
                 fg.NewSubProperty(variableName, (NiPropValueTypes)propType, false, "", 0);
 
             SetPropertyValueByType(fg, variableName, value?.ToString() ?? "", propType);
-            ((NiSequenceFile)(object)sf).Save(sequenceFilePath);
+            SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, sequenceFilePath);
         });
     }
 
@@ -1448,6 +1700,7 @@ public class TestStandService : ITestStandService
     private NiPropertyObject GetStationGlobals()
         => ((NiEngine)(object)_engine!).Globals;
 
+    /// <inheritdoc/>
     public async Task SetStationGlobalAsync(string variableName, object value)
     {
         EnsureConnected();
@@ -1472,6 +1725,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task DeleteStationGlobalAsync(string variableName)
     {
         EnsureConnected();
@@ -1485,6 +1739,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task InsertFileGlobalAsync(string sequenceFilePath, string variableName,
         string dataType)
     {
@@ -1509,12 +1764,13 @@ public class TestStandService : ITestStandService
             };
             var fg2 = GetFileGlobals(sf);
             fg2.NewSubProperty(variableName, (NiPropValueTypes)propType, isArray, "", 0);
-            ((NiSequenceFile)(object)sf).Save(sequenceFilePath);
+            SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, sequenceFilePath);
         });
     }
 
     // ── Steps ─────────────────────────────────────────────────────────────────
 
+    /// <inheritdoc/>
     public async Task<List<StepInfo>> GetStepsAsync(string sequenceFilePath,
         string sequenceName)
     {
@@ -1523,7 +1779,7 @@ public class TestStandService : ITestStandService
         {
             var sf  = _loadedSequenceFiles.TryGetValue(sequenceFilePath, out var cached)
                 ? cached
-                : _engine!.GetSequenceFileEx(sequenceFilePath, 0, 4);
+                : _engine!.GetSequenceFileEx(sequenceFilePath, 0, (NiConflictHandler)4);
             var seq = sf.GetSequenceByName(sequenceName);
             // Collect steps from all three groups
             var all = new List<StepInfo>();
@@ -1532,25 +1788,26 @@ public class TestStandService : ITestStandService
             {
                 try
                 {
-                    int count = Convert.ToInt32((object)seq.GetNumSteps((object)g));
+                    int count = Convert.ToInt32((object)seq.GetNumSteps((NiStepGroups)g));
                     for (int i = 0; i < count; i++)
                     {
                         try
                         {
-                            var step = MapStepInfo(seq.GetStep(i, (object)g));
+                            var step = MapStepInfo(seq.GetStep(i, (NiStepGroups)g));
                             // Omit the default "Main" group (g==1) to save tokens; absent = Main.
                             step.StepGroup = g == 1 ? null : groupNames[g];
                             all.Add(step);
                         }
-                        catch { }
+                        catch (Exception ex) { _logger.LogDebug(ex, "Failed to map step info at index {Index} in group {Group}.", i, g); }
                     }
                 }
-                catch { }
+                catch (Exception ex) { _logger.LogDebug(ex, "Failed to enumerate steps for group {Group}.", g); }
             }
             return all;
         });
     }
 
+    /// <inheritdoc/>
     public async Task<StepInfo> GetStepAsync(string sequenceFilePath, string sequenceName,
         string stepName)
     {
@@ -1559,12 +1816,13 @@ public class TestStandService : ITestStandService
         {
             var sf  = _loadedSequenceFiles.TryGetValue(sequenceFilePath, out var cached)
                 ? cached
-                : _engine!.GetSequenceFileEx(sequenceFilePath, 0, 4);
+                : _engine!.GetSequenceFileEx(sequenceFilePath, 0, (NiConflictHandler)4);
             var seq = sf.GetSequenceByName(sequenceName);
             return MapStepInfo(FindStepInAllGroups(seq, stepName));
         });
     }
 
+    /// <inheritdoc/>
     public async Task EnableStepAsync(string sequenceFilePath, string sequenceName,
         string stepName, bool enabled)
     {
@@ -1573,8 +1831,8 @@ public class TestStandService : ITestStandService
         {
             var sf  = _loadedSequenceFiles.TryGetValue(sequenceFilePath, out var cached)
                 ? cached
-                : _engine!.GetSequenceFileEx(sequenceFilePath, 0, 4);
-            var seq  = sf.GetSequenceByName(sequenceName);
+                : _engine!.GetSequenceFileEx(sequenceFilePath, 0, (NiConflictHandler)4);
+            var seq = sf.GetSequenceByName(sequenceName);
             var step = FindStepInAllGroups(seq, stepName);
             // Step has no `StepEnabled` property. A step is "disabled" by setting its
             // RunMode to "Skip" (and re-enabled with "Normal") — this is exactly the
@@ -1583,6 +1841,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task<Dictionary<string, object>> GetStepPropertiesAsync(
         string sequenceFilePath, string sequenceName, string stepName)
     {
@@ -1591,50 +1850,70 @@ public class TestStandService : ITestStandService
         {
             var sf   = _loadedSequenceFiles.TryGetValue(sequenceFilePath, out var cached)
                 ? cached
-                : _engine!.GetSequenceFileEx(sequenceFilePath, 0, 4);
-            var seq  = sf.GetSequenceByName(sequenceName);
+                : _engine!.GetSequenceFileEx(sequenceFilePath, 0, (NiConflictHandler)4);
+            var seq = sf.GetSequenceByName(sequenceName);
             var step = FindStepInAllGroups(seq, stepName);
+            // Resolve the step's PropertyObject ONCE via a typed (vtable) call and reuse it for
+            // every GetValString read below. The parameterless dynamic AsPropertyObject() is the
+            // DLR call most prone to intermittent TargetParameterCountException / RuntimeBinder
+            // failures under cumulative load in the shared-engine test harness; binding it
+            // statically removes that flakiness (e.g. ComparisonType reading back null).
+            NiPropertyObject stepPo = ((NiStep)(object)step).AsPropertyObject();
 
             var props = new Dictionary<string, object>();
-            try { props["Name"]            = (string)step.Name; }            catch { }
-            try { props["StepType"]        = (string)step.StepType.Name; }   catch { }
-            try { props["Enabled"]         = (string)step.RunMode != "Skip"; } catch { }
-            try { props["PreExpression"]   = (string)step.PreExpression; }   catch { }
-            try { props["PostExpression"]  = (string)step.PostExpression; }  catch { }
-            try { props["StatusExpression"]= (string)step.StatusExpression;} catch { }
+            try { props["Name"]            = (string)step.Name; }            catch (Exception ex) { _logger.LogDebug(ex, "Failed to read step Name property."); }
+            try { props["StepType"]        = (string)step.StepType.Name; }   catch (Exception ex) { _logger.LogDebug(ex, "Failed to read step StepType.Name property."); }
+            try { props["Enabled"]         = (string)step.RunMode != "Skip"; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read step RunMode property."); }
+            try { props["PreExpression"]   = (string)step.PreExpression; }   catch (Exception ex) { _logger.LogDebug(ex, "Failed to read step PreExpression property."); }
+            try { props["PostExpression"]  = (string)step.PostExpression; }  catch (Exception ex) { _logger.LogDebug(ex, "Failed to read step PostExpression property."); }
+            try { props["StatusExpression"]= (string)step.StatusExpression;} catch (Exception ex) { _logger.LogDebug(ex, "Failed to read step StatusExpression property."); }
             // Read the user-set description first (stored in property bag as TS.Description).
             // For steps without stored description, step.Description returns the auto-generated
             // type-name (e.g. "Action"), which masks any stored value — so try stored first.
             string? desc = null;
             try
             {
-                var storedDesc = (string)step.AsPropertyObject().GetValString("TS.Description", 0);
+                var storedDesc = (string)stepPo.GetValString("TS.Description", 0);
                 if (!string.IsNullOrWhiteSpace(storedDesc)) desc = storedDesc;
             }
-            catch { }
-            if (desc == null) try { desc = (string)step.Description; } catch { }
+            catch (Exception ex) { _logger.LogDebug(ex, "Failed to read stored TS.Description from step property bag."); }
+            if (desc == null) try { desc = (string)step.Description; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read step Description property."); }
             if (string.IsNullOrEmpty(desc))
-                try { desc = (string)step.AsPropertyObject().GetValString("Description", 0); } catch { }
+                try { desc = (string)stepPo.GetValString("Description", 0); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read Description from step property bag."); }
             if (desc != null) props["Description"] = desc;
             // Also read the PropertyObject.Comment attribute (separate from Description)
             try
             {
-                var poComment = (string)step.AsPropertyObject().Comment;
+                var poComment = (string)stepPo.Comment;
                 if (!string.IsNullOrEmpty(poComment)) props["Comment"] = poComment;
             }
-            catch { }
+            catch (Exception ex) { _logger.LogDebug(ex, "Failed to read step PropertyObject.Comment."); }
             try
             {
-                var expr = (string)step.AsPropertyObject().GetValString("Module.Expression", 0);
+                var expr = (string)stepPo.GetValString("Module.Expression", 0);
                 props["ModuleExpression"] = expr;
             }
-            catch { }
+            catch (Exception ex) { _logger.LogDebug(ex, "Failed to read Module.Expression from step property bag."); }
+            // ── Run-time enum properties (exposed for readback / round-trip verification) ──
+            // Universal typed Step enum properties (string-valued: e.g. RunMode is
+            // "Normal"/"Skip"/"Pass"/"Fail", Pass/FailAction is "Next"/"Break"/"Terminate"/
+            // "Goto"/"Cback", LoopType is "NoLooping"/"FixedNumLoops"/"PassFailCount"/"Custom").
+            // Each is guarded so a step type lacking one simply omits that key.
+            try { props["RunMode"]    = (string)step.RunMode;    } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read step RunMode."); }
+            try { props["PassAction"] = (string)step.PassAction; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read step PassAction."); }
+            try { props["FailAction"] = (string)step.FailAction; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read step FailAction."); }
+            try { props["LoopType"]   = (string)step.LoopType;   } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read step LoopType."); }
+            // NumericLimitTest / StringValueTest comparison operator, stored as the STRING
+            // property "Comp" (e.g. "GELE"/"GT"/"EQ" for numeric, "CaseSensitive"/"IgnoreCase"
+            // for string). Present only on step types that have it; absent otherwise.
+            try { props["ComparisonType"] = (string)stepPo.GetValString("Comp", 0); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read step comparison type (Comp)."); }
             return props;
         });
     }
 
     // ── Reports ───────────────────────────────────────────────────────────────
 
+    /// <inheritdoc/>
     public async Task<ReportInfo> GenerateReportAsync(string executionId,
         string outputPath, string format = "HTML")
     {
@@ -1643,7 +1922,7 @@ public class TestStandService : ITestStandService
         {
             try
             {
-                var reportGen = _engine!.ReportGenerator;
+                var reportGen = ((dynamic)_engine!).ReportGenerator;
                 // Use the engine's built-in report generator
                 _logger.LogInformation("Generating {Format} report for execution {Id}",
                     format, executionId);
@@ -1665,6 +1944,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task<string> GetReportTextAsync(string executionId)
     {
         EnsureConnected();
@@ -1688,6 +1968,7 @@ public class TestStandService : ITestStandService
 
     // ── UUT / Batch ───────────────────────────────────────────────────────────
 
+    /// <inheritdoc/>
     public async Task<UutInfo> GetUutInfoAsync(string executionId)
     {
         EnsureConnected();
@@ -1716,6 +1997,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task SetUutSerialNumberAsync(string executionId, string serialNumber)
     {
         EnsureConnected();
@@ -1727,6 +2009,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task SetUutPartNumberAsync(string executionId, string partNumber)
     {
         EnsureConnected();
@@ -1740,6 +2023,7 @@ public class TestStandService : ITestStandService
 
     // ── Adapters ─────────────────────────────────────────────────────────────
 
+    /// <inheritdoc/>
     public async Task<List<AdapterInfo>> GetLoadedAdaptersAsync()
     {
         EnsureConnected();
@@ -1751,7 +2035,7 @@ public class TestStandService : ITestStandService
             int count = (int)_engine!.NumAdapters;
             for (int i = 0; i < count; i++)
             {
-                var adapter = _engine!.GetAdapter((object)i);
+                dynamic adapter = _engine!.GetAdapter(i);
                 result.Add(new AdapterInfo
                 {
                     Name     = TryGetString(adapter, "DisplayName"),
@@ -1764,20 +2048,23 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task LoadAdapterAsync(string adapterName)
     {
         EnsureConnected();
-        await Task.Run(() => _engine!.Adapters.LoadAdapter(adapterName));
+        await Task.Run(() => ((dynamic)_engine!).Adapters.LoadAdapter(adapterName));
     }
 
+    /// <inheritdoc/>
     public async Task UnloadAdapterAsync(string adapterName)
     {
         EnsureConnected();
-        await Task.Run(() => _engine!.Adapters.UnloadAdapter(adapterName));
+        await Task.Run(() => ((dynamic)_engine!).Adapters.UnloadAdapter(adapterName));
     }
 
     // ── Logging ───────────────────────────────────────────────────────────────
 
+    /// <inheritdoc/>
     public async Task<List<LogEntry>> GetExecutionLogAsync(string executionId,
         int maxEntries = 100)
     {
@@ -1789,17 +2076,19 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task ClearLogAsync(string executionId)
     {
         await Task.Run(() =>
         {
-            if (_executionLogs.ContainsKey(executionId))
-                _executionLogs[executionId].Clear();
+            if (_executionLogs.TryGetValue(executionId, out var log))
+                log.Clear();
         });
     }
 
     // ── Process Model ─────────────────────────────────────────────────────────
 
+    /// <inheritdoc/>
     public async Task<string> GetProcessModelAsync()
     {
         EnsureConnected();
@@ -1810,6 +2099,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task SetProcessModelAsync(string processModelPath)
     {
         EnsureConnected();
@@ -1818,6 +2108,7 @@ public class TestStandService : ITestStandService
 
     // ── Result Schemas ────────────────────────────────────────────────────────
 
+    /// <inheritdoc/>
     public async Task<List<string>> GetResultSchemasAsync()
     {
         EnsureConnected();
@@ -1826,7 +2117,7 @@ public class TestStandService : ITestStandService
             var schemas = new List<string>();
             try
             {
-                var db = _engine!.DatabaseLogger;
+                var db = ((dynamic)_engine!).DatabaseLogger;
                 var schemaList = db.ResultSchemas;
                 for (int i = 0; i < (int)schemaList.Count; i++)
                     schemas.Add((string)schemaList[(object)i].Name);
@@ -1836,6 +2127,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task<string> ExportResultsAsync(string executionId, string schemaName,
         string outputPath)
     {
@@ -1857,6 +2149,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task InsertLocalVariableAsync(string filePath, string sequenceName,
         string variableName, string dataType, string? defaultValue = null)
     {
@@ -1865,7 +2158,7 @@ public class TestStandService : ITestStandService
         {
             var sf  = _loadedSequenceFiles.TryGetValue(filePath, out var cached)
                 ? cached
-                : _engine!.GetSequenceFileEx(filePath, 0, 4);
+                : _engine!.GetSequenceFileEx(filePath, 0, (NiConflictHandler)4);
 
             var seq = sf.GetSequenceByName(sequenceName);
 
@@ -1890,7 +2183,7 @@ public class TestStandService : ITestStandService
             };
 
             // NewSubProperty(lookupString, valueType, asArray, typeName, options)
-            seq.Locals.NewSubProperty(variableName, (object)propType, (object)isArray, "", 0);
+            seq.Locals.NewSubProperty(variableName, (NiPropValueTypes)propType, isArray, "", 0);
 
             if (defaultValue != null)
             {
@@ -1906,11 +2199,12 @@ public class TestStandService : ITestStandService
                 catch { /* ignore default value errors */ }
             }
 
-            sf.Save(filePath);
+            SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
             _loadedSequenceFiles[filePath] = sf;
         });
     }
 
+    /// <inheritdoc/>
     public async Task SetLocalVariableCommentAsync(string filePath, string sequenceName,
         string variableName, string comment)
     {
@@ -1919,17 +2213,18 @@ public class TestStandService : ITestStandService
         {
             var sf  = _loadedSequenceFiles.TryGetValue(filePath, out var cached)
                 ? cached
-                : _engine!.GetSequenceFileEx(filePath, 0, 4);
+                : _engine!.GetSequenceFileEx(filePath, 0, (NiConflictHandler)4);
 
-            var seq  = sf.GetSequenceByName(sequenceName);
+            var seq = sf.GetSequenceByName(sequenceName);
             var prop = seq.Locals.GetPropertyObject(variableName, 0);
             prop.Comment = comment;
 
-            sf.Save(filePath);
+            SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
             _loadedSequenceFiles[filePath] = sf;
         });
     }
 
+    /// <inheritdoc/>
     public async Task SetLocalVariableValueAsync(string filePath, string sequenceName,
         string variableName, string value)
     {
@@ -1938,7 +2233,7 @@ public class TestStandService : ITestStandService
         {
             var sf  = _loadedSequenceFiles.TryGetValue(filePath, out var cached)
                 ? cached
-                : _engine!.GetSequenceFileEx(filePath, 0, 4);
+                : _engine!.GetSequenceFileEx(filePath, 0, (NiConflictHandler)4);
 
             var seq = sf.GetSequenceByName(sequenceName);
 
@@ -1951,11 +2246,12 @@ public class TestStandService : ITestStandService
             else
                 SetPropertyValue(seq.Locals, variableName, value);
 
-            sf.Save(filePath);
+            SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
             _loadedSequenceFiles[filePath] = sf;
         });
     }
 
+    /// <inheritdoc/>
     public async Task SetStepExpressionAsync(string filePath, string sequenceName,
         string stepGroup, string stepName, string expression, string expressionType = "Statement")
     {
@@ -1964,7 +2260,7 @@ public class TestStandService : ITestStandService
         {
             var sf  = _loadedSequenceFiles.TryGetValue(filePath, out var cached)
                 ? cached
-                : _engine!.GetSequenceFileEx(filePath, 0, 4);
+                : _engine!.GetSequenceFileEx(filePath, 0, (NiConflictHandler)4);
 
             var seq = sf.GetSequenceByName(sequenceName);
             int sgValue = stepGroup.ToLowerInvariant() switch
@@ -1975,7 +2271,7 @@ public class TestStandService : ITestStandService
                 _         => 1
             };
 
-            var step = seq.GetStepByName(stepName, (object)sgValue);
+            dynamic step = seq.GetStepByName(stepName, (NiStepGroups)sgValue);
 
             switch (expressionType.ToLowerInvariant())
             {
@@ -1989,18 +2285,19 @@ public class TestStandService : ITestStandService
                     step.StatusExpression = expression;
                     break;
                 default:
-                    // For Statement steps: expression is stored as PreExpression
-                    // and also accessible via AsPropertyObject "Module.Expression"
-                    try { step.AsPropertyObject().SetValString("Module.Expression", 0, expression); }
-                    catch { step.PreExpression = expression; }
+                    // Statement steps (and the unspecified-type default): the primary home for
+                    // the expression is the Post Expression — it is evaluated after the step's
+                    // (empty) action. 'Pre'/'Post'/'Status' remain available as explicit targets.
+                    step.PostExpression = expression;
                     break;
             }
 
-            sf.Save(filePath);
+            SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
             _loadedSequenceFiles[filePath] = sf;
         });
     }
 
+    /// <inheritdoc/>
     public async Task SetSequenceCallTargetAsync(string filePath, string sequenceName,
         string stepGroup, string stepName, string targetSequenceName, string targetSequenceFile = "")
     {
@@ -2009,7 +2306,7 @@ public class TestStandService : ITestStandService
         {
             var sf  = _loadedSequenceFiles.TryGetValue(filePath, out var cached)
                 ? cached
-                : _engine!.GetSequenceFileEx(filePath, 0, 4);
+                : _engine!.GetSequenceFileEx(filePath, 0, (NiConflictHandler)4);
 
             var seq = sf.GetSequenceByName(sequenceName);
             int sgValue = stepGroup.ToLowerInvariant() switch
@@ -2020,7 +2317,7 @@ public class TestStandService : ITestStandService
                 _         => 1
             };
 
-            var step    = seq.GetStepByName(stepName, (object)sgValue);
+            dynamic step    = seq.GetStepByName(stepName, (NiStepGroups)sgValue);
 
             // Use SequenceCallModule properties via dynamic COM dispatch:
             // SequenceCallModule.SequenceName, .UseCurrentFile, .SequenceFilePath
@@ -2055,11 +2352,12 @@ public class TestStandService : ITestStandService
                 }
             }
 
-            sf.Save(filePath);
+            SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
             _loadedSequenceFiles[filePath] = sf;
         });
     }
 
+    /// <inheritdoc/>
     public async Task SetStepModulePathAsync(string filePath, string sequenceName,
         string stepGroup, string stepName, string modulePath)
     {
@@ -2068,7 +2366,7 @@ public class TestStandService : ITestStandService
         {
             var sf  = _loadedSequenceFiles.TryGetValue(filePath, out var cached)
                 ? cached
-                : _engine!.GetSequenceFileEx(filePath, 0, 4);
+                : _engine!.GetSequenceFileEx(filePath, 0, (NiConflictHandler)4);
 
             var seq = sf.GetSequenceByName(sequenceName);
             int sgValue = stepGroup.ToLowerInvariant() switch
@@ -2079,45 +2377,60 @@ public class TestStandService : ITestStandService
                 _         => 1
             };
 
-            var step = seq.GetStepByName(stepName, (object)sgValue);
+            dynamic step = seq.GetStepByName(stepName, (NiStepGroups)sgValue);
 
             // Access Module via dynamic COM dispatch so VIPath persists.
             dynamic lvModule = step.Module;
             lvModule.VIPath = modulePath;
 
-            sf.Save(filePath);
+            SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
             _loadedSequenceFiles[filePath] = sf;
         });
     }
 
+    /// <inheritdoc/>
     public async Task<List<AnalyzerMessage>> RunSequenceAnalyzerAsync(string filePath)
     {
         EnsureConnected();
         return await Task.Run(() =>
         {
             var diag = new System.Text.StringBuilder();
-            string diagPath = @"C:\Temp\ts_analyzer_diag.txt";
+            string diagPath = Path.Combine(Path.GetTempPath(), "ts_analyzer_diag.txt");
             void Log(string msg) { diag.AppendLine(msg); }
-            void Flush() { try { System.IO.File.WriteAllText(diagPath, diag.ToString()); } catch { } }
+            void Flush() { try { System.IO.File.WriteAllText(diagPath, diag.ToString()); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to write analyzer diagnostics to temp file."); } }
 
             // Ensure the file is saved to disk before analysis
             if (_loadedSequenceFiles.TryGetValue(filePath, out var cachedSf))
             {
-                try { cachedSf.Save(filePath); Log("File saved to disk OK"); }
+                try { SaveSequenceFileWithRetry(cachedSf, filePath); Log("File saved to disk OK"); }
                 catch (Exception ex) { Log($"File save warning: {ex.Message}"); }
             }
 
-            return RunAnalysisViaApp(filePath, Log, Flush);
+            // Resolve Bin/Public dirs + version for the *connected* engine — no hard-coded release.
+            var (binDir, publicDir, productVersion) = ResolveAnalyzerLocations();
+            return RunAnalysisViaApp(filePath, binDir, publicDir, productVersion, Log, Flush);
         });
     }
 
     private static List<AnalyzerMessage> RunAnalysisViaApp(
         string filePath,
+        string binDir,
+        string publicDir,
+        string productVersion,
         Action<string> Log,
         Action Flush)
     {
-        const string analyzerExe  = @"C:\Program Files (x86)\National Instruments\TestStand 2026\Bin\AnalyzerApp.exe";
-        const string savedProject = @"C:\Users\Public\Documents\National Instruments\TestStand 2026 (32-bit)\MyAnalyzerProject.tsaproj";
+        // AnalyzerApp.exe ships in the connected engine's Bin directory — never hard-code a release.
+        string analyzerExe = !string.IsNullOrEmpty(binDir)
+            ? Path.Combine(binDir, "AnalyzerApp.exe")
+            : "AnalyzerApp.exe";
+        // The user's saved analyzer project (with its configured rules) lives in the TestStand
+        // Public directory of the running version — empty when that directory is unknown.
+        string savedProject = !string.IsNullOrEmpty(publicDir)
+            ? Path.Combine(publicDir, "MyAnalyzerProject.tsaproj")
+            : "";
+        Log($"Resolved AnalyzerApp.exe: {analyzerExe}");
+        Log($"Resolved saved project:   {(string.IsNullOrEmpty(savedProject) ? "(public dir unknown)" : savedProject)}");
         string tempProject = System.IO.Path.Combine(
             System.IO.Path.GetTempPath(), "ts_mcp_analysis_" + System.IO.Path.GetFileNameWithoutExtension(filePath) + ".tsaproj");
 
@@ -2132,8 +2445,11 @@ public class TestStandService : ITestStandService
         else
         {
             Log("Saved project not found — using minimal template");
-            projectXml = @"<?xml version=""1.0"" encoding=""UTF-8""?>
-<teststandfileheader type='SequenceAnalyzerProjectFile' fileversion='1022' productname='TestStand' productversion='2026 Q1 (26.0.0.49152)' compatibleversion='23.0.0.0' xmlns:xsi=""http://www.w3.org/2001/XMLSchema-instance"" xmlns=""http://www.ni.com/TestStand/23.0.0/PropertyObjectFile"">
+            // productversion is cosmetic file metadata; compatibleversion + the namespace govern
+            // parsing. Stamp the connected engine's version when known, else the compatible baseline.
+            string headerVersion = string.IsNullOrEmpty(productVersion) ? "23.0.0.0" : productVersion;
+            projectXml = $@"<?xml version=""1.0"" encoding=""UTF-8""?>
+<teststandfileheader type='SequenceAnalyzerProjectFile' fileversion='1022' productname='TestStand' productversion='{headerVersion}' compatibleversion='23.0.0.0' xmlns:xsi=""http://www.w3.org/2001/XMLSchema-instance"" xmlns=""http://www.ni.com/TestStand/23.0.0/PropertyObjectFile"">
  <typelist/>
  <Data classname='Obj'><subprops><data classname='Obj'><subprops>
   <Files classname='Strs'><value lbound='[0]' ubound='[]'/></Files>
@@ -2151,28 +2467,17 @@ public class TestStandService : ITestStandService
             $"<Files classname='Strs'><value lbound='[0]' ubound='[0]'><value arrayindex='[0]'>{escapedPath}</value></value></Files>";
 
         // Use a simple regex to replace the Files element
-        projectXml = System.Text.RegularExpressions.Regex.Replace(
-            projectXml,
-            @"<Files classname='Strs'>.*?</Files>",
-            newFilesBlock,
-            System.Text.RegularExpressions.RegexOptions.Singleline);
+        projectXml = _filesBlockRx.Replace(projectXml, newFilesBlock);
         Log($"Injected file into project XML: {filePath}");
 
         // Clear old messages so only the new run's results remain
         string clearMessages = "<Messages classname='Objs'><value lbound='[0]' ubound='[]'/></Messages>";
-        projectXml = System.Text.RegularExpressions.Regex.Replace(
-            projectXml,
-            @"<Messages classname='Objs'>.*?</Messages>",
-            clearMessages,
-            System.Text.RegularExpressions.RegexOptions.Singleline);
+        projectXml = _messagesBlockRx.Replace(projectXml, clearMessages);
 
         // Update PathAtLastWrite to match our temp file so AnalyzerApp /save works
         string escapedTempProject = tempProject.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;");
-        projectXml = System.Text.RegularExpressions.Regex.Replace(
-            projectXml,
-            @"<PathAtLastWrite classname='Str'>.*?</PathAtLastWrite>",
-            $"<PathAtLastWrite classname='Str'><value>{escapedTempProject}</value></PathAtLastWrite>",
-            System.Text.RegularExpressions.RegexOptions.Singleline);
+        projectXml = _pathAtLastWriteRx.Replace(projectXml,
+            $"<PathAtLastWrite classname='Str'><value>{escapedTempProject}</value></PathAtLastWrite>");
 
         System.IO.File.WriteAllText(tempProject, projectXml, System.Text.Encoding.UTF8);
         Log($"Temp project written: {tempProject}");
@@ -2204,7 +2509,7 @@ public class TestStandService : ITestStandService
 
         if (!exited)
         {
-            try { proc.Kill(); } catch { }
+            try { proc.Kill(); } catch (Exception) { /* best-effort: kill timed-out AnalyzerApp.exe process — intentionally ignored */ }
             throw new InvalidOperationException("AnalyzerApp.exe timed out after 120 seconds.");
         }
 
@@ -2229,7 +2534,7 @@ public class TestStandService : ITestStandService
         var result = ParseAnalyzerMessages(savedXml, Log);
 
         // Clean up temp file
-        try { System.IO.File.Delete(tempProject); } catch { }
+        try { System.IO.File.Delete(tempProject); } catch (Exception) { /* best-effort: delete temp analyzer project file — intentionally ignored */ }
 
         Log($"Total messages collected: {result.Count}");
         Flush();
@@ -2239,15 +2544,119 @@ public class TestStandService : ITestStandService
         return result;
     }
 
+    /// <summary>
+    /// Resolves the TestStand <c>Bin</c> directory, the TestStand <c>Public</c> directory and the
+    /// product-version string for the *currently connected* engine, so the Sequence Analyzer always
+    /// runs the AnalyzerApp.exe matching the running TestStand — never a hard-coded release. Falls
+    /// back to the TESTSTANDBIN / TESTSTANDPUBLIC environment variables, then to a newest-first scan
+    /// of the National Instruments install root.
+    /// </summary>
+    private (string BinDir, string PublicDir, string ProductVersion) ResolveAnalyzerLocations()
+    {
+        string binDir = "";
+        string publicDir = "";
+        string productVersion = "";
+
+        // 1. Ask the connected engine — this is the exact running version.
+        if (_engine != null)
+        {
+            binDir = GetEngineProperty<string>("BinDirectory") ?? "";
+            productVersion = GetEngineProperty<string>("VersionString") ?? "";
+            try { publicDir = (string)((dynamic)_engine!).GetTestStandPath((object)4); } // 4 = TestStandPublic
+            catch (Exception ex) { _logger.LogDebug(ex, "Engine GetTestStandPath(TestStandPublic) failed."); }
+        }
+
+        // 2. Environment variables exported by the TestStand installer.
+        if (string.IsNullOrEmpty(binDir))
+            binDir = Environment.GetEnvironmentVariable("TESTSTANDBIN") ?? "";
+        if (string.IsNullOrEmpty(publicDir))
+            publicDir = Environment.GetEnvironmentVariable("TESTSTANDPUBLIC") ?? "";
+
+        // 3. COM registration of the Engine coclass — points at the actively registered engine's Bin.
+        if (string.IsNullOrEmpty(binDir) || !File.Exists(Path.Combine(binDir, "AnalyzerApp.exe")))
+        {
+            var fromReg = FindTestStandBinFromRegistry();
+            if (fromReg != null) binDir = fromReg;
+        }
+
+        // 4. Last resort: newest installed TestStand whose Bin holds AnalyzerApp.exe.
+        if (string.IsNullOrEmpty(binDir) || !File.Exists(Path.Combine(binDir, "AnalyzerApp.exe")))
+        {
+            var found = FindNewestTestStandBin();
+            if (found != null) binDir = found;
+        }
+
+        return (binDir, publicDir, productVersion);
+    }
+
+    /// <summary>
+    /// Scans the standard National Instruments install roots for the newest installed TestStand
+    /// whose <c>Bin</c> directory contains AnalyzerApp.exe. Returns null when none is found.
+    /// </summary>
+    private static string? FindNewestTestStandBin()
+    {
+        foreach (var pf in new[]
+        {
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+        })
+        {
+            if (string.IsNullOrEmpty(pf)) continue;
+            var niDir = Path.Combine(pf, "National Instruments");
+            if (!Directory.Exists(niDir)) continue;
+            try
+            {
+                foreach (var dir in Directory.GetDirectories(niDir, "TestStand*")
+                             .OrderByDescending(d => d, StringComparer.OrdinalIgnoreCase))
+                {
+                    var bin = Path.Combine(dir, "Bin");
+                    if (File.Exists(Path.Combine(bin, "AnalyzerApp.exe"))) return bin;
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // Install root not enumerable on this station — try the next one.
+            }
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Reads the registered TestStand engine's Bin directory from the COM registration of the
+    /// Engine coclass (CLSID <c>{B2794EF6-C0B6-11D0-939C-0020AF68E893}</c>). Its
+    /// <c>InprocServer32</c> default value is the full path to the engine DLL, whose directory is
+    /// the TestStand Bin folder. Uses the 32-bit registry view because the TestStand engine is a
+    /// 32-bit (x86) COM server. Returns null when the key is missing or AnalyzerApp.exe is absent.
+    /// </summary>
+    private static string? FindTestStandBinFromRegistry()
+    {
+        const string engineInprocKey =
+            @"CLSID\{B2794EF6-C0B6-11D0-939C-0020AF68E893}\InprocServer32";
+        try
+        {
+            using var hkcr = RegistryKey.OpenBaseKey(RegistryHive.ClassesRoot, RegistryView.Registry32);
+            using var key = hkcr.OpenSubKey(engineInprocKey);
+            // (Default) value = full path to the engine DLL; strip any stray surrounding quotes.
+            var dllPath = (key?.GetValue(null) as string)?.Trim().Trim('"');
+            if (string.IsNullOrEmpty(dllPath)) return null;
+
+            var bin = Path.GetDirectoryName(dllPath);
+            if (!string.IsNullOrEmpty(bin) && File.Exists(Path.Combine(bin, "AnalyzerApp.exe")))
+                return bin;
+        }
+        catch (Exception)
+        {
+            // Registry not readable / key absent on this station — fall through to the directory scan.
+        }
+        return null;
+    }
+
     private static List<AnalyzerMessage> ParseAnalyzerMessages(string projectXml, Action<string> Log)
     {
         var result = new List<AnalyzerMessage>();
 
         // Extract the <Messages classname='Objs'>...</Messages> block
-        var msgBlockMatch = System.Text.RegularExpressions.Regex.Match(
-            projectXml,
-            @"<Messages classname='Objs'>(.*?)</Messages>",
-            System.Text.RegularExpressions.RegexOptions.Singleline);
+        var msgBlockMatch = _messagesCaptureRx.Match(projectXml);
 
         if (!msgBlockMatch.Success)
         {
@@ -2260,16 +2669,11 @@ public class TestStandService : ITestStandService
 
         // Quick check: if the direct array child has ubound='[]' (self-closing), it's empty.
         // Match only the FIRST <value ...> tag directly inside <Messages> — not nested ones.
-        var firstValueMatch = System.Text.RegularExpressions.Regex.Match(
-            msgBlock, @"<Messages classname='Objs'>\s*<value\b([^>]*)>?",
-            System.Text.RegularExpressions.RegexOptions.Singleline);
+        var firstValueMatch = _firstValueRx.Match(msgBlock);
         if (firstValueMatch.Success)
         {
             string attrs = firstValueMatch.Groups[1].Value;
-            bool isSelfClosing = attrs.EndsWith("/") ||
-                System.Text.RegularExpressions.Regex.IsMatch(msgBlock,
-                    @"<Messages classname='Objs'>\s*<value\b[^>]*/\s*>",
-                    System.Text.RegularExpressions.RegexOptions.Singleline);
+            bool isSelfClosing = attrs.EndsWith("/") || _selfClosingValueRx.IsMatch(msgBlock);
             bool emptyBound = attrs.Contains("ubound='[]'");
             if (isSelfClosing && emptyBound)
             {
@@ -2367,14 +2771,15 @@ public class TestStandService : ITestStandService
     private static string TryGetRuleId(dynamic m)
     {
         // AnalysisMessage.RuleId is the correct property per the interop XML docs
-        try { return (string)m.RuleId;  } catch { }
-        try { return (string)m.RuleID;  } catch { }
-        try { return (string)m.Rule.Id; } catch { }
+        try { return (string)m.RuleId;  } catch (Exception) { /* best-effort: probe RuleId property on analysis message — intentionally ignored */ }
+        try { return (string)m.RuleID;  } catch (Exception) { /* best-effort: probe RuleID property on analysis message — intentionally ignored */ }
+        try { return (string)m.Rule.Id; } catch (Exception) { /* best-effort: probe Rule.Id property on analysis message — intentionally ignored */ }
         return "";
     }
 
     // ── Workspace ─────────────────────────────────────────────────────────────
 
+    /// <inheritdoc/>
     public async Task<WorkspaceInfo> OpenWorkspaceAsync(string workspacePath)
     {
         EnsureConnected();
@@ -2388,7 +2793,7 @@ public class TestStandService : ITestStandService
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "OpenWorkspace via reflection failed, trying dynamic");
-                try { _engine!.OpenWorkspace(workspacePath, 0); }
+                try { ((dynamic)_engine!).OpenWorkspace(workspacePath, 0); }
                 catch (Exception ex2)
                 {
                     _logger.LogWarning(ex2, "OpenWorkspace dynamic also failed");
@@ -2398,6 +2803,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task<WorkspaceInfo> GetWorkspaceAsync()
     {
         EnsureConnected();
@@ -2409,25 +2815,26 @@ public class TestStandService : ITestStandService
         var info = new WorkspaceInfo();
         try
         {
-            dynamic ws = _engine!.Workspace;
-            try { info.WorkspacePath = (string)ws.Path; } catch { }
+            dynamic ws = ((dynamic)_engine!).Workspace;
+            try { info.WorkspacePath = (string)ws.Path; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read workspace path."); }
             try
             {
                 dynamic files = ws.Files;
                 int count = Convert.ToInt32((object)files.Count);
                 for (int i = 0; i < count; i++)
                 {
-                    try { info.SequenceFiles.Add((string)files[(object)i].Path); } catch { }
+                    try { info.SequenceFiles.Add((string)files[(object)i].Path); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read sequence file path from workspace at index {Index}.", i); }
                 }
             }
-            catch { }
+            catch (Exception ex) { _logger.LogDebug(ex, "Failed to enumerate workspace sequence files."); }
         }
-        catch { }
+        catch (Exception ex) { _logger.LogDebug(ex, "Failed to access workspace from engine."); }
         return info;
     }
 
     // ── Watch Expressions ─────────────────────────────────────────────────────
 
+    /// <inheritdoc/>
     public async Task<int> AddWatchExpressionAsync(string expression, string? label = null)
     {
         // WatchExpressions are a Sequence Editor GUI concept; the engine has no such API.
@@ -2450,6 +2857,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task<List<WatchExpressionInfo>> GetWatchExpressionsAsync()
     {
         return await Task.Run(() =>
@@ -2464,6 +2872,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task RemoveWatchExpressionAsync(int index)
     {
         await Task.Run(() =>
@@ -2480,6 +2889,7 @@ public class TestStandService : ITestStandService
 
     // ── Callbacks ────────────────────────────────────────────────────────────
 
+    /// <inheritdoc/>
     public async Task<List<CallbackInfo>> GetCallbacksAsync(string filePath)
     {
         EnsureConnected();
@@ -2487,12 +2897,12 @@ public class TestStandService : ITestStandService
         {
             var sf = _loadedSequenceFiles.TryGetValue(filePath, out var cached)
                 ? cached
-                : _engine!.GetSequenceFileEx(filePath, 0, 4);
+                : _engine!.GetSequenceFileEx(filePath, 0, (NiConflictHandler)4);
 
             var result = new List<CallbackInfo>();
             try
             {
-                dynamic callbacks = sf.Callbacks;
+                dynamic callbacks = ((dynamic)sf).Callbacks;
                 int count = Convert.ToInt32((object)callbacks.Count);
                 for (int i = 0; i < count; i++)
                 {
@@ -2505,7 +2915,7 @@ public class TestStandService : ITestStandService
                             AssignedSequence = TryGetString(cb, "SequenceName")
                         });
                     }
-                    catch { }
+                    catch (Exception ex) { _logger.LogDebug(ex, "Failed to read callback entry at index {Index}.", i); }
                 }
             }
             catch
@@ -2517,7 +2927,7 @@ public class TestStandService : ITestStandService
                     "ParallelModel", "BatchModel"
                 };
                 int numSeqs = 0;
-                try { numSeqs = Convert.ToInt32((object)sf.NumSequences); } catch { }
+                try { numSeqs = Convert.ToInt32((object)sf.NumSequences); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to get sequence count in callback fallback enumeration."); }
                 for (int i = 0; i < numSeqs; i++)
                 {
                     try
@@ -2534,7 +2944,7 @@ public class TestStandService : ITestStandService
                             });
                         }
                     }
-                    catch { }
+                    catch (Exception ex) { _logger.LogDebug(ex, "Failed to read sequence entry in callback fallback at index {Index}.", i); }
                 }
             }
             return result;
@@ -2543,6 +2953,7 @@ public class TestStandService : ITestStandService
 
     // ── File Properties ───────────────────────────────────────────────────────
 
+    /// <inheritdoc/>
     public async Task<FilePropertiesInfo> GetFilePropertiesAsync(string filePath)
     {
         EnsureConnected();
@@ -2550,7 +2961,7 @@ public class TestStandService : ITestStandService
         {
             var sf = _loadedSequenceFiles.TryGetValue(filePath, out var cached)
                 ? cached
-                : _engine!.GetSequenceFileEx(filePath, 0, 4);
+                : _engine!.GetSequenceFileEx(filePath, 0, (NiConflictHandler)4);
 
             var info = new FilePropertiesInfo { FilePath = filePath };
             // Use PropertyObjectFile typed interface for all file-level metadata
@@ -2561,13 +2972,14 @@ public class TestStandService : ITestStandService
                 info.IsModified = pof.IsModified;
                 info.Comment    = string.IsNullOrEmpty(pof.Comment) ? null : pof.Comment;
             }
-            catch { }
+            catch (Exception ex) { _logger.LogDebug(ex, "Failed to read file properties via PropertyObjectFile interface."); }
             // NumSequences is on SequenceFile interface directly
-            try { info.NumSequences = Convert.ToInt32((object)sf.NumSequences); } catch { }
+            try { info.NumSequences = Convert.ToInt32((object)sf.NumSequences); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read NumSequences from sequence file."); }
             return info;
         });
     }
 
+    /// <inheritdoc/>
     public async Task SetFilePropertiesAsync(string filePath, string? comment = null,
         string? version = null)
     {
@@ -2576,20 +2988,21 @@ public class TestStandService : ITestStandService
         {
             var sf = _loadedSequenceFiles.TryGetValue(filePath, out var cached)
                 ? cached
-                : _engine!.GetSequenceFileEx(filePath, 0, 4);
+                : _engine!.GetSequenceFileEx(filePath, 0, (NiConflictHandler)4);
 
             // PropertyObjectFile has Comment and Version as direct typed properties
             var pof = (PropertyObjectFile)(object)sf.AsPropertyObjectFile();
             if (comment != null) pof.Comment = comment;
             if (version != null) pof.Version = version;
 
-            sf.Save(filePath);
+            SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
             _loadedSequenceFiles[filePath] = sf;
         });
     }
 
     // ── Duplicate Sequence ────────────────────────────────────────────────────
 
+    /// <inheritdoc/>
     public async Task<string> DuplicateSequenceAsync(string sourceFilePath,
         string sourceSequenceName, string newSequenceName, string? targetFilePath = null)
     {
@@ -2598,14 +3011,14 @@ public class TestStandService : ITestStandService
         {
             var srcSf = _loadedSequenceFiles.TryGetValue(sourceFilePath, out var cachedSrc)
                 ? cachedSrc
-                : _engine!.GetSequenceFileEx(sourceFilePath, 0, 4);
+                : _engine!.GetSequenceFileEx(sourceFilePath, 0, (NiConflictHandler)4);
 
             string destPath = targetFilePath ?? sourceFilePath;
             var dstSf = string.Equals(destPath, sourceFilePath, StringComparison.OrdinalIgnoreCase)
                 ? srcSf
                 : (_loadedSequenceFiles.TryGetValue(destPath, out var cachedDst)
                     ? cachedDst
-                    : _engine!.GetSequenceFileEx(destPath, 0, 4));
+                    : _engine!.GetSequenceFileEx(destPath, 0, (NiConflictHandler)4));
 
             // Get source sequence
             dynamic srcSeq = srcSf.GetSequenceByName(sourceSequenceName);
@@ -2616,7 +3029,7 @@ public class TestStandService : ITestStandService
             try
             {
                 // Try CopySequence API (TestStand 2016+)
-                newSeq = srcSf.CopySequence(srcSeq);
+                newSeq = ((dynamic)srcSf).CopySequence(srcSeq);
             }
             catch
             {
@@ -2778,8 +3191,8 @@ public class TestStandService : ITestStandService
             _logger.LogWarning(ex, "Failed to enumerate sequences in {Path}", filePath);
         }
 
-        try { info.FileGlobals    = MapVariables(GetFileGlobals(sf)); } catch { }
-        try { info.StationGlobals = MapVariables(GetStationGlobals()); } catch { }
+        try { info.FileGlobals.AddRange((List<VariableInfo>)MapVariables(GetFileGlobals(sf))); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to enumerate file globals for sequence file info."); }
+        try { info.StationGlobals.AddRange((List<VariableInfo>)MapVariables(GetStationGlobals())); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to enumerate station globals for sequence file info."); }
 
         return info;
     }
@@ -2803,35 +3216,35 @@ public class TestStandService : ITestStandService
 
         // TestStand stores sequence comments as "Comment", not "Description"
         string? seqDesc = null;
-        try { seqDesc = (string)seq.Comment; } catch { }
+        try { seqDesc = (string)seq.Comment; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read sequence Comment property."); }
         if (string.IsNullOrEmpty(seqDesc))
-            try { seqDesc = (string)seq.AsPropertyObject().GetValString("TS.Comment", 0); } catch { }
+            try { seqDesc = (string)((NiSequence)(object)seq).AsPropertyObject().GetValString("TS.Comment", 0); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read TS.Comment from sequence property bag."); }
         if (string.IsNullOrEmpty(seqDesc))
-            try { seqDesc = (string)seq.AsPropertyObject().GetValString("Comment", 0); } catch { }
+            try { seqDesc = (string)((NiSequence)(object)seq).AsPropertyObject().GetValString("Comment", 0); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read Comment from sequence property bag."); }
         if (string.IsNullOrEmpty(seqDesc))
-            try { seqDesc = (string)seq.Description; } catch { }
+            try { seqDesc = (string)seq.Description; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read sequence Description property."); }
         if (!string.IsNullOrEmpty(seqDesc)) info.Description = seqDesc;
         string[] groupNames = { "Setup", "Main", "Cleanup" };
         for (int g = 0; g <= 2; g++)
         {
             try
             {
-                int count = Convert.ToInt32((object)seq.GetNumSteps((object)g));
+                int count = Convert.ToInt32((object)seq.GetNumSteps((NiStepGroups)g));
                 for (int i = 0; i < count; i++)
                 {
                     try
                     {
-                        var step = MapStepInfo(seq.GetStep(i, (object)g));
+                        var step = MapStepInfo(seq.GetStep(i, (NiStepGroups)g));
                         // Omit the default "Main" group (g==1) to save tokens; absent = Main.
                         step.StepGroup = g == 1 ? null : groupNames[g];
                         info.Steps.Add(step);
                     }
-                    catch { }
+                    catch (Exception ex) { _logger.LogDebug(ex, "Failed to map step at index {Index} in group {Group} in MapSequenceInfo.", i, g); }
                 }
             }
-            catch { }
+            catch (Exception ex) { _logger.LogDebug(ex, "Failed to enumerate steps for group {Group} in MapSequenceInfo.", g); }
         }
-        try { info.Locals = MapVariables(seq.Locals); } catch { }
+        try { info.Locals.AddRange((List<VariableInfo>)MapVariables(seq.Locals)); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to map local variables for sequence info."); }
         return info;
     }
 
@@ -2844,7 +3257,7 @@ public class TestStandService : ITestStandService
             for (int i = 0; i < n; i++)
                 steps.Add(MapStepInfo(stepGroup[(object)i]));
         }
-        catch { }
+        catch (Exception ex) { _logger.LogDebug(ex, "Failed to map step group collection."); }
         return steps;
     }
 
@@ -2858,7 +3271,7 @@ public class TestStandService : ITestStandService
         // RunMode is a string property: "Normal", "Skip", "Fail", "Pass".
         // Only emit Enabled when the step is skipped; enabled steps leave it
         // null so the serializer omits it (absence = enabled — token saver).
-        try { if ((string)step.RunMode == "Skip") info.Enabled = false; } catch { }
+        try { if ((string)step.RunMode == "Skip") info.Enabled = false; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read step RunMode for enabled flag."); }
         // step.Comment holds the user-set comment (written by SetStepCommentAsync).
         // step.Description returns the auto-generated type description (e.g. "Action"),
         // so prefer Comment, and only fall back to Description when Comment is empty.
@@ -2867,15 +3280,15 @@ public class TestStandService : ITestStandService
             var c = (string)step.Comment;
             if (!string.IsNullOrEmpty(c)) info.Description = c;
         }
-        catch { }
+        catch (Exception ex) { _logger.LogDebug(ex, "Failed to read step Comment property."); }
         if (string.IsNullOrEmpty(info.Description))
-            try { info.Description = (string)step.Description; } catch { }
+            try { info.Description = (string)step.Description; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read step Description property."); }
         try
         {
             if ((int)step.SubSteps.Count > 0)
                 info.SubSteps = MapSteps(step.SubSteps);
         }
-        catch { }
+        catch (Exception ex) { _logger.LogDebug(ex, "Failed to enumerate step sub-steps."); }
         return info;
     }
 
@@ -2899,7 +3312,7 @@ public class TestStandService : ITestStandService
                     // PropertyObject has no `TypeName` property — the human-readable type
                     // name comes from GetTypeDisplayString(lookupString, options).
                     string dataType = "";
-                    try { dataType = (string)prop.GetTypeDisplayString("", (object)0); } catch { }
+                    try { dataType = (string)prop.GetTypeDisplayString("", (object)0); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to get type display string for variable."); }
                     if (string.IsNullOrEmpty(dataType)) dataType = TryGetString(prop, "TypeName");
 
                     vars.Add(new VariableInfo
@@ -2910,10 +3323,10 @@ public class TestStandService : ITestStandService
                         Description = TryGetStringOrNull(prop, "Comment")
                     });
                 }
-                catch { }
+                catch (Exception ex) { _logger.LogDebug(ex, "Failed to read variable entry at index {Index} in MapVariables.", i); }
             }
         }
-        catch { }
+        catch (Exception ex) { _logger.LogDebug(ex, "Failed to enumerate sub-properties in MapVariables."); }
         return vars;
     }
 
@@ -2930,11 +3343,11 @@ public class TestStandService : ITestStandService
     private object? TryGetValue(dynamic prop)
     {
         try { return (double)prop.GetValNumber("", 0); }
-        catch { }
+        catch (Exception ex) { _logger.LogDebug(ex, "Failed to read property value as number."); }
         try { return (bool)prop.GetValBoolean("", 0); }
-        catch { }
+        catch (Exception ex) { _logger.LogDebug(ex, "Failed to read property value as boolean."); }
         try { return (string)prop.GetValString("", 0); }
-        catch { }
+        catch (Exception ex) { _logger.LogDebug(ex, "Failed to read property value as string."); }
         return null;
     }
 
@@ -2945,7 +3358,7 @@ public class TestStandService : ITestStandService
             return (T)((object)_engine!).GetType().InvokeMember(
                 propName, _comFlags, null, _engine, null);
         }
-        catch { }
+        catch (Exception ex) { _logger.LogDebug(ex, "Failed to read engine property '{PropName}'.", propName); }
         return default;
     }
 
@@ -3016,13 +3429,14 @@ public class TestStandService : ITestStandService
                     if ((string)s.Name == stepName) return s;
                 }
             }
-            catch { }
+            catch (Exception) { /* best-effort: search step group — intentionally ignored */ }
         }
         throw new KeyNotFoundException($"Step '{stepName}' not found in any step group.");
     }
 
     // ── Type Palettes ─────────────────────────────────────────────────────────
 
+    /// <inheritdoc/>
     public async Task<List<TypePaletteInfo>> GetTypePalettesAsync()
     {
         EnsureConnected();
@@ -3041,7 +3455,7 @@ public class TestStandService : ITestStandService
                     dynamic d = item;
                     path = (string)d.GetPropertyObject("Path", (object)0).GetValString("", (object)0);
                 }
-                catch { }
+                catch (Exception ex) { _logger.LogDebug(ex, "Failed to read palette path from palette file list entry."); }
                 palettePaths.Add((path, System.IO.Path.GetFileNameWithoutExtension(path)));
             }
 
@@ -3062,13 +3476,13 @@ public class TestStandService : ITestStandService
                     if ((int)td.TypeCategory != 1) continue; // step types only
 
                     string ver = "";
-                    try { ver = (string)td.TypeVersion; } catch { }
+                    try { ver = (string)td.TypeVersion; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read TypeVersion for type '{TypeName}'.", typeName); }
 
                     string palette = ResolvePaletteName(typeName, ver, stepTypesByPalette.Keys);
                     if (!string.IsNullOrEmpty(palette) && stepTypesByPalette.ContainsKey(palette))
                         stepTypesByPalette[palette].Add(typeName);
                 }
-                catch { }
+                catch (Exception ex) { _logger.LogDebug(ex, "Failed to process type definition for '{TypeName}' in palette enumeration.", typeName); }
             }
 
             // Build result
@@ -3092,7 +3506,7 @@ public class TestStandService : ITestStandService
     /// Resolves which palette a step type belongs to based on TypeVersion and naming conventions.
     /// The TestStand COM API does not expose palette membership directly via late-bound dispatch.
     /// </summary>
-    private static string ResolvePaletteName(string typeName, string typeVersion, IEnumerable<string> availablePalettes)
+    internal static string ResolvePaletteName(string typeName, string typeVersion, IEnumerable<string> availablePalettes)
     {
         // Version-unique palettes
         if (typeVersion == "23.0.0.2" || typeVersion == "23.0.0.4")
@@ -3139,6 +3553,7 @@ public class TestStandService : ITestStandService
         return "";
     }
 
+    /// <inheritdoc/>
     public async Task LoadTypePaletteAsync(string palettePath)
     {
         EnsureConnected();
@@ -3155,7 +3570,7 @@ public class TestStandService : ITestStandService
                     var p = (string)pp.GetValString("", (object)0);
                     if (p.Equals(palettePath, StringComparison.OrdinalIgnoreCase)) return;
                 }
-                catch { }
+                catch (Exception ex) { _logger.LogDebug(ex, "Failed to read path from palette file list entry during load check."); }
             }
             // Clone first entry as template for the new entry, then adjust path
             if (currentArray.Length == 0)
@@ -3170,11 +3585,12 @@ public class TestStandService : ITestStandService
             Array.Copy(currentArray, newArray, currentArray.Length);
             newArray[newArray.Length - 1] = template;
 
-            _engine!.SetTypePaletteFileList(newArray);
+            ((dynamic)_engine!).SetTypePaletteFileList(newArray);
             _engine!.LoadTypePaletteFiles();
         });
     }
 
+    /// <inheritdoc/>
     public async Task UnloadTypePaletteAsync(string palettePath)
     {
         EnsureConnected();
@@ -3194,11 +3610,12 @@ public class TestStandService : ITestStandService
                 }
                 catch { filtered.Add(item); }
             }
-            _engine!.SetTypePaletteFileList(filtered.ToArray());
+            ((dynamic)_engine!).SetTypePaletteFileList(filtered.ToArray());
             _engine!.LoadTypePaletteFiles();
         });
     }
 
+    /// <inheritdoc/>
     public async Task<List<StepTypeInfo>> GetStepTypesAsync(string? paletteFile = null)
     {
         EnsureConnected();
@@ -3215,7 +3632,7 @@ public class TestStandService : ITestStandService
                 {
                     try
                     {
-                        var td = _engine.GetTypeDefinition((object)name);
+                        dynamic td = _engine.GetTypeDefinition(name);
                         if ((int)td.TypeCategory != 1) continue;
 
                         var loc = TryGetTypeLocation(td);
@@ -3231,7 +3648,7 @@ public class TestStandService : ITestStandService
                             AdapterName = null
                         });
                     }
-                    catch { }
+                    catch (Exception ex) { _logger.LogDebug(ex, "Failed to process step type definition for '{Name}' in GetStepTypesAsync.", name); }
                 }
             }
             catch (Exception ex)
@@ -3242,6 +3659,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task<StepTypeInfo> GetStepTypeAsync(string stepTypeName)
     {
         EnsureConnected();
@@ -3249,7 +3667,7 @@ public class TestStandService : ITestStandService
         {
             try
             {
-                var td = _engine!.GetTypeDefinition((object)stepTypeName);
+                dynamic td = _engine!.GetTypeDefinition(stepTypeName);
                 if (td == null)
                     throw new KeyNotFoundException($"Step type '{stepTypeName}' not found.");
 
@@ -3272,7 +3690,7 @@ public class TestStandService : ITestStandService
                         info.Properties[subName] = TryGetString(sub, "TypeVersion");
                     }
                 }
-                catch { }
+                catch (Exception ex) { _logger.LogDebug(ex, "Failed to enumerate sub-properties of step type '{Name}'.", stepTypeName); }
 
                 return info;
             }
@@ -3290,6 +3708,7 @@ public class TestStandService : ITestStandService
     private static readonly HashSet<string> _fileRootSystemProps =
         new(StringComparer.OrdinalIgnoreCase) { "ChangeCount", "LastSavedChangeCount", "Path", "Data" };
 
+    /// <inheritdoc/>
     public async Task<List<DataTypeInfo>> GetDataTypesAsync(string? sequenceFilePath = null)
     {
         EnsureConnected();
@@ -3322,7 +3741,7 @@ public class TestStandService : ITestStandService
                             dynamic prop = sfPo.GetPropertyObject((object)name, (object)0);
                             kind = InferValueKind(prop, out isArr, out numEl);
                         }
-                        catch { }
+                        catch (Exception ex) { _logger.LogDebug(ex, "Failed to infer value kind for data type '{Name}'.", name); }
                         result.Add(new DataTypeInfo { Name = name, BaseType = kind, IsArray = isArr });
                     }
                     return result;
@@ -3334,7 +3753,7 @@ public class TestStandService : ITestStandService
                 {
                     try
                     {
-                        var td = _engine.GetTypeDefinition((object)name);
+                        dynamic td = _engine.GetTypeDefinition(name);
                         // TypeCategory 1 = step type → skip; everything else is a data type
                         if ((int)td.TypeCategory == 1) continue;
 
@@ -3346,7 +3765,7 @@ public class TestStandService : ITestStandService
                             IsArray     = false
                         });
                     }
-                    catch { }
+                    catch (Exception ex) { _logger.LogDebug(ex, "Failed to process data type definition for '{Name}'.", name); }
                 }
             }
             catch (Exception ex)
@@ -3376,6 +3795,7 @@ public class TestStandService : ITestStandService
 
     // ── Engine Info & Control ─────────────────────────────────────────────────
 
+    /// <inheritdoc/>
     public async Task<EnginePaths> GetEnginePathsAsync()
     {
         EnsureConnected();
@@ -3395,6 +3815,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task<ExpressionCheckResult> CheckExpressionAsync(string expression,
         string? sequenceFilePath = null)
     {
@@ -3439,6 +3860,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task<string> ExpandPathMacrosAsync(string path)
     {
         EnsureConnected();
@@ -3480,18 +3902,19 @@ public class TestStandService : ITestStandService
                     int idx = p.IndexOf(macro, StringComparison.OrdinalIgnoreCase);
                     if (idx < 0) continue;
                     string expanded;
-                    try { expanded = (string)_engine!.GetTestStandPath((object)id); }
+                    try { expanded = (string)((dynamic)_engine!).GetTestStandPath((object)id); }
                     catch { continue; }
                     p = p.Substring(0, idx) + expanded + p.Substring(idx + macro.Length);
                 }
 
-                try { typedEngine.ExpandPathMacros(ref p); } catch { }
+                try { typedEngine.ExpandPathMacros(ref p); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to expand path macros via typed engine interface."); }
                 return p;
             }
             catch { return path; }
         });
     }
 
+    /// <inheritdoc/>
     public async Task<string> FindFileAsync(string filename)
     {
         EnsureConnected();
@@ -3500,31 +3923,35 @@ public class TestStandService : ITestStandService
             try
             {
                 // FindFile(filename, searchDir, searchFlags) - searchFlags 0 = default search dirs
-                var result = _engine!.FindFile((object)filename, (object)"", (object)0);
+                var result = ((dynamic)_engine!).FindFile((object)filename, (object)"", (object)0);
                 return result?.ToString() ?? "";
             }
             catch { return ""; }
         });
     }
 
+    /// <inheritdoc/>
     public async Task BreakAllAsync()
     {
         EnsureConnected();
         await Task.Run(() => _engine!.BreakAll());
     }
 
+    /// <inheritdoc/>
     public async Task AbortAllAsync()
     {
         EnsureConnected();
         await Task.Run(() => _engine!.AbortAll());
     }
 
+    /// <inheritdoc/>
     public async Task TerminateAllAsync()
     {
         EnsureConnected();
         await Task.Run(() => _engine!.TerminateAll());
     }
 
+    /// <inheritdoc/>
     public async Task<StationOptionsInfo> GetStationOptionsAsync()
     {
         EnsureConnected();
@@ -3543,25 +3970,27 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task SetStationOptionsAsync(StationOptionsInfo options)
     {
         EnsureConnected();
         await Task.Run(() =>
         {
-            try { _engine!.TracingEnabled             = options.TracingEnabled;             } catch { }
-            try { _engine!.BreakpointsEnabled         = options.BreakpointsEnabled;         } catch { }
-            try { _engine!.DisableResults             = options.DisableResults;             } catch { }
-            try { _engine!.AlwaysGotoCleanupOnFailure = options.AlwaysGotoCleanupOnFailure; } catch { }
-            try { _engine!.BreakOnRTE                 = options.BreakOnRte;                 } catch { }
+            try { _engine!.TracingEnabled             = options.TracingEnabled;             } catch (Exception ex) { _logger.LogDebug(ex, "Failed to set engine TracingEnabled."); }
+            try { _engine!.BreakpointsEnabled         = options.BreakpointsEnabled;         } catch (Exception ex) { _logger.LogDebug(ex, "Failed to set engine BreakpointsEnabled."); }
+            try { _engine!.DisableResults             = options.DisableResults;             } catch (Exception ex) { _logger.LogDebug(ex, "Failed to set engine DisableResults."); }
+            try { _engine!.AlwaysGotoCleanupOnFailure = options.AlwaysGotoCleanupOnFailure; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to set engine AlwaysGotoCleanupOnFailure."); }
+            try { _engine!.BreakOnRTE                 = options.BreakOnRte;                 } catch (Exception ex) { _logger.LogDebug(ex, "Failed to set engine BreakOnRTE."); }
             if (!string.IsNullOrEmpty(options.StationId))
-                try { _engine!.StationID = options.StationId; } catch { }
+                try { _engine!.StationID = options.StationId; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to set engine StationID."); }
             if (!string.IsNullOrEmpty(options.ProcessModelPath))
-                try { _engine!.StationModelSequenceFilePath = options.ProcessModelPath; } catch { }
+                try { _engine!.StationModelSequenceFilePath = options.ProcessModelPath; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to set engine StationModelSequenceFilePath."); }
         });
     }
 
     // ── Execution Debug Control ────────────────────────────────────────────────
 
+    /// <inheritdoc/>
     public async Task BreakExecutionAsync(string executionId)
     {
         EnsureConnected();
@@ -3573,6 +4002,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task ResumeExecutionAsync(string executionId)
     {
         EnsureConnected();
@@ -3584,6 +4014,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task AbortExecutionAsync(string executionId)
     {
         EnsureConnected();
@@ -3596,6 +4027,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task RestartExecutionAsync(string executionId)
     {
         EnsureConnected();
@@ -3608,6 +4040,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task StepOverAsync(string executionId)
     {
         EnsureConnected();
@@ -3619,6 +4052,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task StepIntoAsync(string executionId)
     {
         EnsureConnected();
@@ -3630,6 +4064,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task StepOutAsync(string executionId)
     {
         EnsureConnected();
@@ -3643,6 +4078,7 @@ public class TestStandService : ITestStandService
 
     // ── Sequence File Operations ──────────────────────────────────────────────
 
+    /// <inheritdoc/>
     public async Task DeleteSequenceAsync(string filePath, string sequenceName)
     {
         EnsureConnected();
@@ -3693,10 +4129,11 @@ public class TestStandService : ITestStandService
                     $"Last error: {lastEx?.GetType().Name}: {lastEx?.Message}",
                     lastEx);
 
-            sf.Save(filePath);
+            SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
         });
     }
 
+    /// <inheritdoc/>
     public async Task<bool> SequenceNameExistsAsync(string filePath, string sequenceName)
     {
         EnsureConnected();
@@ -3713,6 +4150,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task RenameSequenceAsync(string filePath, string oldName, string newName)
     {
         EnsureConnected();
@@ -3721,12 +4159,13 @@ public class TestStandService : ITestStandService
             var sf  = GetOrLoadSeqFile(filePath);
             var seq = sf.GetSequenceByName(oldName);
             seq.Name = newName;
-            sf.Save(filePath);
+            SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
         });
     }
 
     // ── Sequence Operations ────────────────────────────────────────────────────
 
+    /// <inheritdoc/>
     public async Task DeleteStepAsync(string filePath, string sequenceName,
         string stepGroup, string stepName)
     {
@@ -3734,7 +4173,7 @@ public class TestStandService : ITestStandService
         await Task.Run(() =>
         {
             var sf    = GetOrLoadSeqFile(filePath);
-            var seq   = sf.GetSequenceByName(sequenceName);
+            var seq = sf.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
             // NOTE: Sequence.DeleteStep/RemoveStep expect a numeric step index, NOT a Step
             // object (passing the object raises "Could not convert argument 1 ...").
@@ -3754,10 +4193,11 @@ public class TestStandService : ITestStandService
                 throw new InvalidOperationException(
                     $"Step '{stepName}' not found in sequence '{sequenceName}' [{stepGroup}].");
             seq.DeleteStep(idx, (object)sgVal);
-            sf.Save(filePath);
+            SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
         });
     }
 
+    /// <inheritdoc/>
     public async Task MoveStepAsync(string filePath, string sequenceName,
         string stepGroup, string stepName, int newIndex)
     {
@@ -3765,7 +4205,7 @@ public class TestStandService : ITestStandService
         await Task.Run(() =>
         {
             var sf    = GetOrLoadSeqFile(filePath);
-            var seq   = sf.GetSequenceByName(sequenceName);
+            var seq = sf.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
             var step  = seq.GetStepByName(stepName, (object)sgVal);
             // RemoveStep takes a numeric index (not a Step object). Resolve the current
@@ -3773,10 +4213,11 @@ public class TestStandService : ITestStandService
             int curIdx = (int)seq.GetStepIndex(stepName, (object)sgVal);
             seq.RemoveStep(curIdx, (object)sgVal);
             seq.InsertStep(step, newIndex, (object)sgVal);
-            sf.Save(filePath);
+            SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
         });
     }
 
+    /// <inheritdoc/>
     public async Task<bool> StepNameExistsAsync(string filePath, string sequenceName,
         string stepName)
     {
@@ -3794,6 +4235,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task<List<ParameterInfo>> GetSequenceParametersAsync(string filePath,
         string sequenceName)
     {
@@ -3806,9 +4248,10 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task InsertSequenceParameterAsync(string filePath, string sequenceName,
         string paramName, string dataType, string direction = "Input",
-        string? defaultValue = null)
+        string? defaultValue = null, bool? passByReference = null)
     {
         EnsureConnected();
         await Task.Run(() =>
@@ -3819,26 +4262,29 @@ public class TestStandService : ITestStandService
             int propType = MapDataType(dataType);
             seq.Parameters.NewSubProperty(paramName, (object)propType, false, "", 0);
 
-            // PropFlags_PassByReference = 4 (enables pass-by-reference / InOut semantics)
-            int flags = direction.ToLowerInvariant() switch
+            // Pass-by-reference toggles PropFlags_PassByReference (4). The explicit
+            // passByReference flag wins; when it is null, fall back to the legacy 'direction'
+            // mapping (InOut/byref → by reference, Input/Output → by value).
+            bool byRef = passByReference ?? (direction.ToLowerInvariant() switch
             {
-                "inout" or "inputoutput" or "passbyreference" or "byref" => 4,
-                _ => 0
-            };
-            if (flags != 0)
+                "inout" or "inputoutput" or "passbyreference" or "byref" => true,
+                _ => false
+            });
+            if (byRef)
             {
                 var propObj2 = (object)seq.Parameters.GetPropertyObject(paramName, 0);
                 propObj2.GetType().InvokeMember("SetFlags", _comFlags, null, propObj2,
-                    new object[] { "", 0, flags });
+                    new object[] { "", 0, 4 /* PropFlags_PassByReference */ });
             }
 
             if (defaultValue != null)
                 SetPropertyValueByType(seq.Parameters, paramName, defaultValue, propType);
 
-            sf.Save(filePath);
+            SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
         });
     }
 
+    /// <inheritdoc/>
     public async Task DeleteLocalVariableAsync(string filePath, string sequenceName,
         string variableName)
     {
@@ -3849,17 +4295,18 @@ public class TestStandService : ITestStandService
             var seq = sf.GetSequenceByName(sequenceName);
 
             bool inLocals = false;
-            try { seq.Locals.GetPropertyObject(variableName, 0); inLocals = true; } catch { }
+            try { seq.Locals.GetPropertyObject(variableName, 0); inLocals = true; } catch (Exception ex) { _logger.LogDebug(ex, "Variable '{Variable}' not found in Locals — will try Parameters.", variableName); }
 
             if (inLocals)
                 seq.Locals.DeleteSubProperty(variableName, 0);
             else
                 seq.Parameters.DeleteSubProperty(variableName, 0);
 
-            sf.Save(filePath);
+            SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
         });
     }
 
+    /// <inheritdoc/>
     public async Task<List<StepTemplateInfo>> GetStepTemplatesAsync(string filePath)
     {
         EnsureConnected();
@@ -3904,7 +4351,7 @@ public class TestStandService : ITestStandService
                     string stepType = "";
                     string desc = "";
 
-                    try { name = (string)iType.InvokeMember("Name", _comFlags, null, item, null); } catch { }
+                    try { name = (string)iType.InvokeMember("Name", _comFlags, null, item, null); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read template Name at index {Index}.", i); }
 
                     // StepType: step.StepType is an object; get its Name property
                     try
@@ -3913,23 +4360,24 @@ public class TestStandService : ITestStandService
                         if (stObj != null)
                             stepType = stObj.GetType().InvokeMember("Name", _comFlags, null, stObj, null)?.ToString() ?? "";
                     }
-                    catch { }
+                    catch (Exception ex) { _logger.LogDebug(ex, "Failed to read StepType for template '{Name}'.", name); }
 
-                    try { desc = (string)iType.InvokeMember("Description", _comFlags, null, item, null); } catch { }
+                    try { desc = (string)iType.InvokeMember("Description", _comFlags, null, item, null); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read Description for template '{Name}'.", name); }
                     if (string.IsNullOrEmpty(desc))
                     {
                         try { desc = Convert.ToString(iType.InvokeMember("GetValString",
-                            _comFlags, null, item, new object[] { "TS.Description", 0 })) ?? ""; } catch { }
+                            _comFlags, null, item, new object[] { "TS.Description", 0 })) ?? ""; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read TS.Description for template '{Name}'.", name); }
                     }
 
                     result.Add(new StepTemplateInfo { Name = name, StepType = stepType, Description = desc });
                 }
             }
-            catch { }
+            catch (Exception ex) { _logger.LogDebug(ex, "Failed to enumerate step templates from templates file."); }
             return result;
         });
     }
 
+    /// <inheritdoc/>
     public async Task InsertStepFromTemplateAsync(string filePath, string sequenceName,
         string stepGroup, string templateName, string newStepName, int index = -1)
     {
@@ -4002,18 +4450,19 @@ public class TestStandService : ITestStandService
             seqObj.GetType().InvokeMember("InsertStep",
                 _comFlags, null, seqObj, new object[] { clone, insertAt, (object)sgValue });
 
-            sf.Save(filePath);
+            SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
             _loadedSequenceFiles[filePath] = sf;
             }
             catch (Exception ex)
             {
                 string msg = ex.InnerException?.Message ?? ex.Message;
-                System.IO.File.WriteAllText(@"C:\Temp\ts_insert_diag.txt", $"{ex}\nInner: {ex.InnerException}");
+                _logger.LogError(ex, "InsertStepFromTemplate failed: {Message}", msg);
                 throw new InvalidOperationException(msg, ex);
             }
         });
     }
 
+    /// <inheritdoc/>
     public async Task<SequenceProperties> GetSequencePropertiesAsync(string filePath,
         string sequenceName)
     {
@@ -4023,34 +4472,35 @@ public class TestStandService : ITestStandService
             var sf  = GetOrLoadSeqFile(filePath);
             var seq = sf.GetSequenceByName(sequenceName);
             var props = new SequenceProperties();
-            try { props.Name                     = (string)seq.Name;                     } catch { }
-            try { props.Type                     = (string)seq.SequenceType.ToString();  } catch { }
-            try { props.GotoCleanupOnFailure      = (bool)seq.GotoCleanupOnFailure;       } catch { }
-            try { props.DisableResults            = (bool)seq.DisableResults;             } catch { }
+            try { props.Name                     = (string)seq.Name;                     } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read sequence Name in GetSequencePropertiesAsync."); }
+            try { props.Type                     = (string)seq.SequenceType.ToString();  } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read sequence SequenceType."); }
+            try { props.GotoCleanupOnFailure      = (bool)seq.GotoCleanupOnFailure;       } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read sequence GotoCleanupOnFailure."); }
+            try { props.DisableResults            = (bool)seq.DisableResults;             } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read sequence DisableResults."); }
             try
             {
                 int fa = (int)seq.FailureAction;
                 props.FailureAction = fa switch { 0 => "Continue", 1 => "Terminate", 2 => "Abort", _ => fa.ToString() };
             }
-            catch { }
-            try { props.EntryPointNameExpression  = (string)seq.EntryPointNameExpression; } catch { }
-            try { props.ShowEntryPointForAllWindows = (bool)seq.ShowEntryPointForAllWindows; } catch { }
+            catch (Exception ex) { _logger.LogDebug(ex, "Failed to read sequence FailureAction."); }
+            try { props.EntryPointNameExpression  = (string)seq.EntryPointNameExpression; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read sequence EntryPointNameExpression."); }
+            try { props.ShowEntryPointForAllWindows = (bool)seq.ShowEntryPointForAllWindows; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read sequence ShowEntryPointForAllWindows."); }
             string? seqDesc = null;
             // TestStand stores sequence comments as "Comment" (not "Description")
-            try { seqDesc = (string)seq.Comment; } catch { }
+            try { seqDesc = (string)seq.Comment; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read sequence Comment in GetSequencePropertiesAsync."); }
             if (string.IsNullOrEmpty(seqDesc))
-                try { seqDesc = (string)seq.AsPropertyObject().GetValString("TS.Comment", 0); } catch { }
+                try { seqDesc = (string)((NiSequence)(object)seq).AsPropertyObject().GetValString("TS.Comment", 0); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read TS.Comment from sequence property bag in GetSequencePropertiesAsync."); }
             if (string.IsNullOrEmpty(seqDesc))
-                try { seqDesc = (string)seq.AsPropertyObject().GetValString("Comment", 0); } catch { }
+                try { seqDesc = (string)((NiSequence)(object)seq).AsPropertyObject().GetValString("Comment", 0); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read Comment from sequence property bag in GetSequencePropertiesAsync."); }
             if (string.IsNullOrEmpty(seqDesc))
-                try { seqDesc = (string)seq.Description; } catch { }
+                try { seqDesc = (string)seq.Description; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read sequence Description in GetSequencePropertiesAsync."); }
             if (string.IsNullOrEmpty(seqDesc))
-                try { seqDesc = (string)seq.AsPropertyObject().GetValString("TS.Description", 0); } catch { }
+                try { seqDesc = (string)((NiSequence)(object)seq).AsPropertyObject().GetValString("TS.Description", 0); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read TS.Description from sequence property bag in GetSequencePropertiesAsync."); }
             if (!string.IsNullOrEmpty(seqDesc)) props.Description = seqDesc;
             return props;
         });
     }
 
+    /// <inheritdoc/>
     public async Task SetSequencePropertiesAsync(string filePath, string sequenceName,
         SequenceProperties props)
     {
@@ -4061,36 +4511,37 @@ public class TestStandService : ITestStandService
             var seq = sf.GetSequenceByName(sequenceName);
 
             if (!string.IsNullOrEmpty(props.Name) && props.Name != sequenceName)
-                try { seq.Name = props.Name; } catch { }
-            try { seq.GotoCleanupOnFailure = props.GotoCleanupOnFailure; } catch { }
-            try { seq.DisableResults       = props.DisableResults;       } catch { }
+                try { seq.Name = props.Name; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to rename sequence to '{Name}'.", props.Name); }
+            try { seq.GotoCleanupOnFailure = props.GotoCleanupOnFailure; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to set sequence GotoCleanupOnFailure."); }
+            try { seq.DisableResults       = props.DisableResults;       } catch (Exception ex) { _logger.LogDebug(ex, "Failed to set sequence DisableResults."); }
             if (!string.IsNullOrEmpty(props.FailureAction))
             {
                 int fa = props.FailureAction.ToLowerInvariant() switch
                 { "terminate" => 1, "abort" => 2, _ => 0 };
-                try { seq.FailureAction = (object)fa; } catch { }
+                try { seq.FailureAction = (object)fa; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to set sequence FailureAction."); }
             }
             if (!string.IsNullOrEmpty(props.EntryPointNameExpression))
-                try { seq.EntryPointNameExpression = props.EntryPointNameExpression; } catch { }
+                try { seq.EntryPointNameExpression = props.EntryPointNameExpression; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to set sequence EntryPointNameExpression."); }
             if (!string.IsNullOrEmpty(props.Description))
             {
                 bool descSet = false;
                 // TestStand uses "Comment" as the sequence comment property
-                try { seq.Comment = props.Description; descSet = true; } catch { }
+                try { seq.Comment = props.Description; descSet = true; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to set sequence Comment property."); }
                 if (!descSet)
-                    try { seq.AsPropertyObject().SetValString("TS.Comment", 0, props.Description); descSet = true; } catch { }
+                    try { ((NiSequence)(object)seq).AsPropertyObject().SetValString("TS.Comment", 0, props.Description); descSet = true; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to set TS.Comment on sequence property bag."); }
                 if (!descSet)
-                    try { seq.AsPropertyObject().SetValString("Comment", 0, props.Description); descSet = true; } catch { }
+                    try { ((NiSequence)(object)seq).AsPropertyObject().SetValString("Comment", 0, props.Description); descSet = true; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to set Comment on sequence property bag."); }
                 if (!descSet)
-                    try { seq.Description = props.Description; descSet = true; } catch { }
+                    try { seq.Description = props.Description; descSet = true; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to set sequence Description property."); }
                 if (!descSet)
-                    try { seq.AsPropertyObject().SetValString("TS.Description", 0, props.Description); } catch { }
+                    try { ((NiSequence)(object)seq).AsPropertyObject().SetValString("TS.Description", 0, props.Description); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to set TS.Description on sequence property bag."); }
             }
 
-            sf.Save(filePath);
+            SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
         });
     }
 
+    /// <inheritdoc/>
     public async Task<List<VariableInfo>> GetLocalVariablesAsync(string filePath, string sequenceName)
     {
         EnsureConnected();
@@ -4104,6 +4555,7 @@ public class TestStandService : ITestStandService
 
     // ── Step Property Operations ──────────────────────────────────────────────
 
+    /// <inheritdoc/>
     public async Task RenameStepAsync(string filePath, string sequenceName,
         string stepGroup, string stepName, string newName)
     {
@@ -4111,14 +4563,15 @@ public class TestStandService : ITestStandService
         await Task.Run(() =>
         {
             var sf    = GetOrLoadSeqFile(filePath);
-            var seq   = sf.GetSequenceByName(sequenceName);
+            var seq = sf.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
             var step  = seq.GetStepByName(stepName, (object)sgVal);
             step.Name = newName;
-            sf.Save(filePath);
+            SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
         });
     }
 
+    /// <inheritdoc/>
     public async Task<string> SetStepCommentAsync(string filePath, string sequenceName,
         string stepGroup, string stepName, string comment)
     {
@@ -4126,7 +4579,7 @@ public class TestStandService : ITestStandService
         return await Task.Run(() =>
         {
             var sf    = GetOrLoadSeqFile(filePath);
-            var seq   = sf.GetSequenceByName(sequenceName);
+            var seq = sf.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
             var step  = seq.GetStepByName(stepName, (object)sgVal);
             var errors = new System.Text.StringBuilder();
@@ -4137,16 +4590,17 @@ public class TestStandService : ITestStandService
             if (method == "")
             {
                 // 2. PropertyObject.Comment — same field via the property-bag interface.
-                try { step.AsPropertyObject().Comment = comment; method = "po.Comment"; }
+                try { ((NiStep)(object)step).AsPropertyObject().Comment = comment; method = "po.Comment"; }
                 catch (Exception ex) { errors.Append($"[po.Comment: {ex.Message}] "); }
             }
             if (method == "")
                 throw new InvalidOperationException($"Could not set step comment. Attempts: {errors}");
-            sf.Save(filePath);
+            SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
             return method;
         });
     }
 
+    /// <inheritdoc/>
     public async Task SetStepRunModeAsync(string filePath, string sequenceName,
         string stepGroup, string stepName, string runMode)
     {
@@ -4154,7 +4608,7 @@ public class TestStandService : ITestStandService
         await Task.Run(() =>
         {
             var sf    = GetOrLoadSeqFile(filePath);
-            var seq   = sf.GetSequenceByName(sequenceName);
+            var seq = sf.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
             var step  = seq.GetStepByName(stepName, (object)sgVal);
             // RunModes constants: Normal="Normal", Skip="Skip", ForcePass="Pass", ForceFail="Fail"
@@ -4172,10 +4626,11 @@ public class TestStandService : ITestStandService
                 _             => "Normal"
             };
             step.SetRunModeEx(modeStr, System.Type.Missing);
-            sf.Save(filePath);
+            SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
         });
     }
 
+    /// <inheritdoc/>
     public async Task SetStepPreconditionAsync(string filePath, string sequenceName,
         string stepGroup, string stepName, string precondition)
     {
@@ -4183,14 +4638,15 @@ public class TestStandService : ITestStandService
         await Task.Run(() =>
         {
             var sf    = GetOrLoadSeqFile(filePath);
-            var seq   = sf.GetSequenceByName(sequenceName);
+            var seq = sf.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
             var step  = seq.GetStepByName(stepName, (object)sgVal);
             step.Precondition = precondition;
-            sf.Save(filePath);
+            SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
         });
     }
 
+    /// <inheritdoc/>
     public async Task SetStepPassActionAsync(string filePath, string sequenceName,
         string stepGroup, string stepName, string passAction, string? target = null)
     {
@@ -4198,18 +4654,19 @@ public class TestStandService : ITestStandService
         await Task.Run(() =>
         {
             var sf    = GetOrLoadSeqFile(filePath);
-            var seq   = sf.GetSequenceByName(sequenceName);
+            var seq = sf.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
             var step  = seq.GetStepByName(stepName, (object)sgVal);
             // PostActionValues: Next, Break, Terminate, Goto, Cback
             string actionVal = MapPostAction(passAction);
             step.PassAction = actionVal;
             if (!string.IsNullOrEmpty(target) && actionVal == "Goto")
-                try { step.PassActionTarget = target; } catch { }
-            sf.Save(filePath);
+                try { step.PassActionTarget = target; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to set PassActionTarget on step '{Step}'.", stepName); }
+            SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
         });
     }
 
+    /// <inheritdoc/>
     public async Task SetStepFailActionAsync(string filePath, string sequenceName,
         string stepGroup, string stepName, string failAction, string? target = null)
     {
@@ -4217,17 +4674,18 @@ public class TestStandService : ITestStandService
         await Task.Run(() =>
         {
             var sf    = GetOrLoadSeqFile(filePath);
-            var seq   = sf.GetSequenceByName(sequenceName);
+            var seq = sf.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
             var step  = seq.GetStepByName(stepName, (object)sgVal);
             string actionVal = MapPostAction(failAction);
             step.FailAction = actionVal;
             if (!string.IsNullOrEmpty(target) && actionVal == "Goto")
-                try { step.FailActionTarget = target; } catch { }
-            sf.Save(filePath);
+                try { step.FailActionTarget = target; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to set FailActionTarget on step '{Step}'.", stepName); }
+            SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
         });
     }
 
+    /// <inheritdoc/>
     public async Task SetStepLoopAsync(string filePath, string sequenceName,
         string stepGroup, string stepName, string loopType,
         string? initExpr = null, string? whileExpr = null, string? incExpr = null)
@@ -4236,31 +4694,43 @@ public class TestStandService : ITestStandService
         await Task.Run(() =>
         {
             var sf    = GetOrLoadSeqFile(filePath);
-            var seq   = sf.GetSequenceByName(sequenceName);
+            var seq = sf.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
             var step  = seq.GetStepByName(stepName, (object)sgVal);
-            // StepLoopTypes: NoLooping, FixedNumLoops, PassFailCount, Custom
+            // StepLoopTypes: NoLooping, FixedNumLoops, PassFailCount, Custom.
+            // Accepts the strings advertised by the set_step_loop schema
+            // ('NoLoop','While','For','Condition') plus their natural aliases.
+            // 'While'/'Condition' are condition-driven step loops, which TestStand
+            // models as the Custom loop type (driven by LoopWhileExpression) — there
+            // is no native 'While' StepLoopType. Without these cases the documented
+            // 'While'/'Condition'/'NoLoop' strings silently fell through to NoLooping.
             string loopVal = loopType.ToLowerInvariant() switch
             {
+                "noloop"         => "NoLooping",
+                "nolooping"      => "NoLooping",
+                "none"           => "NoLooping",
                 "fixednumloops"  => "FixedNumLoops",
                 "fixed"          => "FixedNumLoops",
                 "for"            => "FixedNumLoops",
                 "passfailcount"  => "PassFailCount",
                 "passorfail"     => "PassFailCount",
+                "while"          => "Custom",
+                "condition"      => "Custom",
                 "custom"         => "Custom",
                 _                => "NoLooping"
             };
             step.LoopType = loopVal;
             if (!string.IsNullOrEmpty(initExpr))
-                try { step.LoopInitExpression  = initExpr;  } catch { }
+                try { step.LoopInitExpression  = initExpr;  } catch (Exception ex) { _logger.LogDebug(ex, "Failed to set LoopInitExpression on step '{Step}'.", stepName); }
             if (!string.IsNullOrEmpty(whileExpr))
-                try { step.LoopWhileExpression = whileExpr; } catch { }
+                try { step.LoopWhileExpression = whileExpr; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to set LoopWhileExpression on step '{Step}'.", stepName); }
             if (!string.IsNullOrEmpty(incExpr))
-                try { step.LoopIncExpression   = incExpr;   } catch { }
-            sf.Save(filePath);
+                try { step.LoopIncExpression   = incExpr;   } catch (Exception ex) { _logger.LogDebug(ex, "Failed to set LoopIncExpression on step '{Step}'.", stepName); }
+            SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
         });
     }
 
+    /// <inheritdoc/>
     public async Task SetStepRecordResultAsync(string filePath, string sequenceName,
         string stepGroup, string stepName, string recordingOption)
     {
@@ -4281,17 +4751,18 @@ public class TestStandService : ITestStandService
                 _                                   => 1   // default: Enabled
             };
             var sf    = GetOrLoadSeqFile(filePath);
-            var seq   = sf.GetSequenceByName(sequenceName);
+            var seq = sf.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
             var step  = seq.GetStepByName(stepName, (object)sgVal);
             // Use the typed Step interface to set the enum property correctly
             var typedStep = (NationalInstruments.TestStand.Interop.API.Step)(object)step;
             typedStep.ResultRecordingOption =
                 (NationalInstruments.TestStand.Interop.API.ResultRecordingOptions)optVal;
-            sf.Save(filePath);
+            SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
         });
     }
 
+    /// <inheritdoc/>
     public async Task SetStepEvalPrecondAsync(string filePath, string sequenceName,
         string stepGroup, string stepName, string option)
     {
@@ -4310,16 +4781,17 @@ public class TestStandService : ITestStandService
                 _                    => 0   // default: UseStationOption
             };
             var sf    = GetOrLoadSeqFile(filePath);
-            var seq   = sf.GetSequenceByName(sequenceName);
+            var seq = sf.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
             var step  = seq.GetStepByName(stepName, (object)sgVal);
             var typedStep = (NationalInstruments.TestStand.Interop.API.Step)(object)step;
             typedStep.EvalPrecondForInteractiveExecution =
                 (NationalInstruments.TestStand.Interop.API.EvalPrecondOptions)optVal;
-            sf.Save(filePath);
+            SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
         });
     }
 
+    /// <inheritdoc/>
     public async Task SetStepModuleLoadOptionAsync(string filePath, string sequenceName,
         string stepGroup, string stepName, string option)
     {
@@ -4341,16 +4813,17 @@ public class TestStandService : ITestStandService
                 _                     => 4   // default: UseStepLoadOption
             };
             var sf    = GetOrLoadSeqFile(filePath);
-            var seq   = sf.GetSequenceByName(sequenceName);
+            var seq = sf.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
             var step  = seq.GetStepByName(stepName, (object)sgVal);
             var typedStep = (NationalInstruments.TestStand.Interop.API.Step)(object)step;
             typedStep.ModuleLoadOption =
                 (NationalInstruments.TestStand.Interop.API.ModuleLoadOptions)optVal;
-            sf.Save(filePath);
+            SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
         });
     }
 
+    /// <inheritdoc/>
     public async Task SetStepModuleUnloadOptionAsync(string filePath, string sequenceName,
         string stepGroup, string stepName, string option)
     {
@@ -4375,16 +4848,17 @@ public class TestStandService : ITestStandService
                 _                         => 5   // default: UseStepUnloadOption
             };
             var sf    = GetOrLoadSeqFile(filePath);
-            var seq   = sf.GetSequenceByName(sequenceName);
+            var seq = sf.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
             var step  = seq.GetStepByName(stepName, (object)sgVal);
             var typedStep = (NationalInstruments.TestStand.Interop.API.Step)(object)step;
             typedStep.ModuleUnloadOption =
                 (NationalInstruments.TestStand.Interop.API.ModuleUnloadOptions)optVal;
-            sf.Save(filePath);
+            SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
         });
     }
 
+    /// <inheritdoc/>
     public async Task SetStepBatchSyncOptionAsync(string filePath, string sequenceName,
         string stepGroup, string stepName, string option)
     {
@@ -4408,13 +4882,13 @@ public class TestStandService : ITestStandService
                 _                      => 0   // default: UseSeqFileSetting
             };
             var sf    = GetOrLoadSeqFile(filePath);
-            var seq   = sf.GetSequenceByName(sequenceName);
+            var seq = sf.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
             var step  = seq.GetStepByName(stepName, (object)sgVal);
             var typedStep = (NationalInstruments.TestStand.Interop.API.Step)(object)step;
             typedStep.BatchSyncOption =
                 (NationalInstruments.TestStand.Interop.API.BatchSynchronizationOptions)optVal;
-            sf.Save(filePath);
+            SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
         });
     }
 
@@ -4434,6 +4908,7 @@ public class TestStandService : ITestStandService
         _                                      => name ?? ""
     };
 
+    /// <inheritdoc/>
     public async Task ChangeStepAdapterAsync(string filePath, string sequenceName,
         string stepGroup, string stepName, string newAdapter)
     {
@@ -4441,15 +4916,16 @@ public class TestStandService : ITestStandService
         await Task.Run(() =>
         {
             var sf    = GetOrLoadSeqFile(filePath);
-            var seq   = sf.GetSequenceByName(sequenceName);
+            var seq = sf.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
             var step  = seq.GetStepByName(stepName, (object)sgVal);
             // Step.ChangeAdapter takes the adapter KEY NAME string, not an Adapter object.
             step.ChangeAdapter((object)ResolveAdapterKeyName(newAdapter));
-            sf.Save(filePath);
+            SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
         });
     }
 
+    /// <inheritdoc/>
     public async Task<string> GetStepUniqueIdAsync(string filePath, string sequenceName,
         string stepGroup, string stepName)
     {
@@ -4457,7 +4933,7 @@ public class TestStandService : ITestStandService
         return await Task.Run(() =>
         {
             var sf    = GetOrLoadSeqFile(filePath);
-            var seq   = sf.GetSequenceByName(sequenceName);
+            var seq = sf.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
             var step  = seq.GetStepByName(stepName, (object)sgVal);
             try { return (string)step.UniqueStepId; } catch { return ""; }
@@ -4466,6 +4942,7 @@ public class TestStandService : ITestStandService
 
     // ── Report Operations ─────────────────────────────────────────────────────
 
+    /// <inheritdoc/>
     public async Task SaveReportAsync(string executionId, string outputPath,
         string format = "HTML")
     {
@@ -4498,6 +4975,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task LaunchReportViewerAsync(string executionId)
     {
         EnsureConnected();
@@ -4519,6 +4997,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task<string> GetFullReportAsync(string executionId)
     {
         EnsureConnected();
@@ -4547,6 +5026,7 @@ public class TestStandService : ITestStandService
     // DISP_E_BADPARAMCOUNT ("TargetParameterCountException") on parameterless COM calls
     // such as AsPropertyObject() under cumulative load on a shared engine.
 
+    /// <inheritdoc/>
     public async Task<List<UserInfo>> GetUsersAsync()
     {
         EnsureConnected();
@@ -4559,12 +5039,13 @@ public class TestStandService : ITestStandService
             for (int i = 0; i < count; i++)
             {
                 try { result.Add(MapUser(userList.GetPropertyObjectByOffset(i, 0))); }
-                catch { }
+                catch (Exception ex) { _logger.LogDebug(ex, "Failed to map user at index {Index}.", i); }
             }
             return result;
         });
     }
 
+    /// <inheritdoc/>
     public async Task<UserInfo?> GetCurrentUserAsync()
     {
         EnsureConnected();
@@ -4580,6 +5061,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task<bool> UserNameExistsAsync(string loginName)
     {
         EnsureConnected();
@@ -4590,6 +5072,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task CreateUserAsync(string loginName, string fullName,
         string password, string? profileName = null, bool persist = true)
     {
@@ -4631,6 +5114,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task DeleteUserAsync(string loginName, bool persist = true)
     {
         EnsureConnected();
@@ -4644,7 +5128,7 @@ public class TestStandService : ITestStandService
             {
                 NiPropertyObject user = userList.GetPropertyObjectByOffset(i, 0);
                 string ln = "";
-                try { ln = user.GetValString("LoginName", 0); } catch { }
+                try { ln = user.GetValString("LoginName", 0); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read LoginName for user at index {Index}.", i); }
                 if (string.Equals(ln, loginName, StringComparison.OrdinalIgnoreCase))
                 {
                     userList.DeleteElements(i, 1, 0);
@@ -4656,6 +5140,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task SetUserPasswordAsync(string loginName, string password,
         bool persist = true)
     {
@@ -4669,6 +5154,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task<List<string>> GetUserPrivilegesAsync(string loginName)
     {
         EnsureConnected();
@@ -4678,11 +5164,12 @@ public class TestStandService : ITestStandService
                 ?? throw new KeyNotFoundException($"User '{loginName}' not found.");
             var enabled = new List<string>();
             try { CollectEnabledPrivileges(user.Privileges, "", enabled); }
-            catch { }
+            catch (Exception ex) { _logger.LogDebug(ex, "Failed to collect enabled privileges for user '{User}'.", loginName); }
             return enabled;
         });
     }
 
+    /// <inheritdoc/>
     public async Task<bool> CheckUserPrivilegeAsync(string loginName, string privilege)
     {
         EnsureConnected();
@@ -4695,6 +5182,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task<List<string>> GetUserProfilesAsync()
     {
         EnsureConnected();
@@ -4707,12 +5195,12 @@ public class TestStandService : ITestStandService
     /// </summary>
     private static NiUser? ResolveUserProfile(NiEngine eng, string profileName)
     {
-        try { var p = eng.GetUserProfile(profileName); if (p != null) return p; } catch { }
+        try { var p = eng.GetUserProfile(profileName); if (p != null) return p; } catch (Exception) { /* best-effort: exact-match profile lookup — intentionally ignored */ }
         foreach (var name in EnumerateUserProfileNames(eng))
         {
             if (string.Equals(name, profileName, StringComparison.OrdinalIgnoreCase))
             {
-                try { return eng.GetUserProfile(name); } catch { }
+                try { return eng.GetUserProfile(name); } catch (Exception) { /* best-effort: case-insensitive profile lookup — intentionally ignored */ }
             }
         }
         return null;
@@ -4733,18 +5221,18 @@ public class TestStandService : ITestStandService
             for (int i = 0; i < n; i++)
             {
                 try { names.Add(profiles.GetPropertyObjectByOffset(i, 0).GetValString("LoginName", 0)); }
-                catch { }
+                catch (Exception) { /* best-effort: read user profile login name at index — intentionally ignored */ }
             }
         }
-        catch { }
+        catch (Exception) { /* best-effort: enumerate user profile list — intentionally ignored */ }
         return names;
     }
 
     private UserInfo MapUser(NiPropertyObject userPo)
     {
         var info = new UserInfo();
-        try { info.LoginName = userPo.GetValString("LoginName", 0); } catch { }
-        try { info.FullName  = userPo.GetValString("FullName", 0); }  catch { }
+        try { info.LoginName = userPo.GetValString("LoginName", 0); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read user LoginName."); }
+        try { info.FullName  = userPo.GetValString("FullName", 0); }  catch (Exception ex) { _logger.LogDebug(ex, "Failed to read user FullName."); }
         // User-group entries use the "%GroupName" login-name convention.
         info.IsGroup = info.LoginName.StartsWith("%");
         return info;
@@ -4757,7 +5245,7 @@ public class TestStandService : ITestStandService
             NiUser user = ((NiEngine)_engine!).GetUser(loginName);
             if (user != null) return user;
         }
-        catch { }
+        catch (Exception ex) { _logger.LogDebug(ex, "Failed to find user '{LoginName}'.", loginName); }
         return null;
     }
 
@@ -4803,12 +5291,12 @@ public class TestStandService : ITestStandService
                     isBoolLeaf = true;
                     if (val) sink.Add(path);
                 }
-                catch { }
+                catch (Exception ex) { _logger.LogDebug(ex, "Failed to read boolean privilege value at path '{Path}'.", path); }
 
                 if (!isBoolLeaf)
                     CollectEnabledPrivileges(child, path, sink);
             }
-            catch { }
+            catch (Exception ex) { _logger.LogDebug(ex, "Failed to read privilege sub-property at index {Index}.", i); }
         }
     }
 
@@ -4826,12 +5314,14 @@ public class TestStandService : ITestStandService
 
     // ── Native Find / Replace ─────────────────────────────────────────────────
 
+    /// <inheritdoc/>
     public async Task<FindReplaceResult> FindInFileAsync(string filePath, string pattern,
         bool matchCase = false, bool wholeWord = false, bool regex = false,
         string elements = "all", int maxResults = 500)
         => await RunFindReplaceAsync(filePath, pattern, null, matchCase, wholeWord,
             regex, elements, false, maxResults);
 
+    /// <inheritdoc/>
     public async Task<FindReplaceResult> ReplaceInFileAsync(string filePath, string pattern,
         string replacement, bool matchCase = false, bool wholeWord = false,
         bool regex = false, string elements = "all", bool save = true)
@@ -4865,7 +5355,7 @@ public class TestStandService : ITestStandService
                 _          => (int)NiSearchElements.SearchElement_All
             };
 
-            var empty = new string[0];
+            var empty = Array.Empty<string>();
             // PropertyObject.Search(lookupString, searchString, searchOptions,
             //   filterOptions, elementsToSearch, limitToAdapters, limitToNamedProps,
             //   limitToPropsOfNamedTypes, subpropLookupStringsToExclude)
@@ -4874,17 +5364,17 @@ public class TestStandService : ITestStandService
                 empty, empty, empty, empty);
 
             // Wait for the asynchronous search to finish.
-            try { search.IsComplete(true, false); } catch { }
+            try { search.IsComplete(true, false); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to wait for find/replace search completion."); }
 
             var res = new FindReplaceResult
             {
                 Pattern     = pattern,
                 Replacement = replacement
             };
-            try { res.StatusMessage = search.StatusMessage; } catch { }
+            try { res.StatusMessage = search.StatusMessage; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read search StatusMessage."); }
 
             int numMatches = 0;
-            try { numMatches = search.NumMatches; } catch { }
+            try { numMatches = search.NumMatches; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read search NumMatches."); }
             res.TotalMatches = numMatches;
 
             for (int i = 0; i < numMatches && i < maxResults; i++)
@@ -4893,12 +5383,12 @@ public class TestStandService : ITestStandService
                 {
                     var m = search.GetMatch(i);
                     var fm = new FindMatch();
-                    try { fm.FilePath    = m.FilePath; }                catch { }
-                    try { fm.MatchedText = m.MatchedText; }             catch { }
-                    try { fm.ValueType   = m.PropertyValueType.ToString(); } catch { }
+                    try { fm.FilePath    = m.FilePath; }                catch (Exception ex) { _logger.LogDebug(ex, "Failed to read match FilePath at index {Index}.", i); }
+                    try { fm.MatchedText = m.MatchedText; }             catch (Exception ex) { _logger.LogDebug(ex, "Failed to read match MatchedText at index {Index}.", i); }
+                    try { fm.ValueType   = m.PropertyValueType.ToString(); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read match PropertyValueType at index {Index}.", i); }
 
                     string editPath = "";
-                    try { editPath = m.GetPropertyPath(false); } catch { }
+                    try { editPath = m.GetPropertyPath(false); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to get edit property path for match at index {Index}.", i); }
                     try { fm.PropertyPath = m.GetPropertyPath(true); } catch { fm.PropertyPath = editPath; }
 
                     if (replacement != null && !string.IsNullOrEmpty(editPath))
@@ -4911,17 +5401,17 @@ public class TestStandService : ITestStandService
                         {
                             fm.Replaced = true;
                             res.ReplacedCount++;
-                            try { m.UpdateForReplace(replacement); } catch { }
+                            try { m.UpdateForReplace(replacement); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to notify search match of replacement at index {Index}.", i); }
                         }
                     }
                     res.Matches.Add(fm);
                 }
-                catch { }
+                catch (Exception ex) { _logger.LogDebug(ex, "Failed to process search match at index {Index}.", i); }
             }
 
             if (replacement != null && res.ReplacedCount > 0 && save)
             {
-                seqFile.Save(filePath);
+                SaveSequenceFileWithRetry(seqFile, filePath);
                 _loadedSequenceFiles[filePath] = seqFile;
             }
 
@@ -4948,7 +5438,7 @@ public class TestStandService : ITestStandService
         catch { return false; }
     }
 
-    private static string ReplaceString(string input, string pattern, string replacement,
+    internal static string ReplaceString(string input, string pattern, string replacement,
         bool matchCase, bool wholeWord, bool regex)
     {
         if (string.IsNullOrEmpty(input)) return input;
@@ -4973,6 +5463,7 @@ public class TestStandService : ITestStandService
 
     // ── Typed Adapter / Code-Module Configuration ─────────────────────────────
 
+    /// <inheritdoc/>
     public Task<ModuleConfigResult> ConfigureDotNetModuleAsync(string filePath,
         string sequenceName, string stepGroup, string stepName, string assemblyPath,
         string className, string methodName, bool save = true)
@@ -4991,6 +5482,7 @@ public class TestStandService : ITestStandService
                 return applied;
             });
 
+    /// <inheritdoc/>
     public Task<ModuleConfigResult> ConfigureDllModuleAsync(string filePath,
         string sequenceName, string stepGroup, string stepName, string dllPath,
         string functionName, bool save = true)
@@ -5001,7 +5493,7 @@ public class TestStandService : ITestStandService
                 // The path/function live on the CommonCModule base interface, which is
                 // not the default dispatch interface of a CVI step's Module.
                 dynamic target = mod;
-                try { target = mod.AsCommonCModule(); } catch { }
+                try { target = mod.AsCommonCModule(); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to cast module to CommonCModule interface."); }
                 if (TrySetModuleProp(target, "ModulePath", dllPath) ||
                     TrySetModuleProp(mod, "ModulePath", dllPath))
                     applied["dllPath"] = dllPath;
@@ -5011,6 +5503,7 @@ public class TestStandService : ITestStandService
                 return applied;
             });
 
+    /// <inheritdoc/>
     public Task<ModuleConfigResult> ConfigureLabViewModuleAsync(string filePath,
         string sequenceName, string stepGroup, string stepName, string viPath,
         bool save = true)
@@ -5024,6 +5517,7 @@ public class TestStandService : ITestStandService
                 return applied;
             });
 
+    /// <inheritdoc/>
     public Task<ModuleConfigResult> ConfigurePythonModuleAsync(string filePath,
         string sequenceName, string stepGroup, string stepName, string modulePath,
         string functionName, bool save = true)
@@ -5039,6 +5533,7 @@ public class TestStandService : ITestStandService
                 return applied;
             });
 
+    /// <inheritdoc/>
     public Task<ModuleConfigResult> ConfigureSequenceCallModuleAsync(string filePath,
         string sequenceName, string stepGroup, string stepName,
         string targetSequenceName, string targetSequenceFile = "", bool save = true)
@@ -5072,7 +5567,7 @@ public class TestStandService : ITestStandService
         return await Task.Run(() =>
         {
             var sf    = GetOrLoadSeqFile(filePath);
-            var seq   = sf.GetSequenceByName(sequenceName);
+            var seq = sf.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
             var step  = seq.GetStepByName(stepName, (object)sgVal);
 
@@ -5081,7 +5576,7 @@ public class TestStandService : ITestStandService
             string currentKey  = TryGetString(step, "AdapterName");
             if (!string.Equals(currentKey, resolvedKey, StringComparison.OrdinalIgnoreCase))
             {
-                try { step.ChangeAdapter((object)resolvedKey); } catch { }
+                try { step.ChangeAdapter((object)resolvedKey); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to change step adapter to '{Adapter}'.", resolvedKey); }
             }
 
             dynamic mod = step.Module;
@@ -5089,7 +5584,7 @@ public class TestStandService : ITestStandService
 
             if (save)
             {
-                sf.Save(filePath);
+                SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
                 _loadedSequenceFiles[filePath] = sf;
             }
 
@@ -5116,6 +5611,7 @@ public class TestStandService : ITestStandService
 
     // ── Sequence Analyzer (detailed) ──────────────────────────────────────────
 
+    /// <inheritdoc/>
     public async Task<AnalyzerResult> RunSequenceAnalyzerDetailedAsync(string filePath,
         string minSeverity = "Information")
     {
@@ -5141,6 +5637,7 @@ public class TestStandService : ITestStandService
 
     // ── Output & UI Messages ──────────────────────────────────────────────────
 
+    /// <inheritdoc/>
     public async Task<OutputMessageInfo> PostOutputMessageAsync(string message,
         string category = "", string severity = "Information")
     {
@@ -5160,12 +5657,13 @@ public class TestStandService : ITestStandService
             // Add to the engine's retrievable output-message collection so the message
             // can be read back via GetOutputMessages. Post() additionally raises a UI
             // event for an operator interface (no-op headless), so call it best-effort.
-            try { _engine!.GetOutputMessages().Add(msg); } catch { }
-            try { msg.Post(); } catch { }
+            try { _engine!.GetOutputMessages().Add(msg); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to add output message to engine message collection."); }
+            try { msg.Post(); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to post output message via UI event."); }
             return MapOutputMessage(msg);
         });
     }
 
+    /// <inheritdoc/>
     public async Task<List<OutputMessageInfo>> GetOutputMessagesAsync(int maxMessages = 200)
     {
         EnsureConnected();
@@ -5174,22 +5672,24 @@ public class TestStandService : ITestStandService
             var result = new List<OutputMessageInfo>();
             dynamic msgs = _engine!.GetOutputMessages();
             int count = 0;
-            try { count = Convert.ToInt32((object)msgs.Count); } catch { }
+            try { count = Convert.ToInt32((object)msgs.Count); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to get output message count."); }
             for (int i = 0; i < count && i < maxMessages; i++)
             {
                 try { result.Add(MapOutputMessage(msgs.Item((object)i))); }
-                catch { }
+                catch (Exception ex) { _logger.LogDebug(ex, "Failed to map output message at index {Index}.", i); }
             }
             return result;
         });
     }
 
+    /// <inheritdoc/>
     public async Task ClearOutputMessagesAsync()
     {
         EnsureConnected();
-        await Task.Run(() => { try { _engine!.GetOutputMessages().Clear(); } catch { } });
+        await Task.Run(() => { try { _engine!.GetOutputMessages().Clear(); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to clear engine output messages."); } });
     }
 
+    /// <inheritdoc/>
     public async Task PostUiMessageAsync(string executionId, string messageCode,
         double numericData = 0, string stringData = "")
     {
@@ -5213,21 +5713,22 @@ public class TestStandService : ITestStandService
     private OutputMessageInfo MapOutputMessage(dynamic msg)
     {
         var info = new OutputMessageInfo();
-        try { info.Id = Convert.ToInt32((object)msg.Id); } catch { }
-        try { info.Category = (string)msg.Category; } catch { }
-        try { info.Message = (string)msg.Message; } catch { }
-        try { info.TimeInSeconds = Convert.ToDouble((object)msg.TimeInSeconds); } catch { }
+        try { info.Id = Convert.ToInt32((object)msg.Id); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read output message Id."); }
+        try { info.Category = (string)msg.Category; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read output message Category."); }
+        try { info.Message = (string)msg.Message; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read output message Message."); }
+        try { info.TimeInSeconds = Convert.ToDouble((object)msg.TimeInSeconds); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read output message TimeInSeconds."); }
         try
         {
             int sev = Convert.ToInt32((object)msg.Severity);
             info.Severity = sev switch { 0 => "Information", 1 => "Warning", 2 => "Error", _ => sev.ToString() };
         }
-        catch { }
+        catch (Exception ex) { _logger.LogDebug(ex, "Failed to read output message Severity."); }
         return info;
     }
 
     // ── Search Directories ────────────────────────────────────────────────────
 
+    /// <inheritdoc/>
     public async Task<List<SearchDirectoryInfo>> GetSearchDirectoriesAsync()
     {
         EnsureConnected();
@@ -5250,12 +5751,13 @@ public class TestStandService : ITestStandService
                         SearchSubdirectories = TryGetBool(d, "SearchSubdirectories")
                     });
                 }
-                catch { }
+                catch (Exception ex) { _logger.LogDebug(ex, "Failed to read search directory at index {Index}.", i); }
             }
             return result;
         });
     }
 
+    /// <inheritdoc/>
     public async Task AddSearchDirectoryAsync(string path, int index = -1,
         bool searchSubdirectories = true)
     {
@@ -5269,6 +5771,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task RemoveSearchDirectoryAsync(string path)
     {
         EnsureConnected();
@@ -5288,7 +5791,7 @@ public class TestStandService : ITestStandService
                         return;
                     }
                 }
-                catch { }
+                catch (Exception ex) { _logger.LogDebug(ex, "Failed to read search directory at index {Index} during remove.", i); }
             }
             throw new KeyNotFoundException($"Search directory '{path}' not found.");
         });
@@ -5296,6 +5799,7 @@ public class TestStandService : ITestStandService
 
     // ── Data-Type Field Editing ───────────────────────────────────────────────
 
+    /// <inheritdoc/>
     public async Task AddDataTypeFieldAsync(string filePath, string typeName,
         string fieldName, string fieldType, bool save = true)
     {
@@ -5318,10 +5822,11 @@ public class TestStandService : ITestStandService
             typePo.NewSubProperty((object)fieldName, (object)valType, (object)false,
                 (object)typeParam, (object)0);
 
-            if (save) { sf.Save(filePath); _loadedSequenceFiles[filePath] = sf; }
+            if (save) { SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath); _loadedSequenceFiles[filePath] = sf; }
         });
     }
 
+    /// <inheritdoc/>
     public async Task<List<TypeFieldInfo>> GetDataTypeFieldsAsync(string filePath, string typeName)
     {
         EnsureConnected();
@@ -5344,12 +5849,13 @@ public class TestStandService : ITestStandService
                         "GetNthSubProperty", _comFlags, null, tObj, new object[] { "", i, 0 });
                     result.Add(new TypeFieldInfo { Name = fname, DataType = TryGetString(fp, "TypeName") });
                 }
-                catch { }
+                catch (Exception ex) { _logger.LogDebug(ex, "Failed to read data type field at index {Index}.", i); }
             }
             return result;
         });
     }
 
+    /// <inheritdoc/>
     public async Task RemoveDataTypeFieldAsync(string filePath, string typeName,
         string fieldName, bool save = true)
     {
@@ -5360,12 +5866,13 @@ public class TestStandService : ITestStandService
             dynamic sfPo = sf.AsPropertyObjectFile();
             dynamic typePo = sfPo.GetPropertyObject((object)typeName, (object)0);
             typePo.DeleteSubProperty((object)fieldName, (object)0);
-            if (save) { sf.Save(filePath); _loadedSequenceFiles[filePath] = sf; }
+            if (save) { SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath); _loadedSequenceFiles[filePath] = sf; }
         });
     }
 
     // ── CSV Record Streams ────────────────────────────────────────────────────
 
+    /// <inheritdoc/>
     public async Task WriteCsvLinesAsync(string filePath, List<string> lines)
     {
         EnsureConnected();
@@ -5379,10 +5886,11 @@ public class TestStandService : ITestStandService
             {
                 foreach (var line in lines) stream.WriteLine(line ?? "");
             }
-            finally { try { ((NiOutRecordStream)(object)stream).Close(); } catch { } }
+            finally { try { ((NiOutRecordStream)(object)stream).Close(); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to close CSV output record stream."); } }
         });
     }
 
+    /// <inheritdoc/>
     public async Task<CsvReadResult> ReadCsvLinesAsync(string filePath, int maxLines = 1000)
     {
         EnsureConnected();
@@ -5401,7 +5909,7 @@ public class TestStandService : ITestStandService
                     result.Lines.Add(line ?? "");
                 }
             }
-            finally { try { ((NiInRecordStream)(object)stream).Close(); } catch { } }
+            finally { try { ((NiInRecordStream)(object)stream).Close(); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to close CSV input record stream."); } }
             result.LineCount = result.Lines.Count;
             return result;
         });
@@ -5409,6 +5917,7 @@ public class TestStandService : ITestStandService
 
     // ── Result Logging (smoke) ────────────────────────────────────────────────
 
+    /// <inheritdoc/>
     public async Task<string> CreateResultLogAsync(string filePath, string format = "ASCII")
     {
         EnsureConnected();
@@ -5423,6 +5932,7 @@ public class TestStandService : ITestStandService
 
     // ── Batch Synchronization (best-effort) ───────────────────────────────────
 
+    /// <inheritdoc/>
     public async Task CreateBatchSyncObjectAsync(string name)
     {
         EnsureConnected();
@@ -5447,6 +5957,7 @@ public class TestStandService : ITestStandService
 
     // ── Interactive Execution (smoke) ─────────────────────────────────────────
 
+    /// <inheritdoc/>
     public async Task<string> RunStepsInteractivelyAsync(string filePath, string sequenceName,
         string stepGroup, List<string> stepNames, int timeoutSeconds = 60)
     {
@@ -5465,6 +5976,7 @@ public class TestStandService : ITestStandService
 
     // ── Report Sections (smoke) ───────────────────────────────────────────────
 
+    /// <inheritdoc/>
     public async Task<string> AddReportSectionAsync(string executionId, string title, string body)
     {
         EnsureConnected();
@@ -5474,7 +5986,7 @@ public class TestStandService : ITestStandService
                 ?? throw new KeyNotFoundException($"Execution {executionId} not found.");
             dynamic report = exec.Report;
             dynamic section = report.NewReportSection((object)title, (object)"", (object)0);
-            try { section.Body = body; } catch { }
+            try { section.Body = body; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to set report section body."); }
             return $"Report section '{title}' created for execution {executionId}";
         });
     }
@@ -5485,7 +5997,62 @@ public class TestStandService : ITestStandService
     {
         return _loadedSequenceFiles.TryGetValue(filePath, out var cached)
             ? cached
-            : _engine!.GetSequenceFileEx(filePath, 0, 4);
+            : _engine!.GetSequenceFileEx(filePath, 0, (NiConflictHandler)4);
+    }
+
+    /// <summary>
+    /// Saves a sequence file with a short retry/back-off. TestStand releases OS file handles
+    /// asynchronously, so a Save issued right after another file operation — or while a stale
+    /// engine instance (e.g. an orphaned MCP server / Sequence Editor from a prior session) still
+    /// references the path — can transiently throw COMException "Error writing to file '...'".
+    /// Retrying a few times with a back-off rides out that window; a genuinely persistent failure
+    /// still surfaces (it is rethrown on the final attempt). Same rationale as the
+    /// delete-before-create retry loop the integration TestDataBuilder uses for shared .seq files.
+    /// </summary>
+    private void SaveSequenceFileWithRetry(NiSequenceFile target, string filePath)
+    {
+        const int maxAttempts = 5;
+        for (int attempt = 1; ; attempt++)
+        {
+            try { target.Save(filePath); return; }
+            catch (Exception ex) when (attempt < maxAttempts &&
+                       ex is System.Runtime.InteropServices.COMException or System.IO.IOException)
+            {
+                _logger.LogDebug(ex,
+                    "Save of '{File}' failed (attempt {Attempt}/{Max}); retrying after back-off.",
+                    filePath, attempt, maxAttempts);
+                System.Threading.Thread.Sleep(300);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Reads a single string-valued step property by lookup path (e.g. <c>"MessageExpr"</c> or
+    /// <c>"PropertyLoaderSources[0].Options.CommonOptions.Source.Location"</c>). Returns null when
+    /// the path is absent or unreadable. Used by configuration round-trip tests.
+    /// </summary>
+    internal string? ReadStepPropertyString(string filePath, string sequenceName, string stepGroup,
+        string stepName, string lookupPath)
+    {
+        var seqFile = (NiSequenceFile)(object)GetOrLoadSeqFile(filePath);
+        NiSequence seq  = seqFile.GetSequenceByName(sequenceName);
+        NiStep     step = seq.GetStepByName(stepName, (NiStepGroups)ParseStepGroup(stepGroup));
+        try { return step.AsPropertyObject().GetValString(lookupPath, 0); }
+        catch { return null; }
+    }
+
+    /// <summary>
+    /// Reads a single numeric step property by lookup path (e.g. <c>"TimeToWait"</c>).
+    /// Returns null when the path is absent or unreadable. Used by configuration round-trip tests.
+    /// </summary>
+    internal double? ReadStepPropertyNumber(string filePath, string sequenceName, string stepGroup,
+        string stepName, string lookupPath)
+    {
+        var seqFile = (NiSequenceFile)(object)GetOrLoadSeqFile(filePath);
+        NiSequence seq  = seqFile.GetSequenceByName(sequenceName);
+        NiStep     step = seq.GetStepByName(stepName, (NiStepGroups)ParseStepGroup(stepGroup));
+        try { return step.AsPropertyObject().GetValNumber(lookupPath, 0); }
+        catch { return null; }
     }
 
     /// <summary>
@@ -5494,7 +6061,7 @@ public class TestStandService : ITestStandService
     /// unchanged if the paths cannot be relativized (e.g. different drives) or
     /// if <paramref name="targetPath"/> is already relative.
     /// </summary>
-    private static string MakeRelativePath(string fromDirectory, string targetPath)
+    internal static string MakeRelativePath(string fromDirectory, string targetPath)
     {
         if (string.IsNullOrEmpty(targetPath))    return targetPath;
         if (!Path.IsPathRooted(targetPath))      return targetPath;        // already relative
@@ -5570,7 +6137,7 @@ public class TestStandService : ITestStandService
             else
                 propBlock.SetValString(name, 0, value);
         }
-        catch { }
+        catch (Exception ex) { _logger.LogDebug(ex, "Failed to set property '{Name}' value by type.", name); }
     }
 
     private List<ParameterInfo> MapParameters(dynamic paramBlock)
@@ -5601,6 +6168,7 @@ public class TestStandService : ITestStandService
                             _comFlags, null, propObj2, new object[] { "", 0 }));
                         // PropFlags_PassByReference=4, PropFlags_Output=1 (direction bit 0x100 or similar)
                         // Fall back: treat bit 2 as Output, any PassByReference flag as InOut
+                        pi.PassByReference = (flags2 & 4) != 0;
                         pi.Direction = (flags2 & 4) != 0 ? "InOut"
                                      : (flags2 & 2) != 0 ? "Output"
                                      : "Input";
@@ -5609,10 +6177,10 @@ public class TestStandService : ITestStandService
                     pi.DefaultValue = TryGetValue(prop);
                     parms.Add(pi);
                 }
-                catch { }
+                catch (Exception ex) { _logger.LogDebug(ex, "Failed to read parameter at index {Index} in MapParameters.", i); }
             }
         }
-        catch { }
+        catch (Exception ex) { _logger.LogDebug(ex, "Failed to enumerate sub-properties in MapParameters."); }
         return parms;
     }
 
@@ -5630,6 +6198,7 @@ public class TestStandService : ITestStandService
     private readonly Dictionary<string, string> _undoGroups =
         new(StringComparer.OrdinalIgnoreCase);
 
+    /// <inheritdoc/>
     public async Task<UndoStackInfo> GetUndoStackAsync(string? filePath = null)
     {
         EnsureConnected();
@@ -5643,20 +6212,23 @@ public class TestStandService : ITestStandService
         });
     }
 
-    public async Task<bool> UndoAsync(string? filePath = null)
+    /// <inheritdoc/>
+    public Task<bool> UndoAsync(string? filePath = null)
     {
         EnsureConnected();
         // No automatic undo stack in the headless Engine API → nothing to undo.
-        return await Task.FromResult(false);
+        return Task.FromResult(false);
     }
 
-    public async Task<bool> RedoAsync(string? filePath = null)
+    /// <inheritdoc/>
+    public Task<bool> RedoAsync(string? filePath = null)
     {
         EnsureConnected();
         // No automatic redo stack in the headless Engine API → nothing to redo.
-        return await Task.FromResult(false);
+        return Task.FromResult(false);
     }
 
+    /// <inheritdoc/>
     public async Task BeginUndoGroupAsync(string groupName, string? filePath = null)
     {
         EnsureConnected();
@@ -5664,6 +6236,7 @@ public class TestStandService : ITestStandService
             _undoGroups[string.IsNullOrEmpty(filePath) ? "<engine>" : filePath!] = groupName);
     }
 
+    /// <inheritdoc/>
     public async Task EndUndoGroupAsync(string? filePath = null)
     {
         EnsureConnected();
@@ -5671,6 +6244,7 @@ public class TestStandService : ITestStandService
             _undoGroups.Remove(string.IsNullOrEmpty(filePath) ? "<engine>" : filePath!));
     }
 
+    /// <inheritdoc/>
     public async Task CancelUndoGroupAsync(string? filePath = null)
     {
         EnsureConnected();
@@ -5680,6 +6254,7 @@ public class TestStandService : ITestStandService
 
     // ── Sequence File Comparison ──────────────────────────────────────────────
 
+    /// <inheritdoc/>
     public async Task<SequenceFileDiff> CompareSequenceFilesAsync(
         string filePath1, string filePath2)
     {
@@ -5699,8 +6274,12 @@ public class TestStandService : ITestStandService
             var seqs1 = (List<string>)CollectSequenceNames(sf1);
             var seqs2 = (List<string>)CollectSequenceNames(sf2);
 
-            diff.SequencesOnlyInFile1 = seqs1.Where(n => !seqs2.Contains(n)).ToList();
-            diff.SequencesOnlyInFile2 = seqs2.Where(n => !seqs1.Contains(n)).ToList();
+            // HashSet membership turns the O(n·m) name diff into O(n+m).
+            var set1 = new HashSet<string>(seqs1);
+            var set2 = new HashSet<string>(seqs2);
+
+            diff.SequencesOnlyInFile1.AddRange(seqs1.Where(n => !set2.Contains(n)));
+            diff.SequencesOnlyInFile2.AddRange(seqs2.Where(n => !set1.Contains(n)));
 
             // Compare sequences present in both files
             foreach (var name in seqs1.Intersect(seqs2))
@@ -5718,7 +6297,7 @@ public class TestStandService : ITestStandService
 
                     if (hasDiff) diff.ModifiedSequences.Add(seqDiff);
                 }
-                catch { }
+                catch (Exception ex) { _logger.LogDebug(ex, "Failed to compare sequence '{SeqName}' between files.", name); }
             }
 
             diff.TotalDifferences =
@@ -5738,10 +6317,10 @@ public class TestStandService : ITestStandService
     {
         var names = new List<string>();
         int count = 0;
-        try { count = Convert.ToInt32((object)sf.NumSequences); } catch { }
+        try { count = Convert.ToInt32((object)sf.NumSequences); } catch (Exception) { /* best-effort: read NumSequences for comparison — intentionally ignored */ }
         for (int i = 0; i < count; i++)
         {
-            try { names.Add((string)sf.GetSequence(i).Name); } catch { }
+            try { names.Add((string)sf.GetSequence(i).Name); } catch (Exception) { /* best-effort: read sequence name at index for comparison — intentionally ignored */ }
         }
         return names;
     }
@@ -5760,7 +6339,7 @@ public class TestStandService : ITestStandService
                 var v2 = ((object)seq2).GetType().InvokeMember(p, _comFlags, null, seq2, null)?.ToString();
                 if (v1 != v2) diff.PropertyDiffs.Add($"{p}: '{v1}' → '{v2}'");
             }
-            catch { }
+            catch (Exception ex) { _logger.LogDebug(ex, "Failed to compare sequence property '{Prop}' in CompareSequences.", p); }
         }
 
         // Compare steps in each group
@@ -5805,7 +6384,7 @@ public class TestStandService : ITestStandService
                             ChangedProperties = changed
                         });
                 }
-                catch { }
+                catch (Exception ex) { _logger.LogDebug(ex, "Failed to compare step '{Step}' in group {Group}.", s, g); }
             }
         }
 
@@ -5814,7 +6393,7 @@ public class TestStandService : ITestStandService
 
         // Compare parameters
         try { diff.ParameterDiffs.AddRange(ComparePropertyBlock(seq1.Parameters, seq2.Parameters, "Parameters")); }
-        catch { }
+        catch (Exception ex) { _logger.LogDebug(ex, "Failed to compare sequence Parameters property block."); }
 
         return diff;
     }
@@ -5823,7 +6402,7 @@ public class TestStandService : ITestStandService
     {
         var dict = new Dictionary<string, string>(StringComparer.Ordinal);
         int count = 0;
-        try { count = Convert.ToInt32((object)seq.GetNumSteps((object)group)); } catch { }
+        try { count = Convert.ToInt32((object)seq.GetNumSteps((object)group)); } catch (Exception) { /* best-effort: get step count for comparison — intentionally ignored */ }
         for (int i = 0; i < count; i++)
         {
             try
@@ -5831,10 +6410,10 @@ public class TestStandService : ITestStandService
                 dynamic step = seq.GetStep(i, (object)group);
                 string  name = (string)step.Name;
                 string  type = "";
-                try { type = (string)step.StepType.Name; } catch { }
+                try { type = (string)step.StepType.Name; } catch (Exception) { /* best-effort: read step type name for comparison — intentionally ignored */ }
                 dict[name] = type;
             }
-            catch { }
+            catch (Exception) { /* best-effort: read step entry at index for comparison — intentionally ignored */ }
         }
         return dict;
     }
@@ -5854,17 +6433,17 @@ public class TestStandService : ITestStandService
                 var v2 = ((object)step2).GetType().InvokeMember(p, _comFlags, null, step2, null)?.ToString();
                 if (v1 != v2) changed.Add($"{p}: '{v1}' → '{v2}'");
             }
-            catch { }
+            catch (Exception ex) { _logger.LogDebug(ex, "Failed to compare step property '{Prop}'.", p); }
         }
 
         // Compare module expression
         try
         {
-            var m1 = (string)step1.AsPropertyObject().GetValString("Module.Expression", (object)0);
-            var m2 = (string)step2.AsPropertyObject().GetValString("Module.Expression", (object)0);
+            var m1 = (string)((NiStep)(object)step1).AsPropertyObject().GetValString("Module.Expression", 0);
+            var m2 = (string)((NiStep)(object)step2).AsPropertyObject().GetValString("Module.Expression", 0);
             if (m1 != m2) changed.Add($"Module.Expression: '{m1}' → '{m2}'");
         }
-        catch { }
+        catch (Exception ex) { _logger.LogDebug(ex, "Failed to compare step Module.Expression property."); }
 
         // Compare adapter
         try
@@ -5873,7 +6452,7 @@ public class TestStandService : ITestStandService
             var a2 = TryGetString(step2, "AdapterName");
             if (a1 != a2) changed.Add($"AdapterName: '{a1}' → '{a2}'");
         }
-        catch { }
+        catch (Exception ex) { _logger.LogDebug(ex, "Failed to compare step AdapterName property."); }
 
         return changed;
     }
@@ -5897,7 +6476,7 @@ public class TestStandService : ITestStandService
                 var v2 = TryGetSubPropertyValue(block2, n);
                 if (v1 != v2) diffs.Add($"{prefix}.{n}: '{v1}' → '{v2}'");
             }
-            catch { }
+            catch (Exception ex) { _logger.LogDebug(ex, "Failed to compare property block sub-property '{Name}' in '{Prefix}'.", n, prefix); }
         }
         return diffs;
     }
@@ -5919,21 +6498,21 @@ public class TestStandService : ITestStandService
                         new object[] { "", i, 0 });
                     names.Add((string)p.Name);
                 }
-                catch { }
+                catch (Exception ex) { _logger.LogDebug(ex, "Failed to read sub-property name at index {Index} in GetSubPropertyNames.", i); }
             }
         }
-        catch { }
+        catch (Exception ex) { _logger.LogDebug(ex, "Failed to get sub-property count in GetSubPropertyNames."); }
         return names;
     }
 
     private static string TryGetSubPropertyValue(dynamic block, string name)
     {
         try { return block.GetValString(name, (object)0)?.ToString() ?? ""; }
-        catch { }
+        catch (Exception) { /* best-effort: probe sub-property as string — intentionally ignored */ }
         try { return block.GetValNumber(name, (object)0).ToString(); }
-        catch { }
+        catch (Exception) { /* best-effort: probe sub-property as number — intentionally ignored */ }
         try { return block.GetValBoolean(name, (object)0).ToString(); }
-        catch { }
+        catch (Exception) { /* best-effort: probe sub-property as boolean — intentionally ignored */ }
         return "";
     }
 
@@ -5941,14 +6520,15 @@ public class TestStandService : ITestStandService
 
     private dynamic GetSyncManager()
     {
-        try { return _engine!.SyncManager; }
-        catch { }
-        try { return _engine!.LocalProcessSyncMgr; }
-        catch { }
+        try { return ((dynamic)_engine!).SyncManager; }
+        catch (Exception ex) { _logger.LogDebug(ex, "SyncManager not available, trying LocalProcessSyncMgr."); }
+        try { return ((dynamic)_engine!).LocalProcessSyncMgr; }
+        catch (Exception ex) { _logger.LogDebug(ex, "LocalProcessSyncMgr also not available."); }
         throw new InvalidOperationException(
             "TestStand SyncManager is not available. Ensure TestStand supports synchronization.");
     }
 
+    /// <inheritdoc/>
     public async Task<List<SyncObjectInfo>> GetSyncObjectsAsync()
     {
         EnsureConnected();
@@ -5969,10 +6549,10 @@ public class TestStandService : ITestStandService
                         : typeName.Contains("Notification") ? "Notification"
                         : typeName.Contains("Rendezvous") ? "Rendezvous"
                         : "Unknown";
-                    try { info.Properties["Count"] = (object)(int)kvp.Value.Count; } catch { }
-                    try { info.Properties["MaxCount"] = (object)(int)kvp.Value.MaxCount; } catch { }
+                    try { info.Properties["Count"] = (object)(int)kvp.Value.Count; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read Count property on sync object '{Name}'.", kvp.Key); }
+                    try { info.Properties["MaxCount"] = (object)(int)kvp.Value.MaxCount; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read MaxCount property on sync object '{Name}'.", kvp.Key); }
                 }
-                catch { }
+                catch (Exception ex) { _logger.LogDebug(ex, "Failed to determine type of sync object '{Name}'.", kvp.Key); }
                 result.Add(info);
             }
 
@@ -5989,15 +6569,16 @@ public class TestStandService : ITestStandService
                         if (!_syncObjects.ContainsKey(name))
                             result.Add(new SyncObjectInfo { Name = name, Type = "Unknown" });
                     }
-                    catch { }
+                    catch (Exception ex) { _logger.LogDebug(ex, "Failed to read sync object name at index {Index} from sync manager.", i); }
                 }
             }
-            catch { }
+            catch (Exception ex) { _logger.LogDebug(ex, "Failed to query engine sync manager for additional sync objects."); }
 
             return result;
         });
     }
 
+    /// <inheritdoc/>
     public async Task CreateSyncObjectAsync(string name, string type,
         int initialValue = 1, int maxValue = 1)
     {
@@ -6019,6 +6600,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task DeleteSyncObjectAsync(string name)
     {
         EnsureConnected();
@@ -6026,7 +6608,7 @@ public class TestStandService : ITestStandService
         {
             if (_syncObjects.TryGetValue(name, out var obj))
             {
-                try { obj.Delete(); } catch { }
+                try { obj.Delete(); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to delete sync object '{Name}'.", name); }
                 _syncObjects.Remove(name);
             }
         });
@@ -6060,6 +6642,7 @@ public class TestStandService : ITestStandService
         }
     }
 
+    /// <inheritdoc/>
     public async Task SyncSemaphoreWaitAsync(string name, double timeoutSeconds = 30)
     {
         EnsureConnected();
@@ -6076,12 +6659,14 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task SyncSemaphoreReleaseAsync(string name)
     {
         EnsureConnected();
         await Task.Run(() => GetSyncObject(name, "semaphore").Release());
     }
 
+    /// <inheritdoc/>
     public async Task SyncMutexLockAsync(string name, double timeoutSeconds = 30)
     {
         EnsureConnected();
@@ -6098,12 +6683,14 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task SyncMutexUnlockAsync(string name)
     {
         EnsureConnected();
         await Task.Run(() => GetSyncObject(name, "mutex").Unlock());
     }
 
+    /// <inheritdoc/>
     public async Task SyncQueueEnqueueAsync(string name, string value)
     {
         EnsureConnected();
@@ -6115,6 +6702,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task<string> SyncQueueDequeueAsync(string name, double timeoutSeconds = 30)
     {
         EnsureConnected();
@@ -6139,12 +6727,14 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task SyncQueueFlushAsync(string name)
     {
         EnsureConnected();
         await Task.Run(() => GetSyncObject(name, "queue").Flush());
     }
 
+    /// <inheritdoc/>
     public async Task SyncNotificationSetAsync(string name, string value = "")
     {
         EnsureConnected();
@@ -6156,12 +6746,14 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task SyncNotificationResetAsync(string name)
     {
         EnsureConnected();
         await Task.Run(() => GetSyncObject(name, "notification").Reset());
     }
 
+    /// <inheritdoc/>
     public async Task<string> SyncNotificationWaitAsync(string name, double timeoutSeconds = 30)
     {
         EnsureConnected();
@@ -6188,6 +6780,7 @@ public class TestStandService : ITestStandService
 
     // ── Advanced Adapter Introspection ────────────────────────────────────────
 
+    /// <inheritdoc/>
     public async Task<AdapterDetailInfo> GetAdapterDetailsAsync(string adapterName)
     {
         EnsureConnected();
@@ -6197,7 +6790,7 @@ public class TestStandService : ITestStandService
             int count = (int)_engine!.NumAdapters;
             for (int i = 0; i < count; i++)
             {
-                dynamic adapter = _engine!.GetAdapter((object)i);
+                dynamic adapter = _engine!.GetAdapter(i);
                 string key = TryGetString(adapter, "KeyName");
                 string name = TryGetString(adapter, "DisplayName");
 
@@ -6236,6 +6829,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task<StepModuleInfo> GetStepModuleInfoAsync(string filePath,
         string sequenceName, string stepGroup, string stepName)
     {
@@ -6243,13 +6837,13 @@ public class TestStandService : ITestStandService
         return await Task.Run(() =>
         {
             var sf    = GetOrLoadSeqFile(filePath);
-            var seq   = sf.GetSequenceByName(sequenceName);
+            var seq = sf.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
             var step  = seq.GetStepByName(stepName, (object)sgVal);
 
             string adapterKey  = TryGetString(step, "AdapterName");
             string adapterDisp = "";
-            try { adapterDisp = (string)step.StepType.Adapter.DisplayName; } catch { }
+            try { adapterDisp = (string)step.StepType.Adapter.DisplayName; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read adapter DisplayName for step '{Step}'.", stepName); }
 
             var info = new StepModuleInfo
             {
@@ -6278,13 +6872,13 @@ public class TestStandService : ITestStandService
                     if (val != null)
                         info.ModuleProperties[prop] = val;
                 }
-                catch { }
+                catch (Exception ex) { _logger.LogDebug(ex, "Failed to read module property '{Prop}' for step '{Step}'.", prop, stepName); }
             }
 
             // Try generic property object access for remaining module props
             try
             {
-                dynamic propObj = step.AsPropertyObject();
+                NiPropertyObject propObj = ((NiStep)(object)step).AsPropertyObject();
                 string[] modulePaths = {
                     "Module.VIPath", "Module.FunctionName", "Module.LibraryFilePath",
                     "Module.AssemblyName", "Module.ClassName", "Module.MethodName",
@@ -6292,18 +6886,18 @@ public class TestStandService : ITestStandService
                 };
                 foreach (var mp in modulePaths)
                 {
-                    string key = mp.Split('.').Last();
+                    string key = mp[(mp.LastIndexOf('.') + 1)..];
                     if (info.ModuleProperties.ContainsKey(key)) continue;
                     try
                     {
-                        var val = propObj.GetValString(mp, (object)0);
-                        if (!string.IsNullOrEmpty((string)val))
+                        var val = propObj.GetValString(mp, 0);
+                        if (!string.IsNullOrEmpty(val))
                             info.ModuleProperties[key] = (object)(string)val;
                     }
-                    catch { }
+                    catch (Exception ex) { _logger.LogDebug(ex, "Failed to read module property path '{Path}' for step '{Step}'.", mp, stepName); }
                 }
             }
-            catch { }
+            catch (Exception ex) { _logger.LogDebug(ex, "Failed to read module properties via property object for step '{Step}'.", stepName); }
 
             return info;
         });
@@ -6311,6 +6905,7 @@ public class TestStandService : ITestStandService
 
     // ── Search ────────────────────────────────────────────────────────────────
 
+    /// <inheritdoc/>
     public async Task<SearchResult> SearchStepsAsync(string filePath, string pattern,
         string searchIn = "all", bool caseSensitive = false)
     {
@@ -6329,7 +6924,7 @@ public class TestStandService : ITestStandService
             };
 
             int numSeqs = 0;
-            try { numSeqs = Convert.ToInt32((object)sf.NumSequences); } catch { }
+            try { numSeqs = Convert.ToInt32((object)sf.NumSequences); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to get sequence count for step search."); }
 
             string[] groupNames = { "Setup", "Main", "Cleanup" };
 
@@ -6397,10 +6992,10 @@ public class TestStandService : ITestStandService
                                     });
                                 }
                             }
-                            catch { }
+                            catch (Exception ex) { _logger.LogDebug(ex, "Failed to read local variable at index {Index} while searching.", vi); }
                         }
                     }
-                    catch { }
+                    catch (Exception ex) { _logger.LogDebug(ex, "Failed to enumerate local variables for sequence '{Seq}' while searching.", seqName); }
                 }
             }
 
@@ -6439,7 +7034,7 @@ public class TestStandService : ITestStandService
                 if (typeName.IndexOf(pattern, cmp) >= 0)
                     AddMatch(typeName, "StepType", $"{seqName}.{stepName}.StepType");
             }
-            catch { }
+            catch (Exception) { /* best-effort: probe step type name for search — intentionally ignored */ }
         }
 
         if (searchIn is "all" or "expression" or "expressions")
@@ -6456,19 +7051,19 @@ public class TestStandService : ITestStandService
                         AddMatch(val, exprNames[ei],
                             $"{seqName}.{stepName}.{exprNames[ei]}");
                 }
-                catch { }
+                catch (Exception) { /* best-effort: probe step expression property for search — intentionally ignored */ }
             }
 
             // Module expression
             try
             {
-                string modExpr = (string)step.AsPropertyObject()
-                    .GetValString("Module.Expression", (object)0);
+                string modExpr = (string)((NiStep)(object)step).AsPropertyObject()
+                    .GetValString("Module.Expression", 0);
                 if (!string.IsNullOrEmpty(modExpr) && modExpr.IndexOf(pattern, cmp) >= 0)
                     AddMatch(modExpr, "ModuleExpression",
                         $"{seqName}.{stepName}.Module.Expression");
             }
-            catch { }
+            catch (Exception) { /* best-effort: probe step Module.Expression for search — intentionally ignored */ }
         }
 
         if (searchIn is "all" or "comment")
@@ -6479,7 +7074,7 @@ public class TestStandService : ITestStandService
                 if (!string.IsNullOrEmpty(comment) && comment.IndexOf(pattern, cmp) >= 0)
                     AddMatch(comment, "Comment", $"{seqName}.{stepName}.Comment");
             }
-            catch { }
+            catch (Exception) { /* best-effort: probe step Comment for search — intentionally ignored */ }
         }
 
         return matches;
@@ -6493,7 +7088,7 @@ public class TestStandService : ITestStandService
             ?? throw new KeyNotFoundException($"Execution {executionId} not found.");
 
         int numThreads = 0;
-        try { numThreads = Convert.ToInt32((object)exec.NumThreads); } catch { }
+        try { numThreads = Convert.ToInt32((object)exec.NumThreads); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to get thread count in FindThread."); }
 
         // Try by ID first, then by index
         for (int i = 0; i < numThreads; i++)
@@ -6505,7 +7100,7 @@ public class TestStandService : ITestStandService
                 if (id == threadId || i.ToString() == threadId)
                     return t;
             }
-            catch { }
+            catch (Exception ex) { _logger.LogDebug(ex, "Failed to read thread at index {Index} in FindThread.", i); }
         }
         throw new KeyNotFoundException(
             $"Thread '{threadId}' not found in execution {executionId}.");
@@ -6514,29 +7109,30 @@ public class TestStandService : ITestStandService
     private static ThreadInfo MapThreadInfo(dynamic thread, int index)
     {
         var info = new ThreadInfo { ThreadIndex = index };
-        try { info.ThreadId = TryGetString(thread, "ID"); } catch { }
+        try { info.ThreadId = TryGetString(thread, "ID"); } catch (Exception) { /* best-effort: read thread ID — intentionally ignored */ }
         if (string.IsNullOrEmpty(info.ThreadId)) info.ThreadId = index.ToString();
 
-        try { info.State = MapExecutionState((int)thread.State); } catch { }
+        try { info.State = MapExecutionState((int)thread.State); } catch (Exception) { /* best-effort: read thread State — intentionally ignored */ }
 
         try
         {
             dynamic ctx = thread.GetSequenceContext((object)0);
-            try { info.CurrentStepName     = (string)ctx.Step.Name;  } catch { }
-            try { info.CurrentSequenceName = (string)ctx.Sequence.Name; } catch { }
-            try { info.CurrentFilePath     = (string)ctx.SequenceFile.Path; } catch { }
+            try { info.CurrentStepName     = (string)ctx.Step.Name;  } catch (Exception) { /* best-effort: read current step name — intentionally ignored */ }
+            try { info.CurrentSequenceName = (string)ctx.Sequence.Name; } catch (Exception) { /* best-effort: read current sequence name — intentionally ignored */ }
+            try { info.CurrentFilePath     = (string)ctx.SequenceFile.Path; } catch (Exception) { /* best-effort: read current file path — intentionally ignored */ }
         }
-        catch { }
+        catch (Exception) { /* best-effort: get thread sequence context — intentionally ignored */ }
 
         try
         {
             info.StackDepth = Convert.ToInt32((object)thread.StackDepth);
         }
-        catch { }
+        catch (Exception) { /* best-effort: read thread stack depth — intentionally ignored */ }
 
         return info;
     }
 
+    /// <inheritdoc/>
     public async Task<List<ThreadInfo>> GetExecutionThreadsAsync(string executionId)
     {
         EnsureConnected();
@@ -6547,7 +7143,7 @@ public class TestStandService : ITestStandService
 
             var result = new List<ThreadInfo>();
             int numThreads = 0;
-            try { numThreads = Convert.ToInt32((object)exec.NumThreads); } catch { }
+            try { numThreads = Convert.ToInt32((object)exec.NumThreads); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to get thread count in GetExecutionThreadsAsync."); }
 
             for (int i = 0; i < numThreads; i++)
             {
@@ -6556,12 +7152,13 @@ public class TestStandService : ITestStandService
                     dynamic t = exec.GetThread((object)i);
                     result.Add(MapThreadInfo(t, i));
                 }
-                catch { }
+                catch (Exception ex) { _logger.LogDebug(ex, "Failed to map thread at index {Index}.", i); }
             }
             return result;
         });
     }
 
+    /// <inheritdoc/>
     public async Task<ThreadInfo> GetThreadStatusAsync(string executionId, string threadId)
     {
         EnsureConnected();
@@ -6571,7 +7168,7 @@ public class TestStandService : ITestStandService
                 ?? throw new KeyNotFoundException($"Execution {executionId} not found.");
 
             int numThreads = 0;
-            try { numThreads = Convert.ToInt32((object)exec.NumThreads); } catch { }
+            try { numThreads = Convert.ToInt32((object)exec.NumThreads); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to get thread count in GetThreadStatusAsync."); }
 
             for (int i = 0; i < numThreads; i++)
             {
@@ -6582,13 +7179,14 @@ public class TestStandService : ITestStandService
                     if (id == threadId || i.ToString() == threadId)
                         return MapThreadInfo(t, i);
                 }
-                catch { }
+                catch (Exception ex) { _logger.LogDebug(ex, "Failed to read thread at index {Index} in GetThreadStatusAsync.", i); }
             }
             throw new KeyNotFoundException(
                 $"Thread '{threadId}' not found in execution {executionId}.");
         });
     }
 
+    /// <inheritdoc/>
     public async Task BreakThreadAsync(string executionId, string threadId)
     {
         EnsureConnected();
@@ -6600,12 +7198,14 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task ResumeThreadAsync(string executionId, string threadId)
     {
         EnsureConnected();
         await Task.Run(() => FindThread(executionId, threadId).Resume());
     }
 
+    /// <inheritdoc/>
     public async Task StepOverThreadAsync(string executionId, string threadId)
     {
         EnsureConnected();
@@ -6617,6 +7217,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task StepIntoThreadAsync(string executionId, string threadId)
     {
         EnsureConnected();
@@ -6628,6 +7229,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task StepOutThreadAsync(string executionId, string threadId)
     {
         EnsureConnected();
@@ -6639,6 +7241,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task<List<CallStackFrame>> GetThreadCallStackAsync(
         string executionId, string threadId)
     {
@@ -6649,7 +7252,7 @@ public class TestStandService : ITestStandService
             var frames = new List<CallStackFrame>();
 
             int depth = 0;
-            try { depth = Convert.ToInt32((object)thread.StackDepth); } catch { }
+            try { depth = Convert.ToInt32((object)thread.StackDepth); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to get thread stack depth."); }
 
             for (int d = 0; d < depth; d++)
             {
@@ -6657,18 +7260,18 @@ public class TestStandService : ITestStandService
                 {
                     dynamic ctx = thread.GetSequenceContext((object)d);
                     var frame   = new CallStackFrame { Depth = d };
-                    try { frame.SequenceName = (string)ctx.Sequence.Name;   } catch { }
-                    try { frame.FilePath     = (string)ctx.SequenceFile.Path; } catch { }
-                    try { frame.StepName     = (string)ctx.Step.Name;        } catch { }
+                    try { frame.SequenceName = (string)ctx.Sequence.Name;   } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read sequence name at stack depth {Depth}.", d); }
+                    try { frame.FilePath     = (string)ctx.SequenceFile.Path; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read file path at stack depth {Depth}.", d); }
+                    try { frame.StepName     = (string)ctx.Step.Name;        } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read step name at stack depth {Depth}.", d); }
                     try
                     {
                         int grp = (int)ctx.StepGroup;
                         frame.StepGroup = grp switch { 0 => "Setup", 2 => "Cleanup", _ => "Main" };
                     }
-                    catch { }
+                    catch (Exception ex) { _logger.LogDebug(ex, "Failed to read step group at stack depth {Depth}.", d); }
                     frames.Add(frame);
                 }
-                catch { }
+                catch (Exception ex) { _logger.LogDebug(ex, "Failed to read call stack frame at depth {Depth}.", d); }
             }
             return frames;
         });
@@ -6676,6 +7279,7 @@ public class TestStandService : ITestStandService
 
     // ── Array Variable Operations ─────────────────────────────────────────────
 
+    /// <inheritdoc/>
     public async Task<List<ArrayElementInfo>> GetArrayVariableAsync(string filePath,
         string? sequenceName, string variableName, int maxElements = 100)
     {
@@ -6697,7 +7301,7 @@ public class TestStandService : ITestStandService
 
             var result = new List<ArrayElementInfo>();
             int numElements = 0;
-            try { numElements = Convert.ToInt32((object)prop.GetNumElements()); } catch { }
+            try { numElements = Convert.ToInt32((object)prop.GetNumElements()); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to get element count for array variable '{Variable}'.", variableName); }
 
             int count = Math.Min(numElements, maxElements);
             for (int i = 0; i < count; i++)
@@ -6741,6 +7345,7 @@ public class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
     public async Task SetArrayElementAsync(string filePath, string? sequenceName,
         string variableName, int index, string value)
     {
@@ -6769,11 +7374,12 @@ public class TestStandService : ITestStandService
             else
                 prop.SetValStringByOffset((object)index, (object)0, (object)value);
 
-            sf.Save(filePath);
+            SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
             _loadedSequenceFiles[filePath] = sf;
         });
     }
 
+    /// <inheritdoc/>
     public async Task ResizeArrayVariableAsync(string filePath, string? sequenceName,
         string variableName, int newSize)
     {
@@ -6796,13 +7402,14 @@ public class TestStandService : ITestStandService
             // SetNumElements(numElements, options) — two parameters required
             prop.SetNumElements((object)newSize, (object)0);
 
-            sf.Save(filePath);
+            SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
             _loadedSequenceFiles[filePath] = sf;
         });
     }
 
     // ── Data Type Operations ──────────────────────────────────────────────────
 
+    /// <inheritdoc/>
     public async Task<DataTypeInfo> CreateDataTypeAsync(string filePath, string typeName,
         string baseType = "Object")
     {
@@ -6829,13 +7436,14 @@ public class TestStandService : ITestStandService
                 (object)typeParam,
                 (object)0);
 
-            sf.Save(filePath);
+            SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
             _loadedSequenceFiles[filePath] = sf;
 
             return new DataTypeInfo { Name = typeName, BaseType = baseType };
         });
     }
 
+    /// <inheritdoc/>
     public async Task DeleteDataTypeAsync(string filePath, string typeName)
     {
         EnsureConnected();
@@ -6846,19 +7454,20 @@ public class TestStandService : ITestStandService
 
             // Check existence first to give a meaningful error
             bool exists = false;
-            try { exists = (bool)sfPo.Exists((object)typeName, (object)0); } catch { }
+            try { exists = (bool)sfPo.Exists((object)typeName, (object)0); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to check existence of data type '{TypeName}'.", typeName); }
             if (!exists)
                 throw new InvalidOperationException(
                     $"Data type '{typeName}' not found in '{Path.GetFileName(filePath)}'.");
 
             sfPo.DeleteSubProperty((object)typeName, (object)0);
-            sf.Save(filePath);
+            SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
             _loadedSequenceFiles[filePath] = sf;
         });
     }
 
     // ── Module Parameter Operations ───────────────────────────────────────────
 
+    /// <inheritdoc/>
     public async Task<List<ModuleParameterInfo>> GetModuleParametersAsync(string filePath,
         string sequenceName, string stepGroup, string stepName)
     {
@@ -6866,7 +7475,7 @@ public class TestStandService : ITestStandService
         return await Task.Run(() =>
         {
             var sf    = GetOrLoadSeqFile(filePath);
-            var seq   = sf.GetSequenceByName(sequenceName);
+            var seq = sf.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
             var step  = seq.GetStepByName(stepName, (object)sgVal);
 
@@ -6874,15 +7483,15 @@ public class TestStandService : ITestStandService
 
             try
             {
-                var stepPo = step.AsPropertyObject();
+                NiPropertyObject stepPo = ((NiStep)(object)step).AsPropertyObject();
                 dynamic moduleParams;
                 try
                 {
-                    moduleParams = stepPo.GetPropertyObject("TS.Module.Parameters", (object)0);
+                    moduleParams = stepPo.GetPropertyObject("TS.Module.Parameters", 0);
                 }
                 catch
                 {
-                    moduleParams = stepPo.GetPropertyObject("Module.Parameters", (object)0);
+                    moduleParams = stepPo.GetPropertyObject("Module.Parameters", 0);
                 }
 
                 var mpObj  = (object)moduleParams;
@@ -6926,21 +7535,22 @@ public class TestStandService : ITestStandService
                             catch
                             {
                                 try { pi.Value = ((bool)param.GetValBoolean("", (object)0)).ToString(); }
-                                catch { }
+                                catch (Exception ex) { _logger.LogDebug(ex, "Failed to read module parameter value as boolean."); }
                             }
                         }
 
                         result.Add(pi);
                     }
-                    catch { }
+                    catch (Exception ex) { _logger.LogDebug(ex, "Failed to read module parameter at index {Index}.", i); }
                 }
             }
-            catch { }
+            catch (Exception ex) { _logger.LogDebug(ex, "Failed to enumerate module parameters for step '{Step}'.", stepName); }
 
             return result;
         });
     }
 
+    /// <inheritdoc/>
     public async Task SetModuleParameterAsync(string filePath, string sequenceName,
         string stepGroup, string stepName, string parameterName, string value,
         bool useExpression = true)
@@ -6949,11 +7559,11 @@ public class TestStandService : ITestStandService
         await Task.Run(() =>
         {
             var sf    = GetOrLoadSeqFile(filePath);
-            var seq   = sf.GetSequenceByName(sequenceName);
+            var seq = sf.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
             var step  = seq.GetStepByName(stepName, (object)sgVal);
 
-            var stepPo = step.AsPropertyObject();
+            NiPropertyObject stepPo = ((NiStep)(object)step).AsPropertyObject();
 
             string[] paramPaths = {
                 $"TS.Module.Parameters.{parameterName}",
@@ -6967,35 +7577,43 @@ public class TestStandService : ITestStandService
                 {
                     if (useExpression)
                     {
-                        stepPo.SetValString(path, (object)0x8, value);
+                        stepPo.SetValString(path, 0x8, value);
                     }
                     else
                     {
                         if (double.TryParse(value, System.Globalization.NumberStyles.Any,
                             System.Globalization.CultureInfo.InvariantCulture, out double d))
-                            stepPo.SetValNumber(path, (object)0, d);
+                            stepPo.SetValNumber(path, 0, d);
                         else if (bool.TryParse(value, out bool b))
-                            stepPo.SetValBoolean(path, (object)0, b);
+                            stepPo.SetValBoolean(path, 0, b);
                         else
-                            stepPo.SetValString(path, (object)0, value);
+                            stepPo.SetValString(path, 0, value);
                     }
                     set = true;
                     break;
                 }
-                catch { }
+                catch (Exception ex) { _logger.LogDebug(ex, "Failed to set module parameter '{Param}' via path '{Path}' on step '{Step}'.", parameterName, path, stepName); }
             }
 
             if (!set)
                 throw new InvalidOperationException(
                     $"Could not set module parameter '{parameterName}' on step '{stepName}'.");
 
-            sf.Save(filePath);
+            SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
             _loadedSequenceFiles[filePath] = sf;
         });
     }
 
     // ── Step Configuration ────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Wraps plain text as a TestStand expression string literal (e.g. <c>Connect DUT</c> →
+    /// <c>"Connect DUT"</c>). Embedded double-quotes are doubled, per TestStand string syntax.
+    /// </summary>
+    private static string ToExpressionLiteral(string text)
+        => "\"" + (text ?? "").Replace("\"", "\"\"") + "\"";
+
+    /// <inheritdoc/>
     public async Task ConfigureMessagePopupAsync(string filePath, string sequenceName,
         string stepGroup, string stepName, string message,
         string? title = null, string buttons = "OK", double timeout = -1)
@@ -7003,69 +7621,99 @@ public class TestStandService : ITestStandService
         EnsureConnected();
         await Task.Run(() =>
         {
-            var sf    = GetOrLoadSeqFile(filePath);
-            var seq   = sf.GetSequenceByName(sequenceName);
+            var seqFile = (NiSequenceFile)(object)GetOrLoadSeqFile(filePath);
+            NiSequence seq = seqFile.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
-            var step  = seq.GetStepByName(stepName, (object)sgVal);
+            NiStep step = seq.GetStepByName(stepName, (NiStepGroups)sgVal);
+            NiPropertyObject po = step.AsPropertyObject();
 
-            var stepPo = step.AsPropertyObject();
-
-            try { stepPo.SetValString("TS.MessagePopup.Message", (object)0, message); }
-            catch { }
-
+            // MessagePopup settings are TOP-LEVEL step properties (NOT under "TS.MessagePopup",
+            // which does not exist — the old writes were silently swallowed). Verified via a
+            // property-tree dump:
+            //   • MessageExpr / TitleExpr are EXPRESSION strings → wrap plain text as a "literal"
+            //   • the button set is defined by Button1Label..Button6Label (expression strings),
+            //     NOT by a numeric "Buttons" property
+            //   • TimeToWait (seconds) + TimerButton (button auto-pressed on timeout) drive timeout
+            po.SetValString("MessageExpr", 0, ToExpressionLiteral(message));
             if (!string.IsNullOrEmpty(title))
-                try { stepPo.SetValString("TS.MessagePopup.Title", (object)0, title); }
-                catch { }
+                po.SetValString("TitleExpr", 0, ToExpressionLiteral(title!));
 
-            int buttonValue = buttons.ToLowerInvariant() switch
+            string[] labels = buttons.ToLowerInvariant() switch
             {
-                "okcancel"  or "ok cancel"       => 1,
-                "yesno"     or "yes no"          => 2,
-                "yesnocancel" or "yes no cancel" => 3,
-                _ => 0
+                "okcancel"    or "ok cancel"     => new[] { "OK", "Cancel" },
+                "yesno"       or "yes no"        => new[] { "Yes", "No" },
+                "yesnocancel" or "yes no cancel" => new[] { "Yes", "No", "Cancel" },
+                _                                => new[] { "OK" }
             };
-            try { stepPo.SetValNumber("TS.MessagePopup.Buttons", (object)0, (double)buttonValue); }
-            catch { }
+            for (int i = 1; i <= 6; i++)
+                po.SetValString($"Button{i}Label", 0,
+                    i <= labels.Length ? ToExpressionLiteral(labels[i - 1]) : "\"\"");
 
-            try { stepPo.SetValNumber("TS.MessagePopup.TimeoutInSeconds", (object)0, timeout); }
-            catch { }
+            // Timeout: TimeToWait in seconds; TimerButton = which button is pressed on timeout
+            // (use the last button). timeout <= 0 disables the timer.
+            if (timeout > 0)
+            {
+                po.SetValNumber("TimeToWait", 0, timeout);
+                po.SetValNumber("TimerButton", 0, labels.Length);
+            }
+            else
+            {
+                po.SetValNumber("TimeToWait", 0, 0);
+                po.SetValNumber("TimerButton", 0, 0);
+            }
 
-            sf.Save(filePath);
-            _loadedSequenceFiles[filePath] = sf;
+            SaveSequenceFileWithRetry(seqFile, filePath);
+            _loadedSequenceFiles[filePath] = seqFile;
         });
     }
 
+    /// <inheritdoc/>
     public async Task ConfigurePropertyLoaderAsync(string filePath, string sequenceName,
         string stepGroup, string stepName, string filePathExpr, string mode = "Read")
     {
         EnsureConnected();
         await Task.Run(() =>
         {
-            var sf    = GetOrLoadSeqFile(filePath);
-            var seq   = sf.GetSequenceByName(sequenceName);
+            var seqFile = (NiSequenceFile)(object)GetOrLoadSeqFile(filePath);
+            NiSequence seq = seqFile.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
-            var step  = seq.GetStepByName(stepName, (object)sgVal);
+            NiStep step = seq.GetStepByName(stepName, (NiStepGroups)sgVal);
+            NiPropertyObject po = step.AsPropertyObject();
 
-            var stepPo = step.AsPropertyObject();
-
-            try { stepPo.SetValString("TS.PropertyLoader.FilePathExpression", (object)0, filePathExpr); }
-            catch { }
-
-            int modeValue = mode.ToLowerInvariant() switch
+            // A real PropertyLoader step (created with step type "NI_PropertyLoader") stores its
+            // file in the FIRST element of the PropertyLoaderSources array, under
+            // Options.CommonOptions.Source.Location (verified via a property-tree dump). The old
+            // "TS.PropertyLoader.*" paths do not exist on the step and were silently swallowed —
+            // and on a plain Action step there is no PropertyLoaderSources at all.
+            NiPropertyObject sources;
+            try { sources = po.GetPropertyObject("PropertyLoaderSources", 0); }
+            catch (Exception ex)
             {
-                "write" => 1,
-                _       => 0
-            };
-            try { stepPo.SetValNumber("TS.PropertyLoader.Mode", (object)0, (double)modeValue); }
-            catch { }
+                throw new InvalidOperationException(
+                    $"Step '{stepName}' is not a PropertyLoader step (no PropertyLoaderSources " +
+                    "property). Create it with step type 'NI_PropertyLoader'.", ex);
+            }
+            if (CountArrayElements(sources) == 0)
+                sources.InsertElements(0, 1, 0);
 
-            sf.Save(filePath);
-            _loadedSequenceFiles[filePath] = sf;
+            // Source.Location is a plain file path; UseAlias must be false for Location to apply.
+            po.SetValString("PropertyLoaderSources[0].Options.CommonOptions.Source.Location", 0, filePathExpr);
+            po.SetValBoolean("PropertyLoaderSources[0].Options.CommonOptions.Source.UseAlias", 0, false);
+
+            // An NI_PropertyLoader step always IMPORTS properties from the source — its property
+            // structure has no read/write toggle. 'mode' is kept for API compatibility; only
+            // "Read" is meaningful. Note when a write was requested so it is not silently dropped.
+            if (!string.Equals(mode, "Read", StringComparison.OrdinalIgnoreCase))
+                _logger.LogDebug("PropertyLoader step '{Step}': mode '{Mode}' has no effect — the step only imports.", stepName, mode);
+
+            SaveSequenceFileWithRetry(seqFile, filePath);
+            _loadedSequenceFiles[filePath] = seqFile;
         });
     }
 
     // ── Numeric / String Limit Configuration ─────────────────────────────────
 
+    /// <inheritdoc/>
     public async Task SetNumericLimitsAsync(string filePath, string sequenceName,
         string stepGroup, string stepName,
         double? lowLimit, double? highLimit, string? units,
@@ -7074,64 +7722,68 @@ public class TestStandService : ITestStandService
         EnsureConnected();
         await Task.Run(() =>
         {
-            var sf    = GetOrLoadSeqFile(filePath);
-            var seq   = sf.GetSequenceByName(sequenceName);
+            var seqFile = (NiSequenceFile)(object)GetOrLoadSeqFile(filePath);
+            NiSequence seq = seqFile.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
-            var step  = seq.GetStepByName(stepName, (object)sgVal);
-            dynamic po = step.AsPropertyObject();
+            NiStep step = seq.GetStepByName(stepName, (NiStepGroups)sgVal);
+            NiPropertyObject po = step.AsPropertyObject();
 
             // Correct paths: NumericLimitTest stores limits under Limits.Low/High/Units
             // and comparison type under Comp (not TS.NumericLimitTest.*)
-            int cmpVal = comparisonType.ToUpperInvariant() switch
+            // The NumericLimitTest comparison operator is stored as the STRING property "Comp"
+            // (e.g. "GELE", "GT", "EQ") — NOT as a number. Writing it via SetValNumber throws
+            // (and was silently caught), so the comparison type never actually persisted.
+            string compStr = comparisonType.ToUpperInvariant() switch
             {
-                "GE"  => 1,
-                "LE"  => 2,
-                "EQ"  => 3,
-                "NE"  => 4,
-                "GT"  => 5,
-                "LT"  => 6,
-                _     => 0  // GELE
+                "GE" => "GE",
+                "LE" => "LE",
+                "EQ" => "EQ",
+                "NE" => "NE",
+                "GT" => "GT",
+                "LT" => "LT",
+                _    => "GELE"
             };
-            try { po.SetValNumber("Comp", (object)0, (object)(double)cmpVal); } catch { }
+            try { po.SetValString("Comp", 0, compStr); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to set numeric comparison type on step '{Step}'.", stepName); }
 
             if (lowLimit.HasValue)
-                try { po.SetValNumber("Limits.Low", (object)0, (object)lowLimit.Value); } catch { }
+                try { po.SetValNumber("Limits.Low", 0, lowLimit.Value); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to set low limit on step '{Step}'.", stepName); }
 
             if (highLimit.HasValue)
-                try { po.SetValNumber("Limits.High", (object)0, (object)highLimit.Value); } catch { }
+                try { po.SetValNumber("Limits.High", 0, highLimit.Value); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to set high limit on step '{Step}'.", stepName); }
 
             if (units != null)
-                try { po.SetValString("Limits.Units", (object)0, (object)units); } catch { }
+                try { po.SetValString("Limits.Units", 0, units); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to set limit units on step '{Step}'.", stepName); }
 
-            sf.Save(filePath);
-            _loadedSequenceFiles[filePath] = sf;
+            SaveSequenceFileWithRetry(seqFile, filePath);
+            _loadedSequenceFiles[filePath] = seqFile;
         });
     }
 
+    /// <inheritdoc/>
     public async Task<Dictionary<string, object?>> GetNumericLimitsAsync(string filePath,
         string sequenceName, string stepGroup, string stepName)
     {
         EnsureConnected();
         return await Task.Run(() =>
         {
-            var sf    = GetOrLoadSeqFile(filePath);
-            var seq   = sf.GetSequenceByName(sequenceName);
+            var seqFile = (NiSequenceFile)(object)GetOrLoadSeqFile(filePath);
+            NiSequence seq = seqFile.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
-            var step  = seq.GetStepByName(stepName, (object)sgVal);
-            dynamic po = step.AsPropertyObject();
+            NiStep step = seq.GetStepByName(stepName, (NiStepGroups)sgVal);
+            NiPropertyObject po = step.AsPropertyObject();
 
             var result = new Dictionary<string, object?>();
 
             double? GetNum(string path)
             {
-                try { return (double)po.GetValNumber(path, (object)0); }
+                try { return po.GetValNumber(path, 0); }
                 catch { return null; }
             }
             string? GetStr(string path)
             {
                 try
                 {
-                    var v = (string)po.GetValString(path, (object)0);
+                    var v = po.GetValString(path, 0);
                     return string.IsNullOrEmpty(v) ? null : v;
                 }
                 catch { return null; }
@@ -7143,40 +7795,33 @@ public class TestStandService : ITestStandService
             result["units"]                  = GetStr("Limits.Units");
             result["measurement_expression"] = GetStr("DataSource");
 
-            int cmpInt = (int)(GetNum("Comp") ?? 0.0);
-            result["comparison_type"] = cmpInt switch
-            {
-                1 => "GE",
-                2 => "LE",
-                3 => "EQ",
-                4 => "NE",
-                5 => "GT",
-                6 => "LT",
-                _ => "GELE"
-            };
+            // "Comp" is a STRING property holding the operator token directly (e.g. "GELE", "EQ").
+            result["comparison_type"] = GetStr("Comp") ?? "GELE";
 
             return result;
         });
     }
 
+    /// <inheritdoc/>
     public async Task SetStepMeasurementAsync(string filePath, string sequenceName,
         string stepGroup, string stepName, string expression)
     {
         EnsureConnected();
         await Task.Run(() =>
         {
-            var sf    = GetOrLoadSeqFile(filePath);
-            var seq   = sf.GetSequenceByName(sequenceName);
+            var seqFile = (NiSequenceFile)(object)GetOrLoadSeqFile(filePath);
+            NiSequence seq = seqFile.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
-            var step  = seq.GetStepByName(stepName, (object)sgVal);
-            dynamic po = step.AsPropertyObject();
+            NiStep step = seq.GetStepByName(stepName, (NiStepGroups)sgVal);
+            NiPropertyObject po = step.AsPropertyObject();
             // DataSource is the measurement expression for NumericLimitTest
-            po.SetValString("DataSource", (object)0, (object)expression);
-            sf.Save(filePath);
-            _loadedSequenceFiles[filePath] = sf;
+            po.SetValString("DataSource", 0, expression);
+            SaveSequenceFileWithRetry(seqFile, filePath);
+            _loadedSequenceFiles[filePath] = seqFile;
         });
     }
 
+    /// <inheritdoc/>
     public async Task ConfigureStringValueTestAsync(string filePath, string sequenceName,
         string stepGroup, string stepName, string expression, string expectedValue,
         string comparisonType = "CaseSensitive")
@@ -7184,31 +7829,36 @@ public class TestStandService : ITestStandService
         EnsureConnected();
         await Task.Run(() =>
         {
-            var sf    = GetOrLoadSeqFile(filePath);
-            var seq   = sf.GetSequenceByName(sequenceName);
+            var seqFile = (NiSequenceFile)(object)GetOrLoadSeqFile(filePath);
+            NiSequence seq = seqFile.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
-            var step  = seq.GetStepByName(stepName, (object)sgVal);
-            dynamic po = step.AsPropertyObject();
+            NiStep step = seq.GetStepByName(stepName, (NiStepGroups)sgVal);
+            NiPropertyObject po = step.AsPropertyObject();
 
             // StringValueTest: DataSource = expression being tested
-            try { po.SetValString("DataSource", (object)0, (object)expression); } catch { }
+            try { po.SetValString("DataSource", 0, expression); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to set StringValueTest DataSource on step '{Step}'.", stepName); }
             // Expected string value and comparison type stored under Limits[0]
-            try { po.SetValString("Limits[0].String", (object)0, (object)expectedValue); } catch { }
+            try { po.SetValString("Limits[0].String", 0, expectedValue); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to set StringValueTest expected value on step '{Step}'.", stepName); }
 
-            int cmpVal = comparisonType.ToLowerInvariant() switch
+            // The StringValueTest comparison is stored as the STRING property "Comp"
+            // ("CaseSensitive" / "IgnoreCase") — NOT a number under "Limits[0].ComparisonType".
+            // Writing the old (non-existent) path threw and was silently caught, so the
+            // comparison never persisted.
+            string compStr = comparisonType.ToLowerInvariant() switch
             {
-                "caseinsensitive" or "case insensitive" => 1,
-                "ignore"                                => 2,
-                _                                       => 0
+                "caseinsensitive" or "case insensitive" or "ignorecase" => "IgnoreCase",
+                "ignore"                                                => "IgnoreCase",
+                _                                                       => "CaseSensitive"
             };
-            try { po.SetValNumber("Limits[0].ComparisonType", (object)0, (object)(double)cmpVal); } catch { }
+            try { po.SetValString("Comp", 0, compStr); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to set StringValueTest comparison type on step '{Step}'.", stepName); }
 
-            sf.Save(filePath);
+            SaveSequenceFileWithRetry(seqFile, filePath);
         });
     }
 
     // ── Breakpoints ───────────────────────────────────────────────────────────
 
+    /// <inheritdoc/>
     public async Task SetStepBreakpointAsync(string filePath, string sequenceName,
         string stepGroup, string stepName, bool enabled, string breakpointType = "Before")
     {
@@ -7216,7 +7866,7 @@ public class TestStandService : ITestStandService
         await Task.Run(() =>
         {
             var sf    = GetOrLoadSeqFile(filePath);
-            var seq   = sf.GetSequenceByName(sequenceName);
+            var seq = sf.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
             dynamic step = seq.GetStepByName(stepName, (object)sgVal);
 
@@ -7241,14 +7891,15 @@ public class TestStandService : ITestStandService
             }
             catch
             {
-                try { step.BreakOnStep = (object)(breakBefore || breakAfter); } catch { }
+                try { step.BreakOnStep = (object)(breakBefore || breakAfter); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to set BreakOnStep on step '{Step}'.", stepName); }
             }
 
-            sf.Save(filePath);
+            SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
             _loadedSequenceFiles[filePath] = sf;
         });
     }
 
+    /// <inheritdoc/>
     public async Task<List<Dictionary<string, string>>> GetBreakpointsAsync(string filePath)
     {
         EnsureConnected();
@@ -7258,7 +7909,7 @@ public class TestStandService : ITestStandService
             var result = new List<Dictionary<string, string>>();
 
             int numSeqs = 0;
-            try { numSeqs = Convert.ToInt32((object)sf.NumSequences); } catch { }
+            try { numSeqs = Convert.ToInt32((object)sf.NumSequences); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to get NumSequences from sequence file."); }
 
             string[] groupNames = { "Setup", "Main", "Cleanup" };
 
@@ -7293,7 +7944,7 @@ public class TestStandService : ITestStandService
                             }
                             catch
                             {
-                                try { hasBreak = (bool)step2.BreakOnStep; } catch { }
+                                try { hasBreak = (bool)step2.BreakOnStep; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read BreakOnStep via dynamic fallback."); }
                             }
 
                             if (!hasBreak) continue;
@@ -7307,7 +7958,7 @@ public class TestStandService : ITestStandService
                                 ["breakpoint_type"] = bpType
                             });
                         }
-                        catch { }
+                        catch (Exception ex) { _logger.LogDebug(ex, "Failed to read breakpoint info for a step."); }
                     }
                 }
             }
@@ -7318,6 +7969,7 @@ public class TestStandService : ITestStandService
 
     // ── Execution Results ─────────────────────────────────────────────────────
 
+    /// <inheritdoc/>
     public async Task<Dictionary<string, object?>> GetStepResultAsync(string executionId,
         string sequenceName, string stepName)
     {
@@ -7344,10 +7996,10 @@ public class TestStandService : ITestStandService
                                           "TS.Result.Status", "TS.StepType" })
                 {
                     string key = f.Replace("TS.Result.", "").Replace("TS.", "").ToLowerInvariant();
-                    try { result[key] = (string)stepResult.GetValString((object)f, (object)0); } catch { }
+                    try { result[key] = (string)stepResult.GetValString((object)f, (object)0); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read step result field '{Field}'.", f); }
                 }
-                try { result["numeric_value"] = (double)stepResult.GetValNumber((object)"TS.Result.NumericValue", (object)0); } catch { }
-                try { result["string_value"]  = (string)stepResult.GetValString((object)"TS.Result.StringValue",  (object)0); } catch { }
+                try { result["numeric_value"] = (double)stepResult.GetValNumber((object)"TS.Result.NumericValue", (object)0); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read NumericValue from step result."); }
+                try { result["string_value"]  = (string)stepResult.GetValString((object)"TS.Result.StringValue",  (object)0); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read StringValue from step result."); }
             }
             catch (Exception ex)
             {
@@ -7364,7 +8016,7 @@ public class TestStandService : ITestStandService
 
         // Try array access first
         int arrayCount = 0;
-        try { arrayCount = Convert.ToInt32((object)resultObj.GetNumElements()); } catch { }
+        try { arrayCount = Convert.ToInt32((object)resultObj.GetNumElements()); } catch (Exception) { /* best-effort: probe result array count — intentionally ignored */ }
 
         if (arrayCount > 0)
         {
@@ -7374,7 +8026,7 @@ public class TestStandService : ITestStandService
                 {
                     dynamic sr = resultObj.GetPropertyObjectByOffset((object)i, (object)0);
                     string sn  = "";
-                    try { sn = (string)sr.GetValString((object)"TS.StepName", (object)0); } catch { }
+                    try { sn = (string)sr.GetValString((object)"TS.StepName", (object)0); } catch (Exception) { /* best-effort: read StepName from result element — intentionally ignored */ }
                     if (sn == stepName) return sr;
 
                     // Check nested ResultList
@@ -7384,9 +8036,9 @@ public class TestStandService : ITestStandService
                         var found = FindStepResultByName(sub, stepName, depth + 1);
                         if (found != null) return found;
                     }
-                    catch { }
+                    catch (Exception) { /* best-effort: traverse nested ResultList — intentionally ignored */ }
                 }
-                catch { }
+                catch (Exception) { /* best-effort: access result element by offset — intentionally ignored */ }
             }
             return null;
         }
@@ -7402,17 +8054,18 @@ public class TestStandService : ITestStandService
                 string name = (string)resultObj.GetNthSubPropertyName((object)"", (object)i, (object)0);
                 dynamic sr  = resultObj.GetPropertyObject((object)name, (object)0);
                 string sn   = "";
-                try { sn = (string)sr.GetValString((object)"TS.StepName", (object)0); } catch { }
+                try { sn = (string)sr.GetValString((object)"TS.StepName", (object)0); } catch (Exception) { /* best-effort: read StepName from named sub-property — intentionally ignored */ }
                 if (sn == stepName) return sr;
 
                 var nested = FindStepResultByName(sr, stepName, depth + 1);
                 if (nested != null) return nested;
             }
-            catch { }
+            catch (Exception) { /* best-effort: enumerate named sub-property — intentionally ignored */ }
         }
         return null;
     }
 
+    /// <inheritdoc/>
     public async Task<Dictionary<string, object?>> GetExecutionResultsAsync(string executionId)
     {
         EnsureConnected();
@@ -7425,12 +8078,12 @@ public class TestStandService : ITestStandService
             result["retrieved_at"] = (object)DateTime.UtcNow.ToString("O");
 
             // ── Execution-level info from the Execution object directly ─────────
-            try { result["overall_status"]  = (string)exec.ResultStatus;           } catch { }
-            try { result["seconds_elapsed"] = (double)exec.SecondsExecuting;       } catch { }
-            try { result["display_name"]    = TryGetString(exec, "DisplayName");   } catch { }
+            try { result["overall_status"]  = (string)exec.ResultStatus;           } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read execution ResultStatus."); }
+            try { result["seconds_elapsed"] = (double)exec.SecondsExecuting;       } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read execution SecondsExecuting."); }
+            try { result["display_name"]    = TryGetString(exec, "DisplayName");   } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read execution DisplayName."); }
             try { result["elapsed_seconds_from_start"] =
                     _executionStartTimes.TryGetValue(executionId, out DateTime t0)
-                    ? (DateTime.UtcNow - t0).TotalSeconds : 0; } catch { }
+                    ? (DateTime.UtcNow - t0).TotalSeconds : 0; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to compute elapsed seconds for execution."); }
 
             // ── Step results from the result object ──────────────────────────────
             try
@@ -7447,7 +8100,7 @@ public class TestStandService : ITestStandService
                         try   { result[f.ToLowerInvariant()] = (string)sub.GetValString((object)"", (object)0); }
                         catch { /* property is a container, not a leaf */ }
                     }
-                    catch { }
+                    catch (Exception ex) { _logger.LogDebug(ex, "Failed to read execution result sub-property '{Field}'.", f); }
                 }
 
                 // Step results are in "ResultList" array (only populated by UUT process model runs)
@@ -7474,7 +8127,7 @@ public class TestStandService : ITestStandService
 
         // ── Try array access first (ResultList is a PropertyObject array) ──────
         int arrayCount = 0;
-        try { arrayCount = Convert.ToInt32((object)resultObj.GetNumElements()); } catch { }
+        try { arrayCount = Convert.ToInt32((object)resultObj.GetNumElements()); } catch (Exception) { /* best-effort: probe result list array count — intentionally ignored */ }
 
         if (arrayCount > 0)
         {
@@ -7488,7 +8141,7 @@ public class TestStandService : ITestStandService
                     ReadStepResultFields(sr, entry, depth);
                     list.Add(entry);
                 }
-                catch { }
+                catch (Exception) { /* best-effort: collect step result at array offset — intentionally ignored */ }
             }
             return list;
         }
@@ -7509,7 +8162,7 @@ public class TestStandService : ITestStandService
                 ReadStepResultFields(sr, entry, depth);
                 list.Add(entry);
             }
-            catch { }
+            catch (Exception) { /* best-effort: collect step result by name — intentionally ignored */ }
         }
         return list;
     }
@@ -7525,10 +8178,10 @@ public class TestStandService : ITestStandService
             ("TS.StepType",            "step_type"),
             ("TS.Result.String.String","string_value"),
         })
-            try { entry[key] = (string)sr.GetValString((object)path, (object)0); } catch { }
+            try { entry[key] = (string)sr.GetValString((object)path, (object)0); } catch (Exception) { /* best-effort: read step result string field — intentionally ignored */ }
 
         // Numeric measurement
-        try { entry["numeric_value"] = (double)sr.GetValNumber((object)"TS.Result.Numeric.Value", (object)0); } catch { }
+        try { entry["numeric_value"] = (double)sr.GetValNumber((object)"TS.Result.Numeric.Value", (object)0); } catch (Exception) { /* best-effort: read numeric result value — intentionally ignored */ }
 
         // Nested ResultList (e.g. sub-sequence results)
         if (depth < 2)
@@ -7539,10 +8192,11 @@ public class TestStandService : ITestStandService
                 var nested = CollectStepResults(subList, depth + 1);
                 if (nested.Count > 0) entry["sub_results"] = nested;
             }
-            catch { }
+            catch (Exception) { /* best-effort: read nested ResultList — intentionally ignored */ }
         }
     }
 
+    /// <inheritdoc/>
     public async Task<double> GetExecutionTimeAsync(string executionId)
     {
         EnsureConnected();
@@ -7551,7 +8205,7 @@ public class TestStandService : ITestStandService
             var exec = FindExecution(executionId)
                 ?? throw new KeyNotFoundException($"Execution {executionId} not found.");
 
-            try { return (double)exec.ElapsedTime; } catch { }
+            try { return (double)exec.ElapsedTime; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read ElapsedTime from execution; falling back to wall-clock."); }
 
             if (_executionStartTimes.TryGetValue(executionId, out var st))
                 return (DateTime.UtcNow - st).TotalSeconds;
@@ -7562,6 +8216,7 @@ public class TestStandService : ITestStandService
 
     // ── IDisposable ───────────────────────────────────────────────────────────
 
+    /// <inheritdoc/>
     public void Dispose()
     {
         if (!_disposed)

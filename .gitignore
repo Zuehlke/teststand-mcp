@@ -64,3 +64,5 @@ nunit-*.xml
 
 # Demo code
 .Demo*
+/Test/TestExecution
+/build_tmp
