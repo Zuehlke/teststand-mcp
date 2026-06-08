@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Text.Json;
 using System.Threading.Tasks;
 using TestStandMCP.Models;
 using TestStandMCP.Services;
@@ -9,21 +10,23 @@ namespace TestStandMCP.Tools;
 
 // ── Resources ────────────────────────────────────────────────────────────────
 
+/// <summary>Serves read-only MCP resources backed by the TestStand engine.</summary>
 public class TestStandResourceProvider
 {
     private readonly ITestStandService _ts;
     private readonly ILogger<TestStandResourceProvider> _logger;
 
-    public TestStandResourceProvider(ITestStandService ts,
-        ILogger<TestStandResourceProvider> logger)
+    // Cached once: building these options per call defeats System.Text.Json's metadata cache.
+    private static readonly JsonSerializerOptions _jsonOpts = new()
     {
-        _ts     = ts;
-        _logger = logger;
-    }
+        WriteIndented        = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+    };
 
-    public async Task<ListResourcesResult> ListResourcesAsync()
+    // The resource list is static data — build it once.
+    private static readonly ListResourcesResult _resourcesResult = new()
     {
-        var resources = new List<McpResource>
+        Resources = new List<McpResource>
         {
             new()
             {
@@ -67,10 +70,21 @@ public class TestStandResourceProvider
                 Description = "The active TestStand process model",
                 MimeType    = "text/plain"
             }
-        };
-        return await Task.FromResult(new ListResourcesResult { Resources = resources });
+        }
+    };
+
+    /// <summary>Creates the provider with its engine service and logger.</summary>
+    public TestStandResourceProvider(ITestStandService ts,
+        ILogger<TestStandResourceProvider> logger)
+    {
+        _ts     = ts;
+        _logger = logger;
     }
 
+    /// <summary>Lists the resources this provider exposes.</summary>
+    public Task<ListResourcesResult> ListResourcesAsync() => Task.FromResult(_resourcesResult);
+
+    /// <summary>Reads the resource identified by <paramref name="uri"/>.</summary>
     public async Task<ReadResourceResult> ReadResourceAsync(string uri)
     {
         try
@@ -149,12 +163,7 @@ public class TestStandResourceProvider
             {
                 Uri      = uri,
                 MimeType = "application/json",
-                Text     = System.Text.Json.JsonSerializer.Serialize(obj,
-                    new System.Text.Json.JsonSerializerOptions
-                    {
-                        WriteIndented        = true,
-                        PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase
-                    })
+                Text     = JsonSerializer.Serialize(obj, _jsonOpts)
             }
         }
     };
@@ -162,9 +171,11 @@ public class TestStandResourceProvider
 
 // ── Prompts ──────────────────────────────────────────────────────────────────
 
+/// <summary>Serves MCP prompt templates for common TestStand workflows.</summary>
 public class TestStandPromptProvider
 {
-    public ListPromptsResult ListPrompts() => new()
+    // Prompt definitions are static data — build the list once.
+    private static readonly ListPromptsResult _promptsResult = new()
     {
         Prompts = new List<McpPrompt>
         {
@@ -231,6 +242,10 @@ public class TestStandPromptProvider
         }
     };
 
+    /// <summary>Lists the available prompt templates.</summary>
+    public ListPromptsResult ListPrompts() => _promptsResult;
+
+    /// <summary>Renders the named prompt with the given arguments.</summary>
     public GetPromptResult GetPrompt(string name, Dictionary<string, string>? args)
     {
         args ??= new Dictionary<string, string>();

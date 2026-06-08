@@ -14,44 +14,75 @@ namespace TestStandMCP.Tools;
 /// <summary>A single step as described by the build plan (mirrors a bulk step spec).</summary>
 public class PlanStepInput
 {
+    /// <summary>Step name.</summary>
     public string Name { get; set; } = "";
+    /// <summary>Step type.</summary>
     public string StepType { get; set; } = "";
+    /// <summary>Step expression / flow condition, if any.</summary>
     public string? Expression { get; set; }
+    /// <summary>Target sequence for a SequenceCall step, if linked.</summary>
     public string? TargetSequenceName { get; set; }
+    /// <summary>Target sequence file for a SequenceCall step, if linked.</summary>
     public string? TargetSequenceFile { get; set; }
+    /// <summary>Step comment, if any.</summary>
     public string? Comment { get; set; }
 }
 
+/// <summary>A single validation finding (error or warning) with optional step location.</summary>
 public class PlanValidationIssue
 {
-    public string Severity { get; set; } = "error";   // "error" | "warning"
+    /// <summary>Severity: "error" or "warning".</summary>
+    public string Severity { get; set; } = "error";
+    /// <summary>Machine-readable issue code (e.g. E_UNCLOSED_BLOCK).</summary>
     public string Code { get; set; } = "";
+    /// <summary>Index of the step the issue relates to, if any.</summary>
     public int? StepIndex { get; set; }
+    /// <summary>Name of the step the issue relates to, if any.</summary>
     public string? StepName { get; set; }
+    /// <summary>Human-readable message.</summary>
     public string Message { get; set; } = "";
 }
 
+/// <summary>Aggregate statistics about a validated plan.</summary>
 public class PlanValidationStats
 {
+    /// <summary>Total number of steps.</summary>
     public int StepCount { get; set; }
+    /// <summary>Number of NI_Flow_* steps.</summary>
     public int FlowSteps { get; set; }
+    /// <summary>Number of action steps.</summary>
     public int ActionSteps { get; set; }
+    /// <summary>Number of test steps.</summary>
     public int TestSteps { get; set; }
+    /// <summary>Number of SequenceCall steps with no target (placeholders).</summary>
     public int UnlinkedSequenceCalls { get; set; }
+    /// <summary>Number of declared local variables.</summary>
     public int LocalsDeclared { get; set; }
+    /// <summary>Maximum flow-block nesting depth.</summary>
     public int MaxNestingDepth { get; set; }
 }
 
+/// <summary>Outcome of validating a build plan: validity flag, counts, issues and stats.</summary>
 public class PlanValidationResult
 {
+    /// <summary>True when the plan has no errors.</summary>
     public bool Valid { get; set; }
+    /// <summary>Number of errors.</summary>
     public int ErrorCount { get; set; }
+    /// <summary>Number of warnings.</summary>
     public int WarningCount { get; set; }
-    public List<PlanValidationIssue> Errors { get; set; } = new();
-    public List<PlanValidationIssue> Warnings { get; set; } = new();
-    public PlanValidationStats Stats { get; set; } = new();
+    /// <summary>The error-severity issues.</summary>
+    public List<PlanValidationIssue> Errors { get; init; } = new();
+    /// <summary>The warning-severity issues.</summary>
+    public List<PlanValidationIssue> Warnings { get; init; } = new();
+    /// <summary>Aggregate plan statistics.</summary>
+    public PlanValidationStats Stats { get; init; } = new();
 }
 
+/// <summary>
+/// Deterministic, engine-free validator for a sequence build plan. Checks flow-block
+/// balance, forbidden/unknown step types, duplicate names and local-variable references.
+/// </summary>
 public static class SequencePlanValidator
 {
     private static readonly HashSet<string> Openers = new(StringComparer.OrdinalIgnoreCase)
@@ -86,12 +117,13 @@ public static class SequencePlanValidator
 
     private sealed class Block
     {
-        public string Type = "";
-        public string Name = "";
-        public int Index;
-        public bool ElseSeen;
+        public string Type { get; init; } = "";
+        public string Name { get; init; } = "";
+        public int Index { get; init; }
+        public bool ElseSeen { get; set; }
     }
 
+    /// <summary>Validates a build plan and returns its issues and statistics.</summary>
     public static PlanValidationResult Validate(
         string sequenceName, IReadOnlyList<PlanStepInput> steps, IReadOnlyList<string> localNames)
     {
@@ -118,6 +150,7 @@ public static class SequencePlanValidator
         var seenNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var stack = new Stack<Block>();
         var referencedLocals = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        int unlinkedSequenceCalls = 0;
 
         for (int i = 0; i < steps.Count; i++)
         {
@@ -141,6 +174,11 @@ public static class SequencePlanValidator
             if (IsFlowType(type)) r.Stats.FlowSteps++;
             else if (TestTypes.Contains(type)) r.Stats.TestSteps++;
             else if (ActionTypes.Contains(type)) r.Stats.ActionSteps++;
+
+            // Unlinked SequenceCall placeholders — tallied here to avoid a second pass.
+            if (type.Equals("SequenceCall", StringComparison.OrdinalIgnoreCase) &&
+                string.IsNullOrWhiteSpace(s.TargetSequenceName))
+                unlinkedSequenceCalls++;
 
             // Collect Locals.X references from the condition/expression
             if (!string.IsNullOrEmpty(s.Expression))
@@ -212,11 +250,9 @@ public static class SequencePlanValidator
                 Warn("W_UNUSED_LOCAL", $"Local '{dec}' is declared but never referenced by any step expression.");
 
         // Unlinked SequenceCalls (informational — this is the intended placeholder pattern)
-        r.Stats.UnlinkedSequenceCalls = steps.Count(s =>
-            (s.StepType ?? "").Equals("SequenceCall", StringComparison.OrdinalIgnoreCase) &&
-            string.IsNullOrWhiteSpace(s.TargetSequenceName));
-        if (r.Stats.UnlinkedSequenceCalls > 0)
-            Warn("W_UNLINKED_CALLS", $"{r.Stats.UnlinkedSequenceCalls} SequenceCall step(s) have no target (unresolved placeholders — link later).");
+        r.Stats.UnlinkedSequenceCalls = unlinkedSequenceCalls;
+        if (unlinkedSequenceCalls > 0)
+            Warn("W_UNLINKED_CALLS", $"{unlinkedSequenceCalls} SequenceCall step(s) have no target (unresolved placeholders — link later).");
 
         Finish(r);
         return r;

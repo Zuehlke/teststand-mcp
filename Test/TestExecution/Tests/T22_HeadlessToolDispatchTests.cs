@@ -489,7 +489,7 @@ public class T22_HeadlessToolDispatchTests : TestBase
     // ── configure_message_popup ──────────────────────────────────────────────────
 
     [Test]
-    public async Task ConfigureMessagePopup_Succeeds()
+    public async Task ConfigureMessagePopup_PersistsSettings()
     {
         await Ts.CreateSequenceFileAsync(TempSeqFile);
         await Ts.InsertSequenceAsync(TempSeqFile, "MpSeq");
@@ -498,25 +498,62 @@ public class T22_HeadlessToolDispatchTests : TestBase
         var r = await Call("configure_message_popup",
             $"{{\"file_path\":{J(TempSeqFile)},\"sequence_name\":\"MpSeq\"," +
             "\"step_group\":\"Main\",\"step_name\":\"Popup1\"," +
-            "\"message\":\"Connect the DUT\",\"title\":\"Action\"," +
+            "\"message\":\"Connect the DUT\",\"title\":\"Action Required\"," +
             "\"buttons\":\"OKCancel\",\"timeout\":5}");
         Assert.That(r.IsError, Is.False, TextOf(r));
+
+        // Readback: MessagePopup settings persist as TOP-LEVEL step properties (MessageExpr/
+        // TitleExpr expression literals, ButtonNLabel, TimeToWait) — not the old TS.MessagePopup.*.
+        var svc = (TestStandService)Ts;
+        Assert.That(svc.ReadStepPropertyString(TempSeqFile, "MpSeq", "Main", "Popup1", "MessageExpr"),
+            Does.Contain("Connect the DUT"), "message must persist as MessageExpr");
+        Assert.That(svc.ReadStepPropertyString(TempSeqFile, "MpSeq", "Main", "Popup1", "TitleExpr"),
+            Does.Contain("Action Required"), "title must persist as TitleExpr");
+        Assert.That(svc.ReadStepPropertyString(TempSeqFile, "MpSeq", "Main", "Popup1", "Button1Label"),
+            Does.Contain("OK"), "OKCancel → Button1Label = OK");
+        Assert.That(svc.ReadStepPropertyString(TempSeqFile, "MpSeq", "Main", "Popup1", "Button2Label"),
+            Does.Contain("Cancel"), "OKCancel → Button2Label = Cancel");
+        Assert.That(svc.ReadStepPropertyNumber(TempSeqFile, "MpSeq", "Main", "Popup1", "TimeToWait"),
+            Is.EqualTo(5).Within(0.001), "timeout must persist as TimeToWait (seconds)");
     }
 
     // ── configure_property_loader ─────────────────────────────────────────────────
 
     [Test]
-    public async Task ConfigurePropertyLoader_Succeeds()
+    public async Task ConfigurePropertyLoader_PersistsPath_OnRealLoaderStep()
     {
         await Ts.CreateSequenceFileAsync(TempSeqFile);
         await Ts.InsertSequenceAsync(TempSeqFile, "PlSeq");
-        await Ts.InsertStepAsync(TempSeqFile, "PlSeq", "Main", "Action", "Loader1");
+        await Ts.InsertStepAsync(TempSeqFile, "PlSeq", "Main", "NI_PropertyLoader", "Loader1");
 
         var r = await Call("configure_property_loader",
             $"{{\"file_path\":{J(TempSeqFile)},\"sequence_name\":\"PlSeq\"," +
             "\"step_group\":\"Main\",\"step_name\":\"Loader1\"," +
-            "\"file_path_expr\":\"\\\"C:\\\\\\\\config.ini\\\"\",\"mode\":\"Read\"}");
+            $"\"file_path_expr\":{J(@"C:\config.ini")},\"mode\":\"Read\"}}");
         Assert.That(r.IsError, Is.False, TextOf(r));
+
+        // Readback: path persists in the first source's Location (not the old TS.PropertyLoader.*).
+        var svc = (TestStandService)Ts;
+        Assert.That(svc.ReadStepPropertyString(TempSeqFile, "PlSeq", "Main", "Loader1",
+                "PropertyLoaderSources[0].Options.CommonOptions.Source.Location"),
+            Does.Contain("config.ini"), "file path must persist in the source Location");
+    }
+
+    [Test]
+    public async Task ConfigurePropertyLoader_OnNonLoaderStep_ReportsClearError()
+    {
+        await Ts.CreateSequenceFileAsync(TempSeqFile);
+        await Ts.InsertSequenceAsync(TempSeqFile, "PlSeq2");
+        await Ts.InsertStepAsync(TempSeqFile, "PlSeq2", "Main", "Action", "NotALoader");
+
+        var r = await Call("configure_property_loader",
+            $"{{\"file_path\":{J(TempSeqFile)},\"sequence_name\":\"PlSeq2\"," +
+            "\"step_group\":\"Main\",\"step_name\":\"NotALoader\"," +
+            $"\"file_path_expr\":{J(@"C:\x.ini")},\"mode\":\"Read\"}}");
+        Assert.That(r.IsError, Is.True,
+            "configuring a non-PropertyLoader step must report a clear error, not swallow it");
+        Assert.That(TextOf(r), Does.Contain("NI_PropertyLoader"),
+            "error should hint at the correct step type");
     }
 
     // ── compare_sequence_files ────────────────────────────────────────────────────

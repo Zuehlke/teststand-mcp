@@ -1,32 +1,47 @@
 using System;
 using System.Collections.Generic;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace TestStandMCP.Tools;
 
 /// <summary>Builds JSON Schema objects for MCP tool input schemas.</summary>
 public static class SchemaBuilder
 {
+    // Cached once: a JsonSerializerOptions instance is expensive to build and caches
+    // serialization metadata internally — allocating a fresh one per call defeats that.
+    private static readonly JsonSerializerOptions _schemaOpts = new()
+    {
+        PropertyNamingPolicy   = JsonNamingPolicy.CamelCase,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+    };
+
+    /// <summary>
+    /// Builds a JSON Schema <see cref="JsonElement"/> from a fluent
+    /// <see cref="SchemaObject"/> configured by <paramref name="configure"/>.
+    /// </summary>
     public static JsonElement Build(Action<SchemaObject> configure)
     {
         var schema = new SchemaObject { Type = "object" };
         configure(schema);
-        var json = JsonSerializer.Serialize(schema, new JsonSerializerOptions
-        {
-            PropertyNamingPolicy       = JsonNamingPolicy.CamelCase,
-            DefaultIgnoreCondition     = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
-        });
+        var json = JsonSerializer.Serialize(schema, _schemaOpts);
         return JsonDocument.Parse(json).RootElement.Clone();
     }
 }
 
+/// <summary>Fluent builder for a JSON Schema object node.</summary>
 public class SchemaObject
 {
+    /// <summary>JSON Schema type; "object" for a schema root.</summary>
     public string Type { get; set; } = "object";
+    /// <summary>Named properties of the object, or null when none.</summary>
     public Dictionary<string, SchemaProperty>? Properties { get; set; }
+    /// <summary>Names of required properties, or null when none.</summary>
     public List<string>? Required { get; set; }
+    /// <summary>Optional description of the object.</summary>
     public string? Description { get; set; }
 
+    /// <summary>Adds a required scalar property with an optional enum constraint.</summary>
     public SchemaObject AddRequired(string name, string type, string description,
         string[]? enumValues = null)
     {
@@ -37,6 +52,7 @@ public class SchemaObject
         return this;
     }
 
+    /// <summary>Adds an optional scalar property with an optional default and enum constraint.</summary>
     public SchemaObject AddOptional(string name, string type, string description,
         object? defaultValue = null, string[]? enumValues = null)
     {
@@ -80,6 +96,7 @@ public class SchemaObject
         return this;
     }
 
+    /// <summary>Adds a nested object property described by <paramref name="configure"/>.</summary>
     public SchemaObject AddObjectProperty(string name, string description,
         Action<SchemaObject> configure)
     {
@@ -96,13 +113,21 @@ public class SchemaObject
     }
 }
 
+/// <summary>A single JSON Schema property node.</summary>
 public class SchemaProperty
 {
+    /// <summary>JSON Schema type (e.g. "string", "number", "array", "object").</summary>
     public string Type { get; set; } = "string";
+    /// <summary>Optional property description.</summary>
     public string? Description { get; set; }
+    /// <summary>Optional default value.</summary>
     public object? Default { get; set; }
+    /// <summary>Optional set of allowed values.</summary>
     public string[]? Enum { get; set; }
+    /// <summary>Nested properties for object-typed schemas.</summary>
     public Dictionary<string, SchemaProperty>? Properties { get; set; }
+    /// <summary>Required nested property names for object-typed schemas.</summary>
     public List<string>? Required { get; set; }
+    /// <summary>Item schema for array-typed schemas.</summary>
     public SchemaProperty? Items { get; set; }
 }

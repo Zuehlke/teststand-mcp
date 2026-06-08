@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Threading.Tasks;
 using TestStandMCP.Models;
 using TestStandMCP.Services;
@@ -17,7 +18,9 @@ public class TestStandToolRegistry
     private readonly ILogger<TestStandToolRegistry> _logger;
     private readonly Dictionary<string, McpTool> _tools = new();
     private readonly Dictionary<string, Func<JsonElement?, Task<CallToolResult>>> _handlers = new();
+    private readonly IReadOnlyList<McpTool> _toolList;
 
+    /// <summary>Creates the registry and registers all tools.</summary>
     public TestStandToolRegistry(ITestStandService ts, ISequenceEditorService seqEditor,
         ILogger<TestStandToolRegistry> logger)
     {
@@ -25,10 +28,15 @@ public class TestStandToolRegistry
         _seqEditor = seqEditor;
         _logger    = logger;
         RegisterAll();
+        // Tools are registered once in the constructor — snapshot the list so repeated
+        // tools/list calls don't re-allocate it.
+        _toolList = _tools.Values.ToList();
     }
 
-    public IReadOnlyList<McpTool> GetTools() => _tools.Values.ToList();
+    /// <summary>Returns all registered tools.</summary>
+    public IReadOnlyList<McpTool> GetTools() => _toolList;
 
+    /// <summary>Dispatches a <c>tools/call</c> request to the registered handler.</summary>
     public async Task<CallToolResult> CallToolAsync(string name, JsonElement? arguments)
     {
         if (!_handlers.TryGetValue(name, out var handler))
@@ -157,7 +165,7 @@ public class TestStandToolRegistry
                         .AddOptional("expression", "string",
                             "Step expression (e.g. an NI_Flow_If condition)")
                         .AddOptional("expression_type", "string",
-                            "Expression type: 'Statement' (default), 'Pre', 'Post', 'Status'")
+                            "Where to store it: 'Statement' (default) -> Post Expression (primary for Statement steps); 'Pre' -> before the step; 'Post' -> after the step; 'Status' -> status expression.")
                         .AddOptional("target_sequence_name", "string",
                             "For SequenceCall steps: name of the sequence to call")
                         .AddOptional("target_sequence_file", "string",
@@ -236,7 +244,7 @@ public class TestStandToolRegistry
             SetLocalVariableAsync);
 
         Register("set_step_expression",
-            "Set the expression of a step (Statement, Pre, Post, or Status expression).",
+            "Set the expression of a step. For a Statement step the expression's primary home is the Post Expression — the default 'Statement' (or unspecified) type writes there. Use 'Pre' for an expression that must run BEFORE the step executes, 'Post' for AFTER, 'Status' for the status expression.",
             s => s
                 .AddRequired("sequence_file_path", "string", "Path to the sequence file")
                 .AddRequired("sequence_name", "string", "Name of the sequence")
@@ -244,7 +252,7 @@ public class TestStandToolRegistry
                 .AddRequired("step_name", "string", "Name of the step")
                 .AddRequired("expression", "string", "Expression to set")
                 .AddOptional("expression_type", "string",
-                    "Expression type: 'Statement' (default), 'Pre', 'Post', 'Status'"),
+                    "Where to store it: 'Statement' (default) -> the step's Post Expression (primary slot for Statement steps, runs after the step); 'Pre' -> runs BEFORE the step; 'Post' -> runs AFTER the step; 'Status' -> the status expression."),
             SetStepExpressionAsync);
 
         Register("set_sequence_call_target",
@@ -366,11 +374,20 @@ public class TestStandToolRegistry
             SetFileGlobalAsync);
 
         Register("set_station_global",
-            "Set the value of a StationGlobal variable.",
+            "Set the value of a StationGlobal variable. The change is committed to StationGlobals.ini " +
+            "on disk so it persists across engine restarts (creates the global if it does not exist).",
             s => s
                 .AddRequired("variable_name", "string", "Name of the StationGlobal variable")
                 .AddRequired("value", "string", "New value"),
             SetStationGlobalAsync);
+
+        Register("delete_station_global",
+            "Delete a StationGlobal variable and commit the removal to StationGlobals.ini on disk so it " +
+            "persists (no-op if the global does not exist). Prefer this over an evaluate_expression " +
+            "'DeleteSubProperty', which only edits the in-memory copy and is lost on the next restart.",
+            s => s
+                .AddRequired("variable_name", "string", "Name of the StationGlobal variable to delete"),
+            DeleteStationGlobalAsync);
 
         // Steps
         Register("get_steps",
@@ -747,15 +764,21 @@ public class TestStandToolRegistry
             GetSequenceParametersAsync);
 
         Register("insert_sequence_parameter",
-            "Add a parameter to a sequence.",
+            "Add a parameter to a sequence. Parameters are passed BY VALUE by default; set " +
+            "pass_by_reference=true to pass BY REFERENCE so the called sequence can write back to " +
+            "the caller's variable. In TestStand this toggles the PropFlags_PassByReference flag.",
             s => s
                 .AddRequired("file_path", "string", "Path to the sequence file")
                 .AddRequired("sequence_name", "string", "Name of the sequence")
                 .AddRequired("param_name", "string", "Parameter name")
                 .AddRequired("data_type", "string",
                     "Data type: 'string', 'number', 'boolean'")
+                .AddOptional("pass_by_reference", "boolean",
+                    "Pass BY REFERENCE (true) or BY VALUE (false, default). By reference lets the called " +
+                    "sequence modify the caller's variable; by value passes a copy. Takes precedence over 'direction'.")
                 .AddOptional("direction", "string",
-                    "Parameter direction: 'Input' (default), 'Output', 'InOut'")
+                    "Legacy pass-mode selector — prefer pass_by_reference. 'Input'/'Output' → by value; " +
+                    "'InOut' (aliases 'byref'/'passbyreference') → by reference. Ignored when pass_by_reference is set.")
                 .AddOptional("default_value", "string", "Optional default value"),
             InsertSequenceParameterAsync);
 
@@ -1474,7 +1497,7 @@ public class TestStandToolRegistry
                 .AddOptional("high_limit", "number", "High (maximum) limit value")
                 .AddOptional("units", "string", "Units label (e.g. 'V', 'A', 'ms')")
                 .AddOptional("comparison_type", "string",
-                    "Comparison: 'GELE' (default, low<=x<=high), 'GE' (x>=low), 'LE' (x<=high), 'EQ' (x==value), 'NE' (x!=value)",
+                    "Comparison: 'GELE' (default, low<=x<=high), 'GE' (x>=low), 'LE' (x<=high), 'EQ' (x==value), 'NE' (x!=value), 'GT' (x>low), 'LT' (x<high)",
                     "GELE"),
             SetNumericLimitsAsync);
 
@@ -2242,6 +2265,13 @@ public class TestStandToolRegistry
         return Ok($"StationGlobal '{name}' set to '{value}'.");
     }
 
+    private async Task<CallToolResult> DeleteStationGlobalAsync(JsonElement? args)
+    {
+        var name = args!.Value.GetRequiredString("variable_name");
+        await _ts.DeleteStationGlobalAsync(name);
+        return Ok($"StationGlobal '{name}' deleted and committed to disk.");
+    }
+
     private async Task<CallToolResult> GetStepsAsync(JsonElement? args)
     {
         var path = args!.Value.GetRequiredString("sequence_file_path");
@@ -2706,8 +2736,13 @@ public class TestStandToolRegistry
         var dataType     = args!.Value.GetRequiredString("data_type");
         var direction    = args!.Value.GetStringOrDefault("direction", "Input");
         var defValue     = args!.Value.GetStringOrNull("default_value");
-        await _ts.InsertSequenceParameterAsync(filePath, sequenceName, paramName, dataType, direction, defValue);
-        return Ok($"Parameter '{paramName}' ({dataType}, {direction}) added to sequence '{sequenceName}'.");
+        var passByRef    = args!.Value.GetBoolOrNull("pass_by_reference");
+        await _ts.InsertSequenceParameterAsync(filePath, sequenceName, paramName, dataType, direction, defValue, passByRef);
+
+        bool effectiveByRef = passByRef ??
+            direction.ToLowerInvariant() is "inout" or "inputoutput" or "passbyreference" or "byref";
+        var passMode = effectiveByRef ? "by reference" : "by value";
+        return Ok($"Parameter '{paramName}' ({dataType}, {passMode}) added to sequence '{sequenceName}'.");
     }
 
     private async Task<CallToolResult> DeleteLocalVariableAsync(JsonElement? args)
@@ -2864,7 +2899,8 @@ public class TestStandToolRegistry
         // boolean false → "Disabled"        (0)
         // string        → passed through as-is
         string recordingOption;
-        var elem = args!.Value.GetProperty("record_result");
+        if (!args!.Value.TryGetProperty("record_result", out var elem))
+            return Error("Required argument 'record_result' is missing.");
         if (elem.ValueKind == JsonValueKind.True)
             recordingOption = "EnabledOverride";
         else if (elem.ValueKind == JsonValueKind.False)
@@ -3049,10 +3085,7 @@ public class TestStandToolRegistry
     private async Task<CallToolResult> SyncSemaphoreWaitAsync(JsonElement? args)
     {
         var name    = args!.Value.GetRequiredString("name");
-        var timeout = args.HasValue
-            ? args.Value.TryGetProperty("timeout_seconds", out var t)
-                ? (t.ValueKind == JsonValueKind.Number ? t.GetDouble() : 30) : 30
-            : 30;
+        var timeout = args!.Value.GetDoubleOrDefault("timeout_seconds", 30);
         await _ts.SyncSemaphoreWaitAsync(name, timeout);
         return Ok($"Semaphore '{name}' acquired.");
     }
@@ -3067,10 +3100,7 @@ public class TestStandToolRegistry
     private async Task<CallToolResult> SyncMutexLockAsync(JsonElement? args)
     {
         var name    = args!.Value.GetRequiredString("name");
-        var timeout = args.HasValue
-            ? args.Value.TryGetProperty("timeout_seconds", out var t)
-                ? (t.ValueKind == JsonValueKind.Number ? t.GetDouble() : 30) : 30
-            : 30;
+        var timeout = args!.Value.GetDoubleOrDefault("timeout_seconds", 30);
         await _ts.SyncMutexLockAsync(name, timeout);
         return Ok($"Mutex '{name}' locked.");
     }
@@ -3093,10 +3123,7 @@ public class TestStandToolRegistry
     private async Task<CallToolResult> SyncQueueDequeueAsync(JsonElement? args)
     {
         var name    = args!.Value.GetRequiredString("name");
-        var timeout = args.HasValue
-            ? args.Value.TryGetProperty("timeout_seconds", out var t)
-                ? (t.ValueKind == JsonValueKind.Number ? t.GetDouble() : 30) : 30
-            : 30;
+        var timeout = args!.Value.GetDoubleOrDefault("timeout_seconds", 30);
         var value = await _ts.SyncQueueDequeueAsync(name, timeout);
         return Ok(value);
     }
@@ -3126,10 +3153,7 @@ public class TestStandToolRegistry
     private async Task<CallToolResult> SyncNotificationWaitAsync(JsonElement? args)
     {
         var name    = args!.Value.GetRequiredString("name");
-        var timeout = args.HasValue
-            ? args.Value.TryGetProperty("timeout_seconds", out var t)
-                ? (t.ValueKind == JsonValueKind.Number ? t.GetDouble() : 30) : 30
-            : 30;
+        var timeout = args!.Value.GetDoubleOrDefault("timeout_seconds", 30);
         var value = await _ts.SyncNotificationWaitAsync(name, timeout);
         return Ok(string.IsNullOrEmpty(value)
             ? $"Notification '{name}' received."
@@ -3865,21 +3889,20 @@ public class TestStandToolRegistry
         Content = new List<ToolContent> { new() { Type = "text", Text = message } }
     };
 
+    // Cached once: a JsonSerializerOptions is expensive to build and caches serialization
+    // metadata internally — a fresh instance per response defeats that. OkJson is the hot path.
+    private static readonly JsonSerializerOptions _jsonOpts = new()
+    {
+        WriteIndented          = false,
+        PropertyNamingPolicy   = JsonNamingPolicy.CamelCase,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+    };
+
     private static CallToolResult OkJson(object obj) => new()
     {
         Content = new List<ToolContent>
         {
-            new()
-            {
-                Type = "text",
-                Text = JsonSerializer.Serialize(obj, new JsonSerializerOptions
-                {
-                    WriteIndented   = false,
-                    PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-                    DefaultIgnoreCondition =
-                        System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
-                })
-            }
+            new() { Type = "text", Text = JsonSerializer.Serialize(obj, _jsonOpts) }
         }
     };
 
@@ -3909,13 +3932,36 @@ internal static class JsonElementExtensions
         el.TryGetProperty(key, out var p) ? (p.GetString() ?? defaultValue) : defaultValue;
 
     public static int GetIntOrDefault(this JsonElement el, string key, int defaultValue) =>
-        el.TryGetProperty(key, out var p) && p.TryGetInt32(out var v) ? v : defaultValue;
+        el.TryGetProperty(key, out var p) && p.ValueKind == JsonValueKind.Number
+            && p.TryGetInt32(out var v) ? v : defaultValue;
+
+    /// <summary>Reads a numeric property, or returns <paramref name="defaultValue"/> when absent/non-numeric.</summary>
+    public static double GetDoubleOrDefault(this JsonElement el, string key, double defaultValue) =>
+        el.TryGetProperty(key, out var p) && p.ValueKind == JsonValueKind.Number
+            ? p.GetDouble() : defaultValue;
 
     public static bool GetBoolOrDefault(this JsonElement el, string key, bool defaultValue)
     {
         if (!el.TryGetProperty(key, out var p)) return defaultValue;
-        return p.ValueKind == JsonValueKind.True  ? true  :
-               p.ValueKind == JsonValueKind.False ? false : defaultValue;
+        return p.ValueKind switch
+        {
+            JsonValueKind.True  => true,
+            JsonValueKind.False => false,
+            _                   => defaultValue
+        };
+    }
+
+    /// <summary>Reads a boolean property, or returns null when absent/non-boolean — so callers can
+    /// distinguish "not supplied" from an explicit false.</summary>
+    public static bool? GetBoolOrNull(this JsonElement el, string key)
+    {
+        if (!el.TryGetProperty(key, out var p)) return null;
+        return p.ValueKind switch
+        {
+            JsonValueKind.True  => true,
+            JsonValueKind.False => false,
+            _                   => (bool?)null
+        };
     }
 
     public static Dictionary<string, object>? GetDictionaryOrNull(this JsonElement el,

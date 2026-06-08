@@ -10,24 +10,35 @@ namespace TestStandMCP.Services;
 
 // ── Interface ────────────────────────────────────────────────────────────────
 
+/// <summary>Controls the external NI TestStand Sequence Editor (SeqEdit.exe) process.</summary>
 public interface ISequenceEditorService : IDisposable
 {
+    /// <summary>True when a Sequence Editor process is running.</summary>
     bool IsRunning { get; }
+    /// <summary>Launches the Sequence Editor (or attaches to a running instance).</summary>
     Task<bool> LaunchAsync(string? seqEditPath = null);
+    /// <summary>Returns the current Sequence Editor status.</summary>
     Task<SequenceEditorInfo> GetStatusAsync();
+    /// <summary>Opens a sequence file in the editor.</summary>
     Task OpenFileAsync(string filePath);
+    /// <summary>Runs a sequence's entry point in the editor.</summary>
     Task<string> RunSequenceAsync(string sequenceFilePath, string entryPoint);
+    /// <summary>Closes the editor, optionally forcing termination.</summary>
     Task CloseEditorAsync(bool force = false);
 }
 
 // ── Implementation ────────────────────────────────────────────────────────────
 
+/// <summary>Default <see cref="ISequenceEditorService"/> backed by the SeqEdit.exe process.</summary>
 public class SequenceEditorService : ISequenceEditorService
 {
+    private const string EditorProcessName = "SeqEdit";
+
     private readonly ILogger<SequenceEditorService> _logger;
     private Process? _editorProcess;
     private string? _resolvedPath;
 
+    /// <inheritdoc/>
     public bool IsRunning
     {
         get
@@ -36,12 +47,19 @@ public class SequenceEditorService : ISequenceEditorService
             {
                 if (_editorProcess != null && !_editorProcess.HasExited)
                     return true;
-                return Process.GetProcessesByName("SeqEdit").Length > 0;
+                var procs = Process.GetProcessesByName(EditorProcessName);
+                try { return procs.Length > 0; }
+                finally { DisposeAll(procs); }
             }
-            catch { return false; }
+            catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+            {
+                _logger.LogDebug(ex, "Failed to probe Sequence Editor process state.");
+                return false;
+            }
         }
     }
 
+    /// <summary>Creates the service with the given logger.</summary>
     public SequenceEditorService(ILogger<SequenceEditorService> logger)
     {
         _logger = logger;
@@ -49,6 +67,7 @@ public class SequenceEditorService : ISequenceEditorService
 
     // ── Launch / Connect ──────────────────────────────────────────────────────
 
+    /// <inheritdoc/>
     public async Task<bool> LaunchAsync(string? seqEditPath = null)
     {
         return await Task.Run(() =>
@@ -62,10 +81,12 @@ public class SequenceEditorService : ISequenceEditorService
                         "NI TestStand is installed and the TESTSTANDBIN environment variable is set.");
 
                 // Check if already running
-                var existing = Process.GetProcessesByName("SeqEdit");
+                var existing = Process.GetProcessesByName(EditorProcessName);
                 if (existing.Length > 0)
                 {
                     _editorProcess = existing[0];
+                    // Release the handles we are not keeping.
+                    for (int i = 1; i < existing.Length; i++) existing[i].Dispose();
                     _logger.LogInformation(
                         "Sequence Editor already running (PID: {Pid})", _editorProcess.Id);
                     return true;
@@ -99,31 +120,41 @@ public class SequenceEditorService : ISequenceEditorService
 
     // ── Status ────────────────────────────────────────────────────────────────
 
+    /// <inheritdoc/>
     public async Task<SequenceEditorInfo> GetStatusAsync()
     {
         return await Task.Run(() =>
         {
-            var processes = Process.GetProcessesByName("SeqEdit");
-            var info = new SequenceEditorInfo
+            var processes = Process.GetProcessesByName(EditorProcessName);
+            try
             {
-                IsRunning  = processes.Length > 0,
-                EditorPath = _resolvedPath ?? ""
-            };
+                var info = new SequenceEditorInfo
+                {
+                    IsRunning  = processes.Length > 0,
+                    EditorPath = _resolvedPath ?? ""
+                };
 
-            if (processes.Length > 0)
-            {
-                var proc = processes[0];
-                info.ProcessId = proc.Id;
-                try { info.MainWindowTitle = proc.MainWindowTitle; }
-                catch { info.MainWindowTitle = ""; }
+                if (processes.Length > 0)
+                {
+                    var proc = processes[0];
+                    info.ProcessId = proc.Id;
+                    try { info.MainWindowTitle = proc.MainWindowTitle; }
+                    catch (Exception ex)
+                    {
+                        _logger.LogDebug(ex, "Could not read Sequence Editor window title.");
+                        info.MainWindowTitle = "";
+                    }
+                }
+
+                return info;
             }
-
-            return info;
+            finally { DisposeAll(processes); }
         });
     }
 
     // ── Open File ─────────────────────────────────────────────────────────────
 
+    /// <inheritdoc/>
     public async Task OpenFileAsync(string filePath)
     {
         if (!File.Exists(filePath))
@@ -144,12 +175,13 @@ public class SequenceEditorService : ISequenceEditorService
                 FileName  = editorPath,
                 Arguments = $"\"{filePath}\"",
                 UseShellExecute = true
-            });
+            })?.Dispose();
         });
     }
 
     // ── Run Sequence ──────────────────────────────────────────────────────────
 
+    /// <inheritdoc/>
     public async Task<string> RunSequenceAsync(string sequenceFilePath, string entryPoint)
     {
         if (!File.Exists(sequenceFilePath))
@@ -167,7 +199,7 @@ public class SequenceEditorService : ISequenceEditorService
                 sequenceFilePath, entryPoint);
 
             var args = $"\"{sequenceFilePath}\" /run /runEntryPoint \"{entryPoint}\"";
-            var process = Process.Start(new ProcessStartInfo
+            using var process = Process.Start(new ProcessStartInfo
             {
                 FileName  = editorPath,
                 Arguments = args,
@@ -182,11 +214,12 @@ public class SequenceEditorService : ISequenceEditorService
 
     // ── Close Editor ──────────────────────────────────────────────────────────
 
+    /// <inheritdoc/>
     public async Task CloseEditorAsync(bool force = false)
     {
         await Task.Run(() =>
         {
-            var processes = Process.GetProcessesByName("SeqEdit");
+            var processes = Process.GetProcessesByName(EditorProcessName);
             if (processes.Length == 0)
             {
                 _logger.LogInformation("Sequence Editor is not running.");
@@ -214,6 +247,10 @@ public class SequenceEditorService : ISequenceEditorService
                 {
                     _logger.LogWarning(ex,
                         "Failed to close Sequence Editor (PID: {Pid})", proc.Id);
+                }
+                finally
+                {
+                    proc.Dispose();
                 }
             }
             _editorProcess = null;
@@ -267,16 +304,28 @@ public class SequenceEditorService : ISequenceEditorService
                     if (File.Exists(seqEdit)) return seqEdit;
                 }
             }
-            catch { }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // Directory not enumerable on this station — skip and try the next root.
+            }
         }
 
         return null;
     }
 
+    /// <summary>Releases the OS handles held by a set of <see cref="Process"/> objects.</summary>
+    private static void DisposeAll(Process[] processes)
+    {
+        foreach (var p in processes) p.Dispose();
+    }
+
     // ── IDisposable ───────────────────────────────────────────────────────────
 
+    /// <summary>Releases the editor process handle. Does not terminate the editor.</summary>
     public void Dispose()
     {
+        // Dispose the handle only — never kill an editor the user may still be using.
+        _editorProcess?.Dispose();
         _editorProcess = null;
         GC.SuppressFinalize(this);
     }
