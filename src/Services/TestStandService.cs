@@ -2497,6 +2497,38 @@ public sealed class TestStandService : ITestStandService
             CreateNoWindow         = true,
         };
 
+        // ── Normalize the child environment ───────────────────────────────────
+        // AnalyzerApp.exe is 32-bit and, when it analyzes LabVIEW code modules, loads the 32-bit
+        // LabVIEW Run-Time Engine (lvrt.dll). lvrt builds paths from %ProgramFiles(x86)% and crashes
+        // hard with 0xC0000409 (STATUS_STACK_BUFFER_OVERRUN → exit code -1073740791, empty stdout/
+        // stderr) when that variable is absent. The MCP host can inherit a heavily reduced environment
+        // (observed: ~15 vars, no ProgramFiles(x86)) when its launcher does not pass the full user
+        // environment, so we must guarantee the child has the system variables the analyzer + lvrt
+        // depend on — independent of how TestStandMCP.exe itself was started.
+        //
+        // psi.Environment is pre-seeded with this process's environment. Values are derived from the
+        // OS (NOT GetEnvironmentVariable, which returns null when a variable is missing in *this*
+        // process) and set/overwritten. ProgramFiles(x86) is mandatory; the rest harden common
+        // lvrt/Windows lookups. (UseShellExecute=false above is required for psi.Environment to apply.)
+        void Ensure(string key, string? value)
+        {
+            if (!string.IsNullOrEmpty(value)) psi.Environment[key] = value;
+        }
+        Ensure("ProgramFiles(x86)",       Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86));
+        Ensure("ProgramFiles",            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles));
+        Ensure("ProgramData",             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData));
+        Ensure("ALLUSERSPROFILE",         Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData));
+        Ensure("CommonProgramFiles",      Environment.GetFolderPath(Environment.SpecialFolder.CommonProgramFiles));
+        Ensure("CommonProgramFiles(x86)", Environment.GetFolderPath(Environment.SpecialFolder.CommonProgramFilesX86));
+        Ensure("ComSpec",                 Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe"));
+        Ensure("TMP",                     Path.GetTempPath());
+        Ensure("TEMP",                    Path.GetTempPath());
+        Ensure("NUMBER_OF_PROCESSORS",    Environment.ProcessorCount.ToString());
+
+        Log($"Child env normalized — ProgramFiles(x86)=" +
+            (psi.Environment.TryGetValue("ProgramFiles(x86)", out var pf86) && !string.IsNullOrEmpty(pf86)
+                ? pf86 : "(MISSING!)"));
+
         Log($"Launching: {analyzerExe} {psi.Arguments}");
         Flush();
 
@@ -2520,6 +2552,19 @@ public sealed class TestStandService : ITestStandService
         // exit 0 = clean, 1 = errors, 2 = warnings, <0 = bad args/paths
         if (exitCode < 0)
         {
+            // A negative exit (notably -1073740791 / 0xC0000409 from lvrt.dll) means the child
+            // crashed before producing output. Dump the critical child env vars so a regression —
+            // e.g. ProgramFiles(x86) going missing again — is immediately visible in the diag file.
+            Log("AnalyzerApp.exe exited with a negative code — dumping critical child env vars:");
+            foreach (var key in new[]
+            {
+                "ProgramFiles(x86)", "ProgramFiles", "ProgramData", "ALLUSERSPROFILE",
+                "CommonProgramFiles", "CommonProgramFiles(x86)", "ComSpec",
+                "TMP", "TEMP", "NUMBER_OF_PROCESSORS", "SystemRoot", "PATH",
+            })
+            {
+                Log($"  {key} = {(psi.Environment.TryGetValue(key, out var v) ? v : "(absent)")}");
+            }
             Flush();
             throw new InvalidOperationException(
                 $"AnalyzerApp.exe returned error code {exitCode}. stdout: {stdout.Trim()} stderr: {stderr.Trim()}");
