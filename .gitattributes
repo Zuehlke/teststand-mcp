@@ -1,0 +1,5 @@
+# Git hooks are executed by sh.exe (Git for Windows). They MUST keep LF line
+# endings even though core.autocrlf=true — otherwise the shell aborts with
+# "bad interpreter: /bin/sh^M" and the hook never runs.
+.githooks/pre-push  text eol=lf
+*.sh                text eol=lf
