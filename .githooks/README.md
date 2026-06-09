@@ -11,10 +11,15 @@ Because the tests need exclusive access to the TestStand COM engine, the hook
 first **terminates any running `TestStandMCP.exe` / `SeqEdit.exe`** — so save
 your work in open Sequence Editors before pushing.
 
-## One-time setup (per clone)
+## Activation (per clone)
 
-Git does not enable a versioned hooks directory automatically. Each developer
-runs this once after cloning:
+This is **automatic**: on the first `dotnet build` / `dotnet test`,
+`Directory.Build.targets` (repo root) runs `git config core.hooksPath .githooks`
+once per clone (tracked by a marker in `.git/`). Since you always build before
+pushing, the hook is active by the time it matters — no manual step needed.
+
+Set it manually only if you want the hook active *before* the first build, or if
+`git` wasn't on PATH during that build:
 
 ```powershell
 git config core.hooksPath .githooks
