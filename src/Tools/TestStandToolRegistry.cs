@@ -628,6 +628,28 @@ public class TestStandToolRegistry
                     "Optional sequence file path — evaluate in its FileGlobals context"),
             EvaluateExpressionAsync);
 
+        Register("list_expression_reference",
+            "Look up TestStand expression-language building blocks — operators, constants and " +
+            "built-in functions — instead of guessing or trial-and-error. Returns a categorised, " +
+            "searchable catalogue (name, signature, description, example) mirroring the Expression " +
+            "Browser's Operators / Constants / Functions groups. Function entries are confirmed to " +
+            "exist live in the engine, and key gotchas are baked into the notes (e.g. Round's 2nd " +
+            "arg is a rounding MODE, not decimal places; there is no Floor/Ceil/Mod — use % and " +
+            "Str; '^' is bitwise XOR, use Pow for powers). Pure static reference — needs no engine " +
+            "connection. Use it before writing any expression for set_step_expression, " +
+            "evaluate_expression, NI_Flow_If conditions, etc.",
+            s => s
+                .AddOptional("kind", "string",
+                    "Filter by group: 'operator', 'constant' or 'function' (singular or plural, " +
+                    "case-insensitive). Omit for all groups.")
+                .AddOptional("category", "string",
+                    "Filter by category, e.g. 'Arithmetic', 'Bitwise', 'Comparison', 'Logical', " +
+                    "'Numeric', 'String', 'Conversion', 'Array'. Omit for all categories.")
+                .AddOptional("search", "string",
+                    "Case-insensitive substring matched against name, signature, category, " +
+                    "description and note (e.g. 'round', 'array', 'shift')."),
+            ListExpressionReferenceAsync);
+
         Register("expand_path_macros",
             "Expand TestStand path macros (e.g. <TestStand>) in a path string.",
             s => s.AddRequired("path", "string", "Path string containing macros to expand"),
@@ -2519,6 +2541,22 @@ public class TestStandToolRegistry
         var seqFile    = args!.Value.GetStringOrNull("sequence_file_path");
         var result     = await _ts.EvaluateExpressionAsync(expression, seqFile);
         return OkJson(result);
+    }
+
+    // Pure static catalogue lookup — no engine touched, so this never awaits the service.
+    private Task<CallToolResult> ListExpressionReferenceAsync(JsonElement? args)
+    {
+        var kind     = args?.GetStringOrNull("kind");
+        var category = args?.GetStringOrNull("category");
+        var search   = args?.GetStringOrNull("search");
+        var entries  = ExpressionReference.Query(kind, category, search);
+        return Task.FromResult(OkJson(new
+        {
+            count      = entries.Count,
+            kinds      = ExpressionReference.Kinds,
+            categories = ExpressionReference.Categories(kind),
+            entries
+        }));
     }
 
     private async Task<CallToolResult> GetPropertyObjectAsync(JsonElement? args)
