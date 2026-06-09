@@ -604,9 +604,12 @@ public class T22_HeadlessToolDispatchTests : TestBase
     [Test]
     public async Task FindFile_RunsWithoutError()
     {
-        // FindFile returns "" when the name is not on the search path — the tool still
-        // completes successfully; this verifies the dispatch + argument extraction path.
-        var r = await Call("find_file", "{\"filename\":\"NI_StandardModelCallbacks.seq\"}");
+        // Use a name guaranteed NOT to be on the search path: FindFileAsync disables the
+        // engine's "locate file" / "add to search list" prompts, so a not-found file returns
+        // "" headlessly instead of popping a modal dialog that would block the test. This
+        // verifies the dispatch + argument path AND the no-dialog contract, without depending
+        // on any real installed sequence file (e.g. NI_StandardModelCallbacks.seq).
+        var r = await Call("find_file", "{\"filename\":\"__nonexistent_T22_probe.seq\"}");
         Assert.That(r.IsError, Is.False, TextOf(r));
     }
 
