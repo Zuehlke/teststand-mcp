@@ -33,6 +33,8 @@ using NiUser              = NationalInstruments.TestStand.Interop.API.User;
 using NiSearchOptions     = NationalInstruments.TestStand.Interop.API.SearchOptions;
 using NiSearchElements    = NationalInstruments.TestStand.Interop.API.SearchElements;
 using NiSearchFilter      = NationalInstruments.TestStand.Interop.API.SearchFilterOptions;
+using NiFindFilePrompt    = NationalInstruments.TestStand.Interop.API.FindFilePromptOptions;
+using NiFindFileSrchList  = NationalInstruments.TestStand.Interop.API.FindFileSearchListOptions;
 
 namespace TestStandMCP.Services;
 
@@ -3967,9 +3969,19 @@ public sealed class TestStandService : ITestStandService
         {
             try
             {
-                // FindFile(filename, searchDir, searchFlags) - searchFlags 0 = default search dirs
-                var result = ((dynamic)_engine!).FindFile((object)filename, (object)"", (object)0);
-                return result?.ToString() ?? "";
+                // Engine.FindFile returns a bool (found?) and yields the resolved path via the
+                // 'absolutePath' OUT parameter — NOT via the return value. Force the call fully
+                // headless: PromptDisable suppresses the "locate file" dialog and
+                // AddDirToSrchList_No suppresses the "add directory to the search list?" dialog.
+                // Either dialog is modal and would block the MCP server (and the integration
+                // tests) on a missing file; with both disabled a not-found file just returns "".
+                bool found = _engine!.FindFile(
+                    filename,
+                    out string absolutePath,
+                    out _,
+                    NiFindFilePrompt.FindFile_PromptDisable,
+                    NiFindFileSrchList.FindFile_AddDirToSrchList_No);
+                return found ? absolutePath ?? "" : "";
             }
             catch { return ""; }
         });
