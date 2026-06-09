@@ -1,0 +1,37 @@
+<Project>
+
+  <!-- ============================================================================
+       Auto-activate the versioned Git hooks (.githooks/) on a fresh clone.
+
+       Git deliberately does NOT enable a repo-supplied hooks directory on clone
+       (that would let a hostile repo run code), and core.hooksPath is local config
+       that clone never copies. So we set it here on the first build a developer
+       runs — which always happens before they could push.
+
+       Runs exactly once per clone: the marker lives in .git/ (never tracked), so
+       every fresh clone re-runs it, while an already-configured clone skips it.
+       Everything is ContinueOnError so a git-less or non-clone build never breaks.
+       ============================================================================ -->
+  <Target Name="ConfigureGitHooks"
+          BeforeTargets="Build"
+          Condition="Exists('$(MSBuildThisFileDirectory).git') And !Exists('$(MSBuildThisFileDirectory).git\hooks-configured')">
+
+    <Message Importance="high"
+             Text="[git hooks] Setting core.hooksPath -> .githooks (one-time for this clone)" />
+
+    <Exec Command="git config core.hooksPath .githooks"
+          WorkingDirectory="$(MSBuildThisFileDirectory)"
+          ContinueOnError="true">
+      <Output TaskParameter="ExitCode" PropertyName="_GitHooksExitCode" />
+    </Exec>
+
+    <!-- Stamp the marker only if the config actually succeeded, so a build where
+         git was unavailable retries next time instead of silently giving up. -->
+    <Touch Files="$(MSBuildThisFileDirectory).git\hooks-configured"
+           AlwaysCreate="true"
+           ContinueOnError="true"
+           Condition="'$(_GitHooksExitCode)' == '0'" />
+
+  </Target>
+
+</Project>

@@ -1,0 +1,27 @@
+#!/bin/sh
+# ============================================================================
+#  TestStandMCP — Git pre-push hook
+#  ---------------------------------------------------------------------------
+#  Runs the integration test suite before every push. The push is rejected
+#  unless ALL tests pass. The actual work lives in PowerShell (run-tests.ps1);
+#  this POSIX-sh stub is only the entry point Git invokes.
+#
+#  Setup (once per clone):   git config core.hooksPath .githooks
+#  Emergency bypass:         git push --no-verify
+#  See .githooks/README.md for details.
+# ============================================================================
+
+hookdir=$(dirname "$0")
+script="$hookdir/run-tests.ps1"
+
+# Prefer PowerShell 7+ (pwsh); fall back to Windows PowerShell 5.1.
+if command -v pwsh >/dev/null 2>&1; then
+    pwsh -NoProfile -ExecutionPolicy Bypass -File "$script"
+elif command -v powershell >/dev/null 2>&1; then
+    powershell -NoProfile -ExecutionPolicy Bypass -File "$script"
+else
+    echo "pre-push: neither 'pwsh' nor 'powershell' found on PATH — cannot run tests." >&2
+    exit 1
+fi
+
+exit $?
