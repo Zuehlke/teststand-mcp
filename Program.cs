@@ -24,9 +24,17 @@ internal class Program
     [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
     private static extern IntPtr CreateFile(string name, uint access, uint share,
         IntPtr security, uint creation, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetConsoleMode(IntPtr hConsoleHandle, out uint lpMode);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr GetStdHandle(int nStdHandle);
     private const uint GENERIC_WRITE  = 0x40000000;
     private const uint FILE_SHARE_WRITE = 2;
     private const uint OPEN_EXISTING  = 3;
+    private const int  STD_ERROR_HANDLE = -12;
+    private const uint ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004;
 
     static async Task<int> Main(string[] args)
     {
@@ -43,9 +51,21 @@ internal class Program
                                     IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
             if (handle != new IntPtr(-1))
             {
+                // Windows 10 conhost does NOT enable ANSI/VT processing on a freshly
+                // AllocConsole'd output buffer, so the banner's color + OSC-8 hyperlink
+                // escapes would be printed literally. (Windows 11 conhost enables it by
+                // default — hence the banner renders fine on the dev machine but not here.)
+                EnableVirtualTerminalProcessing(handle);
+
                 var stream = new FileStream(new SafeFileHandle(handle, true), FileAccess.Write);
                 Console.SetError(new StreamWriter(stream, new UTF8Encoding(false)) { AutoFlush = true });
             }
+        }
+        else
+        {
+            // Direct launch (stdin not redirected): the inherited console may also lack VT
+            // processing on Windows 10 — enable it on the stderr handle the banner uses.
+            EnableVirtualTerminalProcessing(GetStdHandle(STD_ERROR_HANDLE));
         }
 
         // OSC 8 hyperlink: clickable "Zühlke" in terminals that support ANSI hyperlinks
@@ -155,6 +175,18 @@ internal class Program
         Console.Error.Flush();
         TerminateProcess(GetCurrentProcess(), (uint)exitCode);
         return exitCode; // not reached
+    }
+
+    /// <summary>
+    /// Best-effort: turn on ENABLE_VIRTUAL_TERMINAL_PROCESSING so the console interprets ANSI
+    /// escape sequences (24-bit color, OSC-8 hyperlinks) instead of printing them as raw text.
+    /// No-op when the handle is not a real console (e.g. output redirected to a pipe/file).
+    /// </summary>
+    private static void EnableVirtualTerminalProcessing(IntPtr handle)
+    {
+        if (handle == IntPtr.Zero || handle == new IntPtr(-1)) return;
+        if (GetConsoleMode(handle, out uint mode))
+            SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
     }
 
     private static LogLevel ParseLogLevel(string level) => level.ToLowerInvariant() switch
