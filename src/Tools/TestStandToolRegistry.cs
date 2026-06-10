@@ -354,6 +354,36 @@ public class TestStandToolRegistry
             s => { },
             GetStationGlobalsAsync);
 
+        Register("get_property_tree",
+            "Export a TestStand property tree RECURSIVELY as a nested structure. Each node " +
+            "carries name, type, valueType ('Container'/'Array'/'Number'/'Boolean'/'String'/" +
+            "'Empty'), scalar value (leaves), hidden flags (isHidden), array info and children. " +
+            "Walks both container members and array elements. Hidden subproperties are INCLUDED " +
+            "by default and annotated via 'isHidden' (set include_hidden=false to omit them). " +
+            "Roots: 'StationGlobals' (engine.Globals, default), 'FileGlobals' (a sequence file's " +
+            "file globals) or 'SequenceFile' (the WHOLE file as a property tree via " +
+            "AsPropertyObject — every sequence, step and parameter, the richest/largest tree). " +
+            "'FileGlobals' and 'SequenceFile' require file_path. Use lookup_string to start at a " +
+            "sub-path. Bounded by max_depth, max_array_elements and an internal node budget " +
+            "('truncated'=true marks cut-offs).",
+            s => s
+                .AddOptional("root", "string",
+                    "Root property object to dump: 'StationGlobals' (default), 'FileGlobals' or " +
+                    "'SequenceFile'.",
+                    "StationGlobals",
+                    new[] { "StationGlobals", "FileGlobals", "SequenceFile" })
+                .AddOptional("file_path", "string",
+                    "Path to the sequence file (required when root='FileGlobals' or 'SequenceFile').")
+                .AddOptional("lookup_string", "string",
+                    "Optional sub-path to start at within the root (e.g. 'MyContainer.Sub').")
+                .AddOptional("max_depth", "integer",
+                    "Maximum recursion depth (default 25).", 25)
+                .AddOptional("include_hidden", "boolean",
+                    "Include hidden subproperties (PropFlags_Hidden). Default true.", true)
+                .AddOptional("max_array_elements", "integer",
+                    "Max array elements expanded per array; 0 = unlimited (default 500).", 500),
+            GetPropertyTreeAsync);
+
         Register("insert_file_global",
             "Insert a new FileGlobal variable into a sequence file. To create an ARRAY file " +
             "global (required before the array tools can operate on it), append '[]' to the " +
@@ -2259,6 +2289,18 @@ public class TestStandToolRegistry
     {
         var vars = await _ts.GetStationGlobalsAsync();
         return OkJson(vars);
+    }
+
+    private async Task<CallToolResult> GetPropertyTreeAsync(JsonElement? args)
+    {
+        var root       = args?.GetStringOrDefault("root", "StationGlobals") ?? "StationGlobals";
+        var filePath   = args?.GetStringOrNull("file_path");
+        var lookup     = args?.GetStringOrNull("lookup_string");
+        var maxDepth   = args?.GetIntOrDefault("max_depth", 25) ?? 25;
+        var hidden     = args?.GetBoolOrDefault("include_hidden", true) ?? true;
+        var maxArrayEl = args?.GetIntOrDefault("max_array_elements", 500) ?? 500;
+        var tree = await _ts.GetPropertyTreeAsync(root, filePath, lookup, maxDepth, hidden, maxArrayEl);
+        return OkJson(tree);
     }
 
     private async Task<CallToolResult> InsertFileGlobalAsync(JsonElement? args)
