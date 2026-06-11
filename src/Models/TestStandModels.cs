@@ -207,6 +207,38 @@ public class VariableInfo
     public int ArraySize { get; set; }
 }
 
+/// <summary>
+/// A node in a recursively-walked TestStand property tree (see <c>get_property_tree</c>).
+/// Containers and arrays carry <see cref="Children"/>; scalar leaves carry <see cref="Value"/>.
+/// </summary>
+public class PropertyNode
+{
+    /// <summary>Property name (array elements use an index label like "[0]").</summary>
+    public string Name { get; set; } = "";
+    /// <summary>Human-readable TestStand type (GetTypeDisplayString), if available.</summary>
+    public string? Type { get; set; }
+    /// <summary>Node kind: "Container", "Array", "Number", "Boolean", "String" or "Empty".</summary>
+    public string ValueType { get; set; } = "";
+    /// <summary>Scalar value for leaf nodes; null for containers/arrays.</summary>
+    public object? Value { get; set; }
+    /// <summary>True when PropFlags_Hidden (0x08) is set — a normally hidden property.</summary>
+    public bool IsHidden { get; set; }
+    /// <summary>True when PropFlags_HiddenInTypes (0x10) is set.</summary>
+    public bool IsHiddenInTypes { get; set; }
+    /// <summary>Raw property flags bitfield (PropFlags_*), for reference.</summary>
+    public int Flags { get; set; }
+    /// <summary>True when the node is an array.</summary>
+    public bool IsArray { get; set; }
+    /// <summary>Number of array elements (only when <see cref="IsArray"/>).</summary>
+    public int? ArraySize { get; set; }
+    /// <summary>Number of named subproperties reported by the engine.</summary>
+    public int SubPropertyCount { get; set; }
+    /// <summary>True when children were cut off by a depth, element or node-budget cap.</summary>
+    public bool Truncated { get; set; }
+    /// <summary>Child nodes for containers/arrays; null for scalar leaves.</summary>
+    public List<PropertyNode>? Children { get; set; }
+}
+
 /// <summary>Description of a sequence parameter.</summary>
 public class ParameterInfo
 {

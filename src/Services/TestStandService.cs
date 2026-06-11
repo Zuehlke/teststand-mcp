@@ -136,6 +136,12 @@ public interface ITestStandService : IDisposable
     Task<List<VariableInfo>> GetFileGlobalsAsync(string sequenceFilePath);
     /// <summary>Returns all station global variables for the connected engine.</summary>
     Task<List<VariableInfo>> GetStationGlobalsAsync();
+    /// <summary>Recursively walks a property object (StationGlobals or a sequence file's
+    /// FileGlobals, optionally descending to a sub-path) into a <see cref="PropertyNode"/>
+    /// tree. Hidden subproperties are included by default and annotated via
+    /// <see cref="PropertyNode.IsHidden"/>; arrays and containers are expanded.</summary>
+    Task<PropertyNode> GetPropertyTreeAsync(string root, string? filePath, string? lookupString,
+        int maxDepth, bool includeHidden, int maxArrayElements);
     /// <summary>Sets the value of a file-global variable in the given sequence file.</summary>
     Task SetFileGlobalAsync(string sequenceFilePath, string variableName, object value);
     /// <summary>Sets the value of a station global variable.</summary>
@@ -1647,6 +1653,158 @@ public sealed class TestStandService : ITestStandService
     {
         EnsureConnected();
         return await Task.Run(() => { try { return MapVariables(GetStationGlobals()); } catch { return new List<VariableInfo>(); } });
+    }
+
+    // PropFlags bits we annotate (NationalInstruments.TestStand.Interop.API.PropertyFlags).
+    private const int PropFlags_Hidden         = 0x00000008;
+    private const int PropFlags_HiddenInTypes  = 0x00000010;
+
+    /// <inheritdoc/>
+    public async Task<PropertyNode> GetPropertyTreeAsync(string root, string? filePath,
+        string? lookupString, int maxDepth, bool includeHidden, int maxArrayElements)
+    {
+        EnsureConnected();
+        return await Task.Run(() =>
+        {
+            // Resolve the starting property object for the requested root.
+            NiPropertyObject start;
+            string rootLabel;
+            if (string.Equals(root, "FileGlobals", StringComparison.OrdinalIgnoreCase))
+            {
+                if (string.IsNullOrWhiteSpace(filePath))
+                    throw new ArgumentException("root='FileGlobals' requires 'file_path'.");
+                start     = GetFileGlobals(GetOrLoadSeqFile(filePath));
+                rootLabel = "FileGlobals";
+            }
+            else if (string.Equals(root, "SequenceFile", StringComparison.OrdinalIgnoreCase))
+            {
+                if (string.IsNullOrWhiteSpace(filePath))
+                    throw new ArgumentException("root='SequenceFile' requires 'file_path'.");
+                // AsPropertyObject() exposes the ENTIRE sequence file as a property tree:
+                // every sequence, step, parameter and (often hidden) engine property.
+                start     = (NiPropertyObject)(object)
+                            ((NiSequenceFile)(object)GetOrLoadSeqFile(filePath)).AsPropertyObject();
+                rootLabel = System.IO.Path.GetFileName(filePath);
+            }
+            else
+            {
+                start     = GetStationGlobals();
+                rootLabel = "StationGlobals";
+            }
+
+            // Optionally descend to a sub-path before walking.
+            if (!string.IsNullOrWhiteSpace(lookupString))
+            {
+                start     = (NiPropertyObject)(object)start.GetPropertyObject(lookupString, 0);
+                rootLabel = lookupString!;
+            }
+
+            // Hard cap on total nodes so a pathological (or cyclic) tree cannot run away,
+            // in addition to the per-branch depth and per-array element limits.
+            int budget = 200_000;
+            return BuildPropertyNode(start, rootLabel, 0, maxDepth, includeHidden,
+                Math.Max(0, maxArrayElements), ref budget);
+        });
+    }
+
+    // Recursively converts a PropertyObject into a PropertyNode. Enumeration via
+    // GetNumSubProperties/GetNthSubProperty returns ALL members regardless of the Hidden
+    // flag (that flag is purely a Sequence-Editor display concern), so hidden properties
+    // are included by default and only filtered out when includeHidden is false.
+    private PropertyNode BuildPropertyNode(NiPropertyObject po, string name, int depth,
+        int maxDepth, bool includeHidden, int maxArrayElements, ref int budget)
+    {
+        var node = new PropertyNode { Name = name };
+
+        try
+        {
+            int flags = po.GetFlags("", 0);
+            node.Flags           = flags;
+            node.IsHidden        = (flags & PropFlags_Hidden)        != 0;
+            node.IsHiddenInTypes = (flags & PropFlags_HiddenInTypes) != 0;
+        }
+        catch (Exception ex) { _logger.LogDebug(ex, "GetFlags failed for '{Name}'.", name); }
+
+        try { node.Type = po.GetTypeDisplayString("", 0); }
+        catch (Exception ex) { _logger.LogDebug(ex, "GetTypeDisplayString failed for '{Name}'.", name); }
+
+        int numSub = 0;
+        try { numSub = po.GetNumSubProperties(""); }
+        catch (Exception ex) { _logger.LogDebug(ex, "GetNumSubProperties failed for '{Name}'.", name); }
+        node.SubPropertyCount = numSub;
+
+        // Named members → container.
+        if (numSub > 0)
+        {
+            node.ValueType = "Container";
+            if (depth >= maxDepth) { node.Truncated = true; return node; }
+
+            var children = new List<PropertyNode>();
+            for (int i = 0; i < numSub; i++)
+            {
+                if (budget <= 0) { node.Truncated = true; break; }
+                try
+                {
+                    NiPropertyObject child = po.GetNthSubProperty("", i, 0);
+                    if (!includeHidden)
+                    {
+                        int cf = 0;
+                        try { cf = child.GetFlags("", 0); } catch { /* default: keep */ }
+                        if ((cf & PropFlags_Hidden) != 0) continue;
+                    }
+                    budget--;
+                    children.Add(BuildPropertyNode(child, SafeName(child, i), depth + 1,
+                        maxDepth, includeHidden, maxArrayElements, ref budget));
+                }
+                catch (Exception ex) { _logger.LogDebug(ex, "Sub-property {Index} of '{Name}' failed.", i, name); }
+            }
+            node.Children = children;
+            return node;
+        }
+
+        // No named members: it may be an array (indexed elements) or a scalar leaf.
+        int numElem = 0;
+        try { numElem = po.GetNumElements(); } catch { /* not an array */ }
+
+        if (numElem > 0)
+        {
+            node.ValueType = "Array";
+            node.IsArray   = true;
+            node.ArraySize = numElem;
+            if (depth >= maxDepth) { node.Truncated = true; return node; }
+
+            var children = new List<PropertyNode>();
+            int cap = maxArrayElements == 0 ? numElem : Math.Min(numElem, maxArrayElements);
+            for (int i = 0; i < cap; i++)
+            {
+                if (budget <= 0) { node.Truncated = true; break; }
+                try
+                {
+                    NiPropertyObject elem = po.GetPropertyObjectByOffset(i, 0);
+                    if (elem == null) break;
+                    budget--;
+                    children.Add(BuildPropertyNode(elem, $"[{i}]", depth + 1, maxDepth,
+                        includeHidden, maxArrayElements, ref budget));
+                }
+                catch (Exception ex) { _logger.LogDebug(ex, "Array element {Index} of '{Name}' failed.", i, name); }
+            }
+            if (cap < numElem) node.Truncated = true;
+            node.Children = children;
+            return node;
+        }
+
+        // Scalar leaf — read the value and infer its kind (mirrors TryGetValue's order).
+        try { node.Value = po.GetValNumber("", 0);  node.ValueType = "Number";  return node; } catch { }
+        try { node.Value = po.GetValBoolean("", 0); node.ValueType = "Boolean"; return node; } catch { }
+        try { node.Value = po.GetValString("", 0);  node.ValueType = "String";  return node; } catch { }
+        node.ValueType = "Empty";
+        return node;
+    }
+
+    private static string SafeName(NiPropertyObject po, int index)
+    {
+        try { var n = po.Name; if (!string.IsNullOrEmpty(n)) return n; } catch { }
+        return $"#{index}";
     }
 
     /// <inheritdoc/>
