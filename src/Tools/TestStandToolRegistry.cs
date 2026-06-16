@@ -205,16 +205,19 @@ public class TestStandToolRegistry
             ValidateSequencePlanAsync);
 
         Register("insert_local_variable",
-            "Insert a new local variable into a sequence. To create an ARRAY local (required " +
-            "before get_array_variable/set_array_element/resize_array_variable can be used), " +
-            "append '[]' to the type (e.g. 'number[]') or prefix 'array:' (e.g. 'array:string').",
+            "Insert a new local variable into a sequence. data_type accepts the builtins " +
+            "'string'/'number'/'boolean' OR the name of a custom data type / enum defined in the " +
+            "file (e.g. 'MyEnum') — anything that isn't a builtin is treated as a named type. " +
+            "To create an ARRAY local (required before get_array_variable/set_array_element/" +
+            "resize_array_variable can be used), append '[]' to the type (e.g. 'number[]') or " +
+            "prefix 'array:' (e.g. 'array:string').",
             s => s
                 .AddRequired("file_path", "string", "Path to the sequence file")
                 .AddRequired("sequence_name", "string", "Name of the sequence")
                 .AddRequired("variable_name", "string", "Name of the local variable")
                 .AddRequired("data_type", "string",
-                    "Data type: 'string', 'number', 'boolean'. Append '[]' (or prefix 'array:') " +
-                    "for an array, e.g. 'number[]', 'array:string'.")
+                    "Data type: 'string', 'number', 'boolean', or the name of a custom/enum type " +
+                    "in the file. Append '[]' (or prefix 'array:') for an array, e.g. 'number[]'.")
                 .AddOptional("default_value", "string", "Optional default value"),
             InsertLocalVariableAsync);
 
@@ -1478,6 +1481,90 @@ public class TestStandToolRegistry
                 .AddRequired("file_path", "string", "Path to the sequence file")
                 .AddRequired("type_name", "string", "Name of the data type to delete"),
             DeleteDataTypeAsync);
+
+        // ── Enumeration Data Types ─────────────────────────────────────────────
+        // An enum is a data type with named numeric constants (name → value). It is stored in
+        // the sequence file alongside other custom data types (visible via get_data_types,
+        // removable via delete_data_type or delete_enum). Values are populated/replaced via the
+        // engine's UpdateEnumerators mechanism; auto-values are assigned when 'value' is omitted.
+
+        Register("create_enum",
+            "Create a new enumeration data type (named numeric constants) in a sequence file. " +
+            "Each value is {name, value?}; when 'value' is omitted it is auto-assigned C-style " +
+            "(previous + 1, starting at 0). Pass an empty 'values' list to create an empty enum " +
+            "and add constants later with add_enum_value.",
+            s => s
+                .AddRequired("file_path", "string", "Path to the sequence file")
+                .AddRequired("enum_name", "string", "Name of the new enum data type")
+                .AddArray("values",
+                    "Initial enumerators. Each item: {name (required), value (optional number)}.",
+                    item => item
+                        .AddRequired("name", "string", "Enumerator name (label)")
+                        .AddOptional("value", "number", "Numeric value (auto-assigned if omitted)"),
+                    required: false)
+                .AddOptional("save", "boolean", "Save the file (default true)", true),
+            CreateEnumAsync);
+
+        Register("get_enum_values",
+            "List the constants (name → numeric value) of an enumeration data type, in order.",
+            s => s
+                .AddRequired("file_path", "string", "Path to the sequence file")
+                .AddRequired("enum_name", "string", "Name of the enum data type"),
+            GetEnumValuesAsync);
+
+        Register("set_enum_values",
+            "Replace the ENTIRE constant list of an enum data type. Each value is {name, value?} " +
+            "(value auto-assigned C-style when omitted). Any existing constant not in the list is removed.",
+            s => s
+                .AddRequired("file_path", "string", "Path to the sequence file")
+                .AddRequired("enum_name", "string", "Name of the enum data type")
+                .AddArray("values",
+                    "The full new enumerator list. Each item: {name (required), value (optional number)}.",
+                    item => item
+                        .AddRequired("name", "string", "Enumerator name (label)")
+                        .AddOptional("value", "number", "Numeric value (auto-assigned if omitted)"))
+                .AddOptional("save", "boolean", "Save the file (default true)", true),
+            SetEnumValuesAsync);
+
+        Register("add_enum_value",
+            "Add a single constant to an enum data type. When 'value' is omitted it defaults to " +
+            "the current maximum value + 1 (or 0 for an empty enum).",
+            s => s
+                .AddRequired("file_path", "string", "Path to the sequence file")
+                .AddRequired("enum_name", "string", "Name of the enum data type")
+                .AddRequired("value_name", "string", "Name of the new enumerator")
+                .AddOptional("value", "number", "Numeric value (auto-assigned if omitted)")
+                .AddOptional("save", "boolean", "Save the file (default true)", true),
+            AddEnumValueAsync);
+
+        Register("remove_enum_value",
+            "Remove a single constant (by name) from an enum data type.",
+            s => s
+                .AddRequired("file_path", "string", "Path to the sequence file")
+                .AddRequired("enum_name", "string", "Name of the enum data type")
+                .AddRequired("value_name", "string", "Name of the enumerator to remove")
+                .AddOptional("save", "boolean", "Save the file (default true)", true),
+            RemoveEnumValueAsync);
+
+        Register("rename_enum_value",
+            "Rename a single constant of an enum data type (uses OldEnumeratorName so the rename " +
+            "maps cleanly to the existing enumerator). Optionally change its numeric value too.",
+            s => s
+                .AddRequired("file_path", "string", "Path to the sequence file")
+                .AddRequired("enum_name", "string", "Name of the enum data type")
+                .AddRequired("old_name", "string", "Current enumerator name")
+                .AddRequired("new_name", "string", "New enumerator name")
+                .AddOptional("value", "number", "New numeric value (kept unchanged if omitted)")
+                .AddOptional("save", "boolean", "Save the file (default true)", true),
+            RenameEnumValueAsync);
+
+        Register("delete_enum",
+            "Delete an enumeration data type from a sequence file.",
+            s => s
+                .AddRequired("file_path", "string", "Path to the sequence file")
+                .AddRequired("enum_name", "string", "Name of the enum data type to delete")
+                .AddOptional("save", "boolean", "Save the file (default true)", true),
+            DeleteEnumAsync);
 
         // ── Module Parameter Operations ────────────────────────────────────────
 
@@ -3795,6 +3882,106 @@ public class TestStandToolRegistry
         await _ts.DeleteDataTypeAsync(filePath, typeName);
         return Ok($"Data type '{typeName}' deleted from '{filePath}'.");
     }
+
+    // ── Enum Handlers ─────────────────────────────────────────────────────────
+
+    private async Task<CallToolResult> CreateEnumAsync(JsonElement? args)
+    {
+        var filePath = args!.Value.GetRequiredString("file_path");
+        var enumName = args!.Value.GetRequiredString("enum_name");
+        var values   = ExtractEnumValues(args!.Value, "values");
+        var save     = args!.Value.GetBoolOrDefault("save", true);
+        var info     = await _ts.CreateEnumAsync(filePath, enumName, values, save);
+        return OkJson(info);
+    }
+
+    private async Task<CallToolResult> GetEnumValuesAsync(JsonElement? args)
+    {
+        var filePath = args!.Value.GetRequiredString("file_path");
+        var enumName = args!.Value.GetRequiredString("enum_name");
+        var info     = await _ts.GetEnumValuesAsync(filePath, enumName);
+        return OkJson(info);
+    }
+
+    private async Task<CallToolResult> SetEnumValuesAsync(JsonElement? args)
+    {
+        var filePath = args!.Value.GetRequiredString("file_path");
+        var enumName = args!.Value.GetRequiredString("enum_name");
+        var values   = ExtractEnumValues(args!.Value, "values");
+        var save     = args!.Value.GetBoolOrDefault("save", true);
+        var info     = await _ts.SetEnumValuesAsync(filePath, enumName, values, save);
+        return OkJson(info);
+    }
+
+    private async Task<CallToolResult> AddEnumValueAsync(JsonElement? args)
+    {
+        var filePath  = args!.Value.GetRequiredString("file_path");
+        var enumName  = args!.Value.GetRequiredString("enum_name");
+        var valueName = args!.Value.GetRequiredString("value_name");
+        var value     = GetOptionalDouble(args!.Value, "value");
+        var save      = args!.Value.GetBoolOrDefault("save", true);
+        var info      = await _ts.AddEnumValueAsync(filePath, enumName, valueName, value, save);
+        return OkJson(info);
+    }
+
+    private async Task<CallToolResult> RemoveEnumValueAsync(JsonElement? args)
+    {
+        var filePath  = args!.Value.GetRequiredString("file_path");
+        var enumName  = args!.Value.GetRequiredString("enum_name");
+        var valueName = args!.Value.GetRequiredString("value_name");
+        var save      = args!.Value.GetBoolOrDefault("save", true);
+        var info      = await _ts.RemoveEnumValueAsync(filePath, enumName, valueName, save);
+        return OkJson(info);
+    }
+
+    private async Task<CallToolResult> RenameEnumValueAsync(JsonElement? args)
+    {
+        var filePath = args!.Value.GetRequiredString("file_path");
+        var enumName = args!.Value.GetRequiredString("enum_name");
+        var oldName  = args!.Value.GetRequiredString("old_name");
+        var newName  = args!.Value.GetRequiredString("new_name");
+        var value    = GetOptionalDouble(args!.Value, "value");
+        var save     = args!.Value.GetBoolOrDefault("save", true);
+        var info     = await _ts.RenameEnumValueAsync(filePath, enumName, oldName, newName, value, save);
+        return OkJson(info);
+    }
+
+    private async Task<CallToolResult> DeleteEnumAsync(JsonElement? args)
+    {
+        var filePath = args!.Value.GetRequiredString("file_path");
+        var enumName = args!.Value.GetRequiredString("enum_name");
+        var save     = args!.Value.GetBoolOrDefault("save", true);
+        await _ts.DeleteEnumAsync(filePath, enumName, save);
+        return Ok($"Enum '{enumName}' deleted from '{filePath}'.");
+    }
+
+    // Parses a 'values' array of enum constants — each item an object {name, value?}. When
+    // 'value' is omitted, assigns a C-style running value (previous + 1, starting at 0).
+    // internal (not private) so the engine-free auto-numbering logic can be unit-tested.
+    internal static List<EnumValueInfo> ExtractEnumValues(JsonElement args, string key)
+    {
+        var result = new List<EnumValueInfo>();
+        if (!args.TryGetProperty(key, out var arr) || arr.ValueKind != JsonValueKind.Array)
+            return result;
+        double next = 0;
+        foreach (var el in arr.EnumerateArray())
+        {
+            if (el.ValueKind != JsonValueKind.Object) continue;
+            string name  = el.TryGetProperty("name", out var n) ? (n.GetString() ?? "") : "";
+            double value = el.TryGetProperty("value", out var v) && v.ValueKind == JsonValueKind.Number
+                ? v.GetDouble()
+                : next;
+            result.Add(new EnumValueInfo { Name = name, Value = value });
+            next = value + 1;
+        }
+        return result;
+    }
+
+    // Reads an optional numeric argument, returning null when absent or not a JSON number.
+    private static double? GetOptionalDouble(JsonElement args, string key) =>
+        args.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.Number
+            ? v.GetDouble()
+            : (double?)null;
 
     // ── Module Parameter Handlers ─────────────────────────────────────────────
 
