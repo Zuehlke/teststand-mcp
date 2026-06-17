@@ -164,6 +164,28 @@ descriptions; the cross-cutting rules below apply regardless of which tool you c
 - **Always use `persist:false`** for test/experimental users — it edits only the
   in-memory users file and never touches `users.ini` on disk. (`T11`.)
 
+### Enumeration data types (create/modify/delete)
+Tools: `create_enum`, `get_enum_values`, `set_enum_values` (bulk replace),
+`add_enum_value`, `remove_enum_value`, `rename_enum_value`, `delete_enum`. An enum is a
+named numeric data type (name→value constants) stored **in the sequence file**. Values
+`{name, value?}`; an omitted `value` auto-assigns C-style (previous+1 from 0); `add` uses
+max+1. (`T22`.)
+- **An enum is a real named TypeDef, NOT a file-root subproperty.** `NewSubProperty(
+  PropValType_Enum)` is rejected ("Unrecognized value") and `UpdateEnumerators` on a plain
+  Number throws ("Expected Enumeration, found Number"). Create via `Engine.NewDataType(
+  PropValType_Enum)` → set `Name` → `TypeUsageList.InsertType(type, 0, CustomDataTypes)` →
+  `SetIsTypeAttachedToFile(idx, true)` (so it persists embedded) → `UpdateEnumerators`.
+  Because enums live in the **TypeUsageList**, they do NOT appear in `get_data_types`
+  (which lists file-root subproperties); use `get_enum_values`.
+- **Write vs read formats differ.** `UpdateEnumerators` takes an ARRAY of containers, each
+  with `EnumeratorName`/`EnumeratorValue` (+`OldEnumeratorName` for renames; it REPLACES the
+  whole list). But the `Enumerators` getter returns enum-TYPED values — read each one's name
+  with `GetValString("", PropOption_CoerceToString=128)` and number with `GetValNumber("",
+  PropOption_CoerceToNumber=64)`, else "Expected type String/Number. Found type <Enum>."
+- **Use typed interop, never `dynamic`, for `TypeUsageList`/`PropertyObject` here.** The C#
+  dynamic-COM binder throws `TargetParameterCountException` on `GetTypeDefinition` and
+  mis-binds others. A `var tul = ...` off a `dynamic sf` silently re-poisons the chain.
+
 ### Pre-build validation
 - `validate_sequence_plan` is engine-free; run it on the exact `steps` array before
   `insert_steps_bulk`. Error codes: `E_UNCLOSED_BLOCK`, `E_UNMATCHED_END`,

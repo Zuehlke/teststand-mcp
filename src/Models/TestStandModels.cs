@@ -447,6 +447,24 @@ public class DataTypePropertyInfo
     public string? Description { get; set; }
 }
 
+/// <summary>A single named constant of an enumeration data type (name → numeric value).</summary>
+public class EnumValueInfo
+{
+    /// <summary>Enumerator name (the label, stored as the EnumeratorName subproperty).</summary>
+    public string Name { get; set; } = "";
+    /// <summary>Numeric value of the enumerator (the EnumeratorValue subproperty).</summary>
+    public double Value { get; set; }
+}
+
+/// <summary>An enumeration data type and its ordered list of named constants.</summary>
+public class EnumInfo
+{
+    /// <summary>Enum data type name.</summary>
+    public string Name { get; set; } = "";
+    /// <summary>The enumerators (name → value pairs) in definition order.</summary>
+    public List<EnumValueInfo> Values { get; init; } = new();
+}
+
 // ── Log / Trace Models ───────────────────────────────────────────────────────
 
 /// <summary>A single execution-log entry.</summary>

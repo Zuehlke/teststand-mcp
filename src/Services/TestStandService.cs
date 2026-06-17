@@ -13,6 +13,8 @@ using NiSequence          = NationalInstruments.TestStand.Interop.API.Sequence;
 using NiStep              = NationalInstruments.TestStand.Interop.API.Step;
 using NiPropertyObject    = NationalInstruments.TestStand.Interop.API.PropertyObject;
 using NiPropValueTypes    = NationalInstruments.TestStand.Interop.API.PropertyValueTypes;
+using NiTypeCategories    = NationalInstruments.TestStand.Interop.API.TypeCategories;
+using NiTypeUsageList     = NationalInstruments.TestStand.Interop.API.TypeUsageList;
 using NiEngine            = NationalInstruments.TestStand.Interop.API.Engine;
 using NiConflictHandler   = NationalInstruments.TestStand.Interop.API.TypeConflictHandlerTypes;
 using NiExecution         = NationalInstruments.TestStand.Interop.API.Execution;
@@ -500,6 +502,27 @@ public interface ITestStandService : IDisposable
         string baseType = "Object");
     /// <summary>Deletes the named custom data type from the specified sequence file.</summary>
     Task DeleteDataTypeAsync(string filePath, string typeName);
+
+    // ── Enumeration Data Types ───────────────────────────────────────────────
+    /// <summary>Creates a new enumeration data type with the given name→value constants.</summary>
+    Task<EnumInfo> CreateEnumAsync(string filePath, string enumName,
+        IReadOnlyList<EnumValueInfo> values, bool save = true);
+    /// <summary>Returns the named enum's constants (name → numeric value) in definition order.</summary>
+    Task<EnumInfo> GetEnumValuesAsync(string filePath, string enumName);
+    /// <summary>Replaces the entire enumerator list of the named enum.</summary>
+    Task<EnumInfo> SetEnumValuesAsync(string filePath, string enumName,
+        IReadOnlyList<EnumValueInfo> values, bool save = true);
+    /// <summary>Appends a single enumerator to the named enum (auto-value = max+1 when omitted).</summary>
+    Task<EnumInfo> AddEnumValueAsync(string filePath, string enumName,
+        string valueName, double? value = null, bool save = true);
+    /// <summary>Removes a single enumerator (by name) from the named enum.</summary>
+    Task<EnumInfo> RemoveEnumValueAsync(string filePath, string enumName,
+        string valueName, bool save = true);
+    /// <summary>Renames an enumerator (via OldEnumeratorName), optionally changing its value.</summary>
+    Task<EnumInfo> RenameEnumValueAsync(string filePath, string enumName,
+        string oldName, string newName, double? value = null, bool save = true);
+    /// <summary>Deletes the named enum data type from the specified sequence file.</summary>
+    Task DeleteEnumAsync(string filePath, string enumName, bool save = true);
 
     // Module Parameter Operations
     /// <summary>Returns the code-module parameters for the specified step.</summary>
@@ -2322,28 +2345,30 @@ public sealed class TestStandService : ITestStandService
 
             var seq = sf.GetSequenceByName(sequenceName);
 
-            // Detect array suffix: "number[]", "string[]", "array:number", etc.
-            string rawType  = dataType.ToLowerInvariant().Trim();
-            bool   isArray  = rawType.EndsWith("[]") || rawType.StartsWith("array:");
-            string baseDataType = isArray
-                ? rawType.Replace("[]", "").Replace("array:", "").Trim()
-                : rawType;
+            // Detect array suffix: "number[]", "string[]", "array:number", etc. Keep the original
+            // case of the base type — named types (e.g. an enum) are looked up case-sensitively.
+            string rawType = dataType.Trim();
+            bool   isArray = rawType.EndsWith("[]") ||
+                             rawType.StartsWith("array:", StringComparison.OrdinalIgnoreCase);
+            string baseDataType = rawType;
+            if (baseDataType.EndsWith("[]")) baseDataType = baseDataType[..^2].Trim();
+            if (baseDataType.StartsWith("array:", StringComparison.OrdinalIgnoreCase))
+                baseDataType = baseDataType.Substring("array:".Length).Trim();
 
-            int propType = baseDataType switch
+            // Builtins map to their PropertyValueType; anything else is treated as a NAMED type
+            // (PropValType_NamedType=4) — e.g. an enum or custom data type defined in the file.
+            int propType; string typeNameParam = "";
+            switch (baseDataType.ToLowerInvariant())
             {
-                "string"  => 1,
-                "boolean" => 2,
-                "bool"    => 2,
-                "number"  => 3,
-                "double"  => 3,
-                "float"   => 3,
-                "int"     => 3,
-                "integer" => 3,
-                _         => 1  // default: string
-            };
+                case "string":                                          propType = 1; break;
+                case "boolean": case "bool":                            propType = 2; break;
+                case "number": case "double": case "float":
+                case "int":    case "integer":                          propType = 3; break;
+                default:        propType = 4; typeNameParam = baseDataType; break;
+            }
 
             // NewSubProperty(lookupString, valueType, asArray, typeName, options)
-            seq.Locals.NewSubProperty(variableName, (NiPropValueTypes)propType, isArray, "", 0);
+            seq.Locals.NewSubProperty(variableName, (NiPropValueTypes)propType, isArray, typeNameParam, 0);
 
             if (defaultValue != null)
             {
@@ -7677,6 +7702,260 @@ public sealed class TestStandService : ITestStandService
             sfPo.DeleteSubProperty((object)typeName, (object)0);
             SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
             _loadedSequenceFiles[filePath] = sf;
+        });
+    }
+
+    // ── Enumeration Data Types ────────────────────────────────────────────────
+    //
+    // An enum is a NAMED data type (TypeDef), NOT an anonymous subproperty: TestStand rejects
+    // NewSubProperty(PropValType_Enum) with "Unrecognized value", and UpdateEnumerators rejects
+    // a plain Number ("Expected Enumeration, found Number"). The supported route (per NI's API
+    // docs) is: Engine.NewDataType(PropValType_Enum) → set Name → UpdateEnumerators → register
+    // in the file's TypeUsageList as a custom data type, attached so it persists in the .seq.
+    //
+    // UpdateEnumerators takes an ARRAY of containers — each element carrying the subproperties
+    // "EnumeratorName" (string), "EnumeratorValue" (number) and optionally "OldEnumeratorName"
+    // (for renames). The array is built with Engine.NewPropertyObject(PropValType_Container,
+    // asArray:true). UpdateEnumerators REPLACES the whole list, so add/remove/rename read the
+    // current set, mutate it, and write the full list back.
+
+    // PropertyOptions.PropOption_InsertIfMissing — creates the subproperty if absent when set.
+    private const int PropOption_InsertIfMissing = 1;
+    // Coercion flags: the Enumerators getter returns enum-TYPED values; to read each one's
+    // underlying number / display name (TestStand otherwise rejects with "Expected type Number/
+    // String. Found type <Enum>."), pass these to GetValNumber / GetValString respectively.
+    private const int PropOption_CoerceToNumber = 64;
+    private const int PropOption_CoerceToString = 128;
+
+    /// <summary>
+    /// Builds an enumerators array (the argument for PropertyObject.UpdateEnumerators) from a list
+    /// of (name, value, oldName) tuples. oldName, when non-empty, renames an existing enumerator.
+    /// Typed interop calls are used throughout — the C# dynamic-COM binder mishandles several of
+    /// these methods (TargetParameterCountException / wrong overload resolution).
+    /// </summary>
+    private NiPropertyObject BuildEnumeratorArray(IReadOnlyList<(string name, double value, string? oldName)> items)
+    {
+        // Array of containers; each element gets EnumeratorName/EnumeratorValue subproperties.
+        NiPropertyObject arr = _engine!.NewPropertyObject(
+            NiPropValueTypes.PropValType_Container, true, "", 0);
+        arr.SetNumElements(items.Count, 0);
+        for (int i = 0; i < items.Count; i++)
+        {
+            NiPropertyObject elem = arr.GetPropertyObjectByOffset(i, 0);
+            elem.SetValString("EnumeratorName",  PropOption_InsertIfMissing, items[i].name ?? "");
+            elem.SetValNumber("EnumeratorValue", PropOption_InsertIfMissing, items[i].value);
+            if (!string.IsNullOrEmpty(items[i].oldName))
+                elem.SetValString("OldEnumeratorName", PropOption_InsertIfMissing, items[i].oldName!);
+        }
+        return arr;
+    }
+
+    /// <summary>Reads the enumerators (name → value) of an enum type/property, in definition order.</summary>
+    private List<EnumValueInfo> ReadEnumerators(NiPropertyObject enumProp)
+    {
+        var result = new List<EnumValueInfo>();
+        NiPropertyObject? arr;
+        try { arr = enumProp.Enumerators; }
+        catch (Exception ex) { _logger.LogDebug(ex, "Property has no Enumerators (not an enum?)."); return result; }
+        if (arr == null) return result;
+
+        int count;
+        try { count = arr.GetNumElements(); }
+        catch (Exception ex) { _logger.LogDebug(ex, "Failed to read enumerator element count."); return result; }
+
+        for (int i = 0; i < count; i++)
+        {
+            try
+            {
+                // Each element is an enum-typed value; coerce to read its name + numeric value.
+                NiPropertyObject elem = arr.GetPropertyObjectByOffset(i, 0);
+                result.Add(new EnumValueInfo
+                {
+                    Name  = elem.GetValString("", PropOption_CoerceToString),
+                    Value = elem.GetValNumber("", PropOption_CoerceToNumber),
+                });
+            }
+            catch (Exception ex) { _logger.LogDebug(ex, "Failed to read enumerator at index {Index}.", i); }
+        }
+        return result;
+    }
+
+    // The file's type usage list (where custom data types — including enums — are stored).
+    private static NiTypeUsageList GetTypeUsageList(dynamic sf) =>
+        ((PropertyObjectFile)(object)sf.AsPropertyObjectFile()).TypeUsageList;
+
+    // Resolves the enum TYPE definition from the file's type usage list, throwing a clear error
+    // when it is missing. GetTypeIndex returns -1 (or throws) for an unknown type name.
+    private NiPropertyObject ResolveEnumType(NiTypeUsageList tul, string enumName, string filePath)
+    {
+        int idx = -1;
+        try { idx = tul.GetTypeIndex(enumName); }
+        catch (Exception ex) { _logger.LogDebug(ex, "GetTypeIndex failed for enum '{Enum}'.", enumName); }
+        if (idx < 0)
+            throw new InvalidOperationException(
+                $"Enum '{enumName}' not found in '{Path.GetFileName(filePath)}'.");
+        return tul.GetTypeDefinition(idx);
+    }
+
+    /// <inheritdoc/>
+    public async Task<EnumInfo> CreateEnumAsync(string filePath, string enumName,
+        IReadOnlyList<EnumValueInfo> values, bool save = true)
+    {
+        EnsureConnected();
+        return await Task.Run(() =>
+        {
+            var sf  = GetOrLoadSeqFile(filePath);
+            NiTypeUsageList tul = GetTypeUsageList(sf);
+
+            // Create a named enumeration TYPE, register it in the file (attached so the definition
+            // persists embedded in the .seq), then populate the file-owned type's enumerators.
+            NiPropertyObject created = _engine!.NewDataType(NiPropValueTypes.PropValType_Enum, false, "", 0);
+            created.Name = enumName;
+            tul.InsertType(created, 0, NiTypeCategories.TypeCategory_CustomDataTypes);
+            int idx = tul.GetTypeIndex(enumName);
+            if (idx >= 0) tul.SetIsTypeAttachedToFile(idx, true);
+
+            NiPropertyObject stored = tul.GetTypeDefinition(idx);
+            var items = values.Select(v => (v.Name, v.Value, (string?)null)).ToList();
+            stored.UpdateEnumerators(BuildEnumeratorArray(items));
+            ((PropertyObjectFile)(object)sf.AsPropertyObjectFile()).IncChangeCount();
+
+            if (save) { SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath); _loadedSequenceFiles[filePath] = sf; }
+            return new EnumInfo { Name = enumName, Values = ReadEnumerators(stored) };
+        });
+    }
+
+    /// <inheritdoc/>
+    public async Task<EnumInfo> GetEnumValuesAsync(string filePath, string enumName)
+    {
+        EnsureConnected();
+        return await Task.Run(() =>
+        {
+            var sf  = GetOrLoadSeqFile(filePath);
+            NiTypeUsageList tul = GetTypeUsageList(sf);
+            return new EnumInfo { Name = enumName, Values = ReadEnumerators(ResolveEnumType(tul, enumName, filePath)) };
+        });
+    }
+
+    /// <inheritdoc/>
+    public async Task<EnumInfo> SetEnumValuesAsync(string filePath, string enumName,
+        IReadOnlyList<EnumValueInfo> values, bool save = true)
+    {
+        EnsureConnected();
+        return await Task.Run(() =>
+        {
+            var sf  = GetOrLoadSeqFile(filePath);
+            NiTypeUsageList tul = GetTypeUsageList(sf);
+            NiPropertyObject enumType = ResolveEnumType(tul, enumName, filePath);
+
+            var items = values.Select(v => (v.Name, v.Value, (string?)null)).ToList();
+            enumType.UpdateEnumerators(BuildEnumeratorArray(items));
+            ((PropertyObjectFile)(object)sf.AsPropertyObjectFile()).IncChangeCount();
+
+            if (save) { SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath); _loadedSequenceFiles[filePath] = sf; }
+            return new EnumInfo { Name = enumName, Values = ReadEnumerators(enumType) };
+        });
+    }
+
+    /// <inheritdoc/>
+    public async Task<EnumInfo> AddEnumValueAsync(string filePath, string enumName,
+        string valueName, double? value = null, bool save = true)
+    {
+        EnsureConnected();
+        return await Task.Run(() =>
+        {
+            var sf  = GetOrLoadSeqFile(filePath);
+            NiTypeUsageList tul = GetTypeUsageList(sf);
+            NiPropertyObject enumType = ResolveEnumType(tul, enumName, filePath);
+
+            List<EnumValueInfo> current = ReadEnumerators(enumType);
+            double newVal = value ?? (current.Count == 0 ? 0 : current.Max(c => c.Value) + 1);
+
+            var items = current.Select(v => (v.Name, v.Value, (string?)v.Name)).ToList();
+            items.Add((valueName, newVal, (string?)null));
+            enumType.UpdateEnumerators(BuildEnumeratorArray(items));
+            ((PropertyObjectFile)(object)sf.AsPropertyObjectFile()).IncChangeCount();
+
+            if (save) { SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath); _loadedSequenceFiles[filePath] = sf; }
+            return new EnumInfo { Name = enumName, Values = ReadEnumerators(enumType) };
+        });
+    }
+
+    /// <inheritdoc/>
+    public async Task<EnumInfo> RemoveEnumValueAsync(string filePath, string enumName,
+        string valueName, bool save = true)
+    {
+        EnsureConnected();
+        return await Task.Run(() =>
+        {
+            var sf  = GetOrLoadSeqFile(filePath);
+            NiTypeUsageList tul = GetTypeUsageList(sf);
+            NiPropertyObject enumType = ResolveEnumType(tul, enumName, filePath);
+
+            List<EnumValueInfo> current = ReadEnumerators(enumType);
+            if (!current.Any(v => v.Name == valueName))
+                throw new InvalidOperationException(
+                    $"Enumerator '{valueName}' not found in enum '{enumName}'.");
+
+            // Map surviving enumerators by old name so identity is preserved across the update.
+            var items = current.Where(v => v.Name != valueName)
+                               .Select(v => (v.Name, v.Value, (string?)v.Name)).ToList();
+            enumType.UpdateEnumerators(BuildEnumeratorArray(items));
+            ((PropertyObjectFile)(object)sf.AsPropertyObjectFile()).IncChangeCount();
+
+            if (save) { SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath); _loadedSequenceFiles[filePath] = sf; }
+            return new EnumInfo { Name = enumName, Values = ReadEnumerators(enumType) };
+        });
+    }
+
+    /// <inheritdoc/>
+    public async Task<EnumInfo> RenameEnumValueAsync(string filePath, string enumName,
+        string oldName, string newName, double? value = null, bool save = true)
+    {
+        EnsureConnected();
+        return await Task.Run(() =>
+        {
+            var sf  = GetOrLoadSeqFile(filePath);
+            NiTypeUsageList tul = GetTypeUsageList(sf);
+            NiPropertyObject enumType = ResolveEnumType(tul, enumName, filePath);
+
+            List<EnumValueInfo> current = ReadEnumerators(enumType);
+            if (!current.Any(v => v.Name == oldName))
+                throw new InvalidOperationException(
+                    $"Enumerator '{oldName}' not found in enum '{enumName}'.");
+
+            // The renamed element carries OldEnumeratorName=oldName so TestStand maps it to the
+            // existing enumerator; unchanged elements map by their (current) name.
+            var items = current.Select(v => v.Name == oldName
+                ? (newName, value ?? v.Value, (string?)oldName)
+                : (v.Name,  v.Value,          (string?)v.Name)).ToList();
+            enumType.UpdateEnumerators(BuildEnumeratorArray(items));
+            ((PropertyObjectFile)(object)sf.AsPropertyObjectFile()).IncChangeCount();
+
+            if (save) { SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath); _loadedSequenceFiles[filePath] = sf; }
+            return new EnumInfo { Name = enumName, Values = ReadEnumerators(enumType) };
+        });
+    }
+
+    /// <inheritdoc/>
+    public async Task DeleteEnumAsync(string filePath, string enumName, bool save = true)
+    {
+        EnsureConnected();
+        await Task.Run(() =>
+        {
+            var sf  = GetOrLoadSeqFile(filePath);
+            NiTypeUsageList tul = GetTypeUsageList(sf);
+
+            int idx = -1;
+            try { idx = tul.GetTypeIndex(enumName); }
+            catch (Exception ex) { _logger.LogDebug(ex, "GetTypeIndex failed for enum '{Enum}'.", enumName); }
+            if (idx < 0)
+                throw new InvalidOperationException(
+                    $"Enum '{enumName}' not found in '{Path.GetFileName(filePath)}'.");
+
+            tul.RemoveType(idx);
+            ((PropertyObjectFile)(object)sf.AsPropertyObjectFile()).IncChangeCount();
+            if (save) { SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath); _loadedSequenceFiles[filePath] = sf; }
         });
     }
 
