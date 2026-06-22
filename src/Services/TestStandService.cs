@@ -482,6 +482,11 @@ public interface ITestStandService : IDisposable
     // Callbacks
     /// <summary>Returns all callbacks defined in the specified sequence file.</summary>
     Task<List<CallbackInfo>> GetCallbacksAsync(string filePath);
+    /// <summary>Adds an override of a model/engine callback (e.g. "PreUUT", "PostUUT") to the
+    /// sequence file — same as the editor's "Sequence File Callbacks → Add". When
+    /// <paramref name="copyDefaultSteps"/> is true the model's default steps are copied in (so e.g.
+    /// the "Call DoPreUUT" dialog step can then be set to Skip). Returns the override sequence name.</summary>
+    Task<string> AddCallbackOverrideAsync(string filePath, string callbackName, bool copyDefaultSteps = true);
 
     // File Properties
     /// <summary>Returns the file-level properties (comment, version, etc.) for the given sequence file.</summary>
@@ -1323,13 +1328,22 @@ public sealed class TestStandService : ITestStandService
                     ? cached
                     : _engine!.GetSequenceFileEx(sequenceFilePath, 0, (NiConflictHandler)4);
 
+                // Resolve process-model entry points (e.g. "Single Pass" / "Test UUTs", spaces/casing
+                // optional). A name that is NOT a sequence in the client file but IS a station-model
+                // entry point runs the client THROUGH the process model — which is what populates
+                // step results and generates the report. A normal client sequence name (e.g.
+                // "MainSequence") runs directly with no model. (NOTE: "Test UUTs" pauses headless,
+                // waiting for the UUT serial-number dialog that has no UI to answer it.)
+                var (model, modelEntry) = TryResolveModelEntryPoint(sf, entryPoint);
+                var effectiveEntry = modelEntry ?? entryPoint;
+
                 // NewExecution via typed IEngine interface to avoid COM argument-conversion issues.
-                // processModel=null means no process model; execTypeMask=0 = ExecTypeMask_Normal.
+                // execTypeMask=0 = ExecTypeMask_Normal.
                 var typedEngine = (NiEngine)_engine!;
                 dynamic exec = typedEngine.NewExecution(
-                    (NiSequenceFile)(object)sf,   // sequenceFile
-                    entryPoint,                    // sequenceName / entry-point
-                    null,                          // processModel (none)
+                    sf,                            // client sequence file
+                    effectiveEntry,                // client sequence name, or model entry-point sequence
+                    model,                         // process model file (null = run the sequence directly)
                     false,                         // breakAtFirstStep
                     0,                             // executionTypeMask = Normal
                     null,                          // sequenceArgs
@@ -1374,6 +1388,46 @@ public sealed class TestStandService : ITestStandService
                 throw;
             }
         });
+    }
+
+    /// <summary>
+    /// Resolves a process-model entry point. If <paramref name="entryPoint"/> is NOT a sequence in
+    /// the client file but IS a station-process-model entry-point sequence (e.g. "Single Pass" /
+    /// "Test UUTs" — spaces and casing optional), returns the model file plus the exact model entry
+    /// sequence name, so the client runs THROUGH the model (which is what populates step results and
+    /// the report). Returns (null, null) for a direct client-sequence run (the common case, e.g.
+    /// "MainSequence"). Direct runs pay only a GetSequenceIndex lookup — the model is not loaded.
+    /// </summary>
+    private (NiSequenceFile? model, string? entrySeq) TryResolveModelEntryPoint(
+        NiSequenceFile clientFile, string entryPoint)
+    {
+        // A name that exists in the client file is always a direct run — never the model.
+        try { if (clientFile.GetSequenceIndex(entryPoint) >= 0) return (null, null); }
+        catch (Exception ex) { _logger.LogDebug(ex, "GetSequenceIndex failed for '{Ep}'.", entryPoint); }
+
+        NiSequenceFile model;
+        try { model = ((NiEngine)_engine!).GetStationModelSequenceFile(out _); }
+        catch (Exception ex) { _logger.LogDebug(ex, "No station process model available."); return (null, null); }
+        if (model == null) return (null, null);
+
+        static string Norm(string s) =>
+            new string((s ?? "").Where(c => !char.IsWhiteSpace(c)).ToArray()).ToLowerInvariant();
+        string want = Norm(entryPoint);
+
+        string? exact = null, fuzzy = null;
+        int n = 0; try { n = model.NumSequences; } catch { /* best-effort */ }
+        for (int i = 0; i < n; i++)
+        {
+            NiSequence s;
+            try { s = model.GetSequence(i); } catch { continue; }
+            // Only real entry-point sequences carry an EntryPointNameExpression.
+            try { if (string.IsNullOrEmpty(s.EntryPointNameExpression)) continue; } catch { continue; }
+            string name; try { name = s.Name; } catch { continue; }
+            if (string.Equals(name, entryPoint, StringComparison.OrdinalIgnoreCase)) { exact = name; break; }
+            if (fuzzy == null && Norm(name) == want) fuzzy = name;
+        }
+        string? match = exact ?? fuzzy;
+        return match != null ? (model, match) : (null, null);
     }
 
     /// <inheritdoc/>
@@ -3284,6 +3338,28 @@ public sealed class TestStandService : ITestStandService
                 }
             }
             return result;
+        });
+    }
+
+    /// <inheritdoc/>
+    public async Task<string> AddCallbackOverrideAsync(string filePath, string callbackName,
+        bool copyDefaultSteps = true)
+    {
+        EnsureConnected();
+        return await Task.Run(() =>
+        {
+            var sf = (NiSequenceFile)(object)GetOrLoadSeqFile(filePath);
+            // Same as the editor's "Sequence File Callbacks → Add": creates an override sequence for
+            // the named model/engine callback in this file, optionally copying the model's default
+            // steps (so e.g. a "Call DoPreUUT" dialog step exists and can be set to Skip).
+            NiSequence cb = sf.CreateCallbackOverrideSequence(callbackName, copyDefaultSteps);
+            bool inFile = false;
+            try { inFile = sf.GetSequenceByName(callbackName) != null; }
+            catch (Exception ex) { _logger.LogDebug(ex, "Callback '{Cb}' not yet in file before insert.", callbackName); }
+            if (!inFile) sf.InsertSequence(cb);
+            SaveSequenceFileWithRetry(sf, filePath);
+            _loadedSequenceFiles[filePath] = sf;
+            return cb.Name;
         });
     }
 

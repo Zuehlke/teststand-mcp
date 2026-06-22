@@ -288,12 +288,18 @@ public class TestStandToolRegistry
 
         // Executions
         Register("start_execution",
-            "Start a TestStand execution. Returns an execution ID for polling.",
+            "Start a TestStand execution. Returns an execution ID for polling. A client sequence " +
+            "name (e.g. 'MainSequence') runs that sequence directly; a station process-model entry " +
+            "point ('Single Pass' or 'Test UUTs', spaces/casing optional) runs the client THROUGH " +
+            "the process model — which is what populates step results and generates the report. " +
+            "HEADLESS NOTE: 'Test UUTs' pauses waiting for the UUT serial-number dialog (no UI to " +
+            "answer it) — use 'Single Pass' for unattended runs.",
             s => s
                 .AddRequired("sequence_file_path", "string", "Path to the sequence file")
                 .AddRequired("entry_point", "string",
-                    "Entry point: 'SequentialPre', 'SequentialPost', 'SinglePass', 'TestUUTs', " +
-                    "or a custom sequence name")
+                    "A sequence name in the file (e.g. 'MainSequence') → runs directly; or a process-" +
+                    "model entry point 'Single Pass' / 'Test UUTs' (spaces/casing optional) → runs " +
+                    "the client through the process model.")
                 .AddOptional("parameters", "object",
                     "Optional key-value parameters passed to the execution"),
             StartExecutionAsync);
@@ -322,11 +328,13 @@ public class TestStandToolRegistry
             TerminateExecutionAsync);
 
         Register("run_sequence",
-            "Run a sequence synchronously and return the complete result. " +
-            "Convenience wrapper around start_execution + wait_for_execution.",
+            "Run a sequence synchronously and return the complete result. Convenience wrapper around " +
+            "start_execution + wait_for_execution. Also accepts a process-model entry point ('Single " +
+            "Pass' runs the client through the model and returns step results; 'Test UUTs' pauses " +
+            "headless and will hit the wait timeout).",
             s => s
                 .AddRequired("sequence_file_path", "string", "Path to the sequence file")
-                .AddRequired("sequence_name", "string", "Name of the sequence to run")
+                .AddRequired("sequence_name", "string", "Name of the sequence (or process-model entry point) to run")
                 .AddOptional("parameters", "object", "Optional execution parameters")
                 .AddOptional("timeout_seconds", "integer", "Timeout in seconds (default: 300)", 300),
             RunSequenceAsync);
@@ -1353,6 +1361,19 @@ public class TestStandToolRegistry
             "Get all callback sequences defined in a sequence file (based on the process model).",
             s => s.AddRequired("file_path", "string", "Path to the sequence file"),
             GetCallbacksAsync);
+
+        Register("add_callback_override",
+            "Add an override of a model/engine callback (e.g. 'PreUUT', 'PostUUT') to a sequence " +
+            "file — same as the editor's 'Sequence File Callbacks → Add'. With copy_default_steps " +
+            "true the model's default steps are copied in (e.g. the 'Call DoPreUUT' dialog step, " +
+            "which you can then set_step_run_mode to 'Skip' to run headless). The override lives " +
+            "only in this file, so the station process model stays unchanged.",
+            s => s
+                .AddRequired("file_path", "string", "Path to the sequence file")
+                .AddRequired("callback_name", "string", "Callback to override, e.g. 'PreUUT' / 'PostUUT'")
+                .AddOptional("copy_default_steps", "boolean",
+                    "Copy the model's default steps into the override (default true)", true),
+            AddCallbackOverrideAsync);
 
         // ── File Properties ───────────────────────────────────────────────────
 
@@ -3809,6 +3830,16 @@ public class TestStandToolRegistry
         var filePath = args!.Value.GetRequiredString("file_path");
         var callbacks = await _ts.GetCallbacksAsync(filePath);
         return OkJson(callbacks);
+    }
+
+    private async Task<CallToolResult> AddCallbackOverrideAsync(JsonElement? args)
+    {
+        var filePath     = args!.Value.GetRequiredString("file_path");
+        var callbackName = args!.Value.GetRequiredString("callback_name");
+        bool copyDefault = !(args!.Value.TryGetProperty("copy_default_steps", out var c)
+                             && c.ValueKind == JsonValueKind.False);
+        var name = await _ts.AddCallbackOverrideAsync(filePath, callbackName, copyDefault);
+        return Ok($"Added callback override '{name}' to the sequence file.");
     }
 
     // ── File Properties Handlers ──────────────────────────────────────────────

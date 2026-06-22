@@ -70,6 +70,22 @@ public class T21_NewToolDispatchTests : TestBase
     }
 
     [Test]
+    public async Task AddCallbackOverride_Tool_AddsCallbackWithDefaultSteps()
+    {
+        Assert.That(_registry.GetTools().Select(t => t.Name), Does.Contain("add_callback_override"));
+
+        await Ts.CreateSequenceFileAsync(TempSeqFile);
+        var r = await _registry.CallToolAsync("add_callback_override",
+            Args("{\"file_path\":" + J(TempSeqFile) + ",\"callback_name\":\"PreUUT\"}"));
+        Assert.That(r.IsError, Is.False, TextOf(r));
+
+        // The override must exist and carry the model's default "Call DoPreUUT" step (copy defaults).
+        var steps = await Ts.GetStepsAsync(TempSeqFile, "PreUUT");
+        Assert.That(steps.Any(s => s.Name.Contains("DoPreUUT")), Is.True,
+            "Override should include the default 'Call DoPreUUT' step");
+    }
+
+    [Test]
     public async Task EvaluateExpression_Tool_ReturnsComputedValue()
     {
         var r = await _registry.CallToolAsync("evaluate_expression",
