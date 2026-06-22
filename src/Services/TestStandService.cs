@@ -20,6 +20,8 @@ using NiConflictHandler   = NationalInstruments.TestStand.Interop.API.TypeConfli
 using NiExecution         = NationalInstruments.TestStand.Interop.API.Execution;
 using NiExecRunStates     = NationalInstruments.TestStand.Interop.API.ExecutionRunStates;
 using NiExecTermStates    = NationalInstruments.TestStand.Interop.API.ExecutionTerminationStates;
+using NiThread            = NationalInstruments.TestStand.Interop.API.Thread;
+using NiSequenceContext   = NationalInstruments.TestStand.Interop.API.SequenceContext;
 using NiStepGroups        = NationalInstruments.TestStand.Interop.API.StepGroups;
 using PropertyObjectFile  = NationalInstruments.TestStand.Interop.API.PropertyObjectFile;
 using NiWriteFileFormat   = NationalInstruments.TestStand.Interop.API.WriteFileFormat;
@@ -7477,28 +7479,33 @@ public sealed class TestStandService : ITestStandService
             $"Thread '{threadId}' not found in execution {executionId}.");
     }
 
-    private static ThreadInfo MapThreadInfo(dynamic thread, int index)
+    private static ThreadInfo MapThreadInfo(dynamic thread, int index, string execState = "")
     {
         var info = new ThreadInfo { ThreadIndex = index };
+        var t = (NiThread)thread;
+
         try { info.ThreadId = TryGetString(thread, "ID"); } catch (Exception) { /* best-effort: read thread ID — intentionally ignored */ }
         if (string.IsNullOrEmpty(info.ThreadId)) info.ThreadId = index.ToString();
 
-        try { info.State = MapExecutionState((int)thread.State); } catch (Exception) { /* best-effort: read thread State — intentionally ignored */ }
+        // TestStand's Thread has no own run-state property; report the owning execution's state
+        // (exact for the common single-thread case).
+        info.State = execState;
 
+        // Thread.GetSequenceContext takes (callStackIndex, out frameId). The old code called it via
+        // `dynamic` with a single arg, so the out-param never bound — it threw and the position
+        // fields came back empty even while the thread was parked on a step. Use the typed call;
+        // index 0 = the current (top) call-stack frame.
         try
         {
-            dynamic ctx = thread.GetSequenceContext((object)0);
-            try { info.CurrentStepName     = (string)ctx.Step.Name;  } catch (Exception) { /* best-effort: read current step name — intentionally ignored */ }
-            try { info.CurrentSequenceName = (string)ctx.Sequence.Name; } catch (Exception) { /* best-effort: read current sequence name — intentionally ignored */ }
-            try { info.CurrentFilePath     = (string)ctx.SequenceFile.Path; } catch (Exception) { /* best-effort: read current file path — intentionally ignored */ }
+            NiSequenceContext ctx = t.GetSequenceContext(0, out int _);
+            try { info.CurrentStepName     = ctx.Step.Name;         } catch (Exception) { /* no current step in this frame */ }
+            try { info.CurrentSequenceName = ctx.Sequence.Name;     } catch (Exception) { /* no current sequence in this frame */ }
+            try { info.CurrentFilePath     = ctx.SequenceFile.Path; } catch (Exception) { /* no sequence file in this frame */ }
         }
-        catch (Exception) { /* best-effort: get thread sequence context — intentionally ignored */ }
+        catch (Exception) { /* thread has no active call-stack frame (not currently in a sequence) */ }
 
-        try
-        {
-            info.StackDepth = Convert.ToInt32((object)thread.StackDepth);
-        }
-        catch (Exception) { /* best-effort: read thread stack depth — intentionally ignored */ }
+        // The depth property is CallStackSize (the old code used a non-existent "StackDepth").
+        try { info.StackDepth = t.CallStackSize; } catch (Exception) { /* best-effort: read call-stack size — intentionally ignored */ }
 
         return info;
     }
@@ -7513,6 +7520,7 @@ public sealed class TestStandService : ITestStandService
                 ?? throw new KeyNotFoundException($"Execution {executionId} not found.");
 
             var result = new List<ThreadInfo>();
+            string execState = MapExecutionState(GetExecutionRunState((object)exec));
             int numThreads = 0;
             try { numThreads = Convert.ToInt32((object)exec.NumThreads); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to get thread count in GetExecutionThreadsAsync."); }
 
@@ -7521,7 +7529,7 @@ public sealed class TestStandService : ITestStandService
                 try
                 {
                     dynamic t = exec.GetThread((object)i);
-                    result.Add(MapThreadInfo(t, i));
+                    result.Add(MapThreadInfo(t, i, execState));
                 }
                 catch (Exception ex) { _logger.LogDebug(ex, "Failed to map thread at index {Index}.", i); }
             }
@@ -7538,6 +7546,7 @@ public sealed class TestStandService : ITestStandService
             var exec = FindExecution(executionId)
                 ?? throw new KeyNotFoundException($"Execution {executionId} not found.");
 
+            string execState = MapExecutionState(GetExecutionRunState((object)exec));
             int numThreads = 0;
             try { numThreads = Convert.ToInt32((object)exec.NumThreads); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to get thread count in GetThreadStatusAsync."); }
 
@@ -7548,7 +7557,7 @@ public sealed class TestStandService : ITestStandService
                     dynamic t  = exec.GetThread((object)i);
                     string  id = TryGetString(t, "ID");
                     if (id == threadId || i.ToString() == threadId)
-                        return MapThreadInfo(t, i);
+                        return MapThreadInfo(t, i, execState);
                 }
                 catch (Exception ex) { _logger.LogDebug(ex, "Failed to read thread at index {Index} in GetThreadStatusAsync.", i); }
             }
@@ -7620,16 +7629,23 @@ public sealed class TestStandService : ITestStandService
         return await Task.Run(() =>
         {
             var thread = FindThread(executionId, threadId);
+            var t = (NiThread)thread;
             var frames = new List<CallStackFrame>();
 
+            // Depth is CallStackSize. The old code read a non-existent "StackDepth", so depth stayed
+            // 0, the loop never ran and this method ALWAYS returned an empty stack — exactly the bug
+            // fixed in MapThreadInfo. See memory teststand-getstates-reflection-fails.
             int depth = 0;
-            try { depth = Convert.ToInt32((object)thread.StackDepth); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to get thread stack depth."); }
+            try { depth = t.CallStackSize; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to get call-stack size."); }
 
             for (int d = 0; d < depth; d++)
             {
                 try
                 {
-                    dynamic ctx = thread.GetSequenceContext((object)d);
+                    // GetSequenceContext takes (callStackIndex, out frameId); the old single-arg
+                    // dynamic call threw (out-params don't bind through the dynamic binder). d=0 is
+                    // the current (top) frame; higher d walks up toward the entry point.
+                    NiSequenceContext ctx = t.GetSequenceContext(d, out int _);
                     var frame   = new CallStackFrame { Depth = d };
                     try { frame.SequenceName = (string)ctx.Sequence.Name;   } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read sequence name at stack depth {Depth}.", d); }
                     try { frame.FilePath     = (string)ctx.SequenceFile.Path; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read file path at stack depth {Depth}.", d); }

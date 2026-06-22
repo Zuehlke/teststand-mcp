@@ -14,6 +14,13 @@ public class T15_OutputUiMessageTests : TestBase
     {
         var unique = $"MCP_OUT_{Guid.NewGuid():N}";
 
+        // The engine's output-message list is global and accumulates across the whole test run.
+        // GetOutputMessagesAsync returns the FIRST N (oldest) entries, so once more than N messages
+        // have piled up from earlier tests the freshly-posted one falls outside the window. Clear
+        // first so this test is order-independent. (Separately: returning oldest-N from
+        // get_output_messages is questionable — most callers want the most recent N.)
+        await Ts.ClearOutputMessagesAsync();
+
         var posted = await Ts.PostOutputMessageAsync(unique, "MCPTest", "Warning");
         Assert.That(posted, Is.Not.Null);
         Assert.That(posted.Message, Does.Contain(unique));
