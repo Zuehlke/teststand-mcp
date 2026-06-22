@@ -18,6 +18,8 @@ using NiTypeUsageList     = NationalInstruments.TestStand.Interop.API.TypeUsageL
 using NiEngine            = NationalInstruments.TestStand.Interop.API.Engine;
 using NiConflictHandler   = NationalInstruments.TestStand.Interop.API.TypeConflictHandlerTypes;
 using NiExecution         = NationalInstruments.TestStand.Interop.API.Execution;
+using NiExecRunStates     = NationalInstruments.TestStand.Interop.API.ExecutionRunStates;
+using NiExecTermStates    = NationalInstruments.TestStand.Interop.API.ExecutionTerminationStates;
 using NiStepGroups        = NationalInstruments.TestStand.Interop.API.StepGroups;
 using PropertyObjectFile  = NationalInstruments.TestStand.Interop.API.PropertyObjectFile;
 using NiWriteFileFormat   = NationalInstruments.TestStand.Interop.API.WriteFileFormat;
@@ -680,6 +682,25 @@ public sealed class TestStandService : ITestStandService
     private readonly Dictionary<string, NiSequenceFile> _loadedSequenceFiles = new();
     private readonly Dictionary<string, NiExecution> _activeExecutions = new();
 
+    // ── Dedicated engine thread ────────────────────────────────────────────────
+    // The engine is created and owned by a single persistent thread that runs a continuous Windows
+    // message pump. TestStand posts execution-progress messages to a hidden window owned by the
+    // engine's creation thread, and an execution only advances while THAT thread pumps — so the
+    // engine must live on a stable, pumping thread, not a transient Task.Run thread. (Full
+    // analysis: memory teststand-execution-needs-waitforendex-pump.)
+    private Thread? _engineThread;
+    private volatile bool _enginePumpRunning;
+    private readonly ManualResetEventSlim _engineReady = new(false);
+    private volatile bool _engineConnected;
+    private Exception? _engineConnectError;
+
+    // Wait efficiently (no busy-spin) until a window message arrives or the timeout elapses; the
+    // PeekMessage/TranslateMessage/DispatchMessage P/Invokes + the PumpMessages() helper already
+    // exist further down in this file and are reused by the engine-thread pump loop.
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern uint MsgWaitForMultipleObjectsEx(uint nCount, IntPtr[]? pHandles, uint dwMilliseconds, uint dwWakeMask, uint dwFlags);
+    private const uint QS_ALLINPUT = 0x04FF;
+
 
     // Watch expressions are an editor/GUI concept not available in the engine API;
     // we keep them in memory so Claude can manage them across calls.
@@ -720,83 +741,143 @@ public sealed class TestStandService : ITestStandService
     /// <inheritdoc/>
     public async Task<bool> ConnectAsync(string? enginePath = null)
     {
-        return await Task.Run(() =>
+        if (_engine != null) return true;
+
+        _logger.LogInformation("Connecting to TestStand engine...");
+
+        // Create and OWN the engine on a single dedicated, persistent thread that runs a continuous
+        // message pump for the engine's whole lifetime. This is required for executions to run: the
+        // engine posts execution-progress messages to a hidden window owned by its creation thread,
+        // and a sequence only advances while that thread pumps. (A transient Task.Run thread, the
+        // old approach, is gone the instant ConnectAsync returns — so executions were created but
+        // never ran.) The engine is created MTA, so every other (non-execution) tool keeps calling
+        // it directly from its own Task.Run thread with no marshaling or serialization change.
+        _engineReady.Reset();
+        _enginePumpRunning = true;
+        _engineConnected = false;
+        _engineConnectError = null;
+
+        _engineThread = new Thread(() => EngineThreadProc(enginePath))
         {
-            try
+            IsBackground = true,
+            Name = "TestStand-Engine",
+        };
+        _engineThread.SetApartmentState(ApartmentState.MTA);
+        _engineThread.Start();
+
+        await Task.Run(() => _engineReady.Wait());
+
+        if (!_engineConnected)
+        {
+            _logger.LogError(_engineConnectError, "Failed to connect to TestStand engine");
+            _enginePumpRunning = false;
+            _engineThread = null;
+            return false;
+        }
+        _logger.LogInformation("Successfully connected to TestStand engine.");
+        return true;
+    }
+
+    /// <summary>
+    /// Body of the dedicated engine thread: create the engine (so its hidden message window is
+    /// owned by THIS thread), then run a continuous Windows message pump — that pump is what
+    /// advances executions — and finally tear the engine down on the same thread. Pumping has to
+    /// happen on the engine's creation thread; that is the only thread to which TestStand delivers
+    /// execution-progress messages. See memory teststand-execution-needs-waitforendex-pump.
+    /// </summary>
+    private void EngineThreadProc(string? enginePath)
+    {
+        try
+        {
+            var engineType = Type.GetTypeFromProgID("TestStand.Engine")
+                ?? throw new InvalidOperationException(
+                    "TestStand Engine COM server not found. Ensure NI TestStand is installed.");
+
+            _engine = (NiEngine)(Activator.CreateInstance(engineType)
+                ?? throw new InvalidOperationException("Failed to create TestStand Engine instance."));
+            System.Threading.Interlocked.Increment(ref _liveEngineCount);
+
+            // Load type palette files so step types (Label, Action, etc.) are available
+            try { _engine.LoadTypePaletteFiles(); }
+            catch (Exception ex) { _logger.LogWarning(ex, "Could not load type palette files"); }
+
+            _engineConnected = true;
+        }
+        catch (Exception ex)
+        {
+            _engineConnectError = ex;
+            _engineConnected = false;
+            _engineReady.Set();
+            return;
+        }
+        _engineReady.Set();
+
+        // Continuous message pump — THIS drives executions. MsgWaitForMultipleObjectsEx blocks
+        // (no busy-spin) until a window message arrives or the 100 ms backstop elapses, which also
+        // bounds how long disconnect waits for the loop to observe _enginePumpRunning == false.
+        while (_enginePumpRunning)
+        {
+            PumpMessages();   // drain all pending window messages (advances executions)
+            MsgWaitForMultipleObjectsEx(0, null, 100, QS_ALLINPUT, 0);
+        }
+
+        ShutDownEngineCore();
+    }
+
+    /// <summary>Tears the engine down ON the engine thread (the thread that created it).</summary>
+    private void ShutDownEngineCore()
+    {
+        // Release all loaded sequence file COM objects before shutting down the engine.
+        // Abandoning RCWs causes GC finalizer crashes when the engine is already gone.
+        foreach (var sf in _loadedSequenceFiles.Values)
+        {
+            try { System.Runtime.InteropServices.Marshal.ReleaseComObject(sf); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to release COM object for sequence file during disconnect."); }
+        }
+        _loadedSequenceFiles.Clear();
+        _activeExecutions.Clear();
+        _undoGroups.Clear();
+
+        if (_engine != null)
+        {
+            // Engine.ShutDown stops the engine's background threads. Pass final:true ONLY
+            // when this is the last live engine — that also shuts down NI licensing (the
+            // NILM helper) which otherwise keeps the host process alive and hangs exit.
+            // Passing final:true while another instance is still connected would break the
+            // shared engine, so transient instances use final:false.
+            bool isLast = System.Threading.Interlocked.Decrement(ref _liveEngineCount) <= 0;
+            try { _engine.ShutDown(isLast); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to shut down TestStand engine."); }
+
+            if (isLast)
             {
-                _logger.LogInformation("Connecting to TestStand engine...");
-
-                // Create TestStand Engine via COM
-                var engineType = Type.GetTypeFromProgID("TestStand.Engine");
-                if (engineType == null)
-                    throw new InvalidOperationException(
-                        "TestStand Engine COM server not found. Ensure NI TestStand is installed.");
-
-                _engine = (NiEngine)(Activator.CreateInstance(engineType)
-                    ?? throw new InvalidOperationException("Failed to create TestStand Engine instance."));
-                System.Threading.Interlocked.Increment(ref _liveEngineCount);
-
-                // Load type palette files so step types (Label, Action, etc.) are available
-                try { _engine.LoadTypePaletteFiles(); }
-                catch (Exception ex) { _logger.LogWarning(ex, "Could not load type palette files"); }
-
-                _logger.LogInformation("Successfully connected to TestStand engine.");
-                return true;
+                // Releasing the LAST engine's RCW synchronously triggers the NI License-Manager
+                // (NILM) teardown over COM/RPC to the out-of-process NilmCompatibilityServer, which
+                // can block for a long time (threads park in EventPairLow LPC waits) and stalls
+                // process shutdown. The engine has already been ShutDown and the process is ending,
+                // so we intentionally do NOT release the RCW and suppress its finalization.
+                try { GC.SuppressFinalize((object)_engine!); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to suppress finalizer on engine COM object."); }
             }
-            catch (Exception ex)
+            else
             {
-                _logger.LogError(ex, "Failed to connect to TestStand engine");
-                return false;
+                // Transient second engine: NILM stays alive (the primary engine holds it),
+                // so a full release is cheap and keeps the instance from leaking.
+                try { System.Runtime.InteropServices.Marshal.FinalReleaseComObject(_engine); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to release engine COM object RCW."); }
             }
-        });
+            _engine = null;
+        }
     }
 
     /// <inheritdoc/>
     public async Task DisconnectAsync()
     {
-        await Task.Run(() =>
-        {
-            // Release all loaded sequence file COM objects before shutting down the engine.
-            // Abandoning RCWs causes GC finalizer crashes when the engine is already gone.
-            foreach (var sf in _loadedSequenceFiles.Values)
-            {
-                try { System.Runtime.InteropServices.Marshal.ReleaseComObject(sf); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to release COM object for sequence file during disconnect."); }
-            }
-            _loadedSequenceFiles.Clear();
-            _activeExecutions.Clear();
+        var thread = _engineThread;
+        if (thread == null) return;
 
-            _undoGroups.Clear();
-
-            if (_engine != null)
-            {
-                // Engine.ShutDown stops the engine's background threads. Pass final:true ONLY
-                // when this is the last live engine — that also shuts down NI licensing (the
-                // NILM helper) which otherwise keeps the host process alive and hangs exit.
-                // Passing final:true while another instance is still connected would break the
-                // shared engine, so transient instances use final:false.
-                bool isLast = System.Threading.Interlocked.Decrement(ref _liveEngineCount) <= 0;
-                try { _engine.ShutDown(isLast); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to shut down TestStand engine."); }
-
-                if (isLast)
-                {
-                    // Releasing the LAST engine's RCW synchronously triggers the NI
-                    // License-Manager (NILM) teardown over COM/RPC to the out-of-process
-                    // NilmCompatibilityServer, which can block for a long time (threads park in
-                    // EventPairLow LPC waits) and stalls process shutdown. The engine has
-                    // already been ShutDown and the process is ending, so we intentionally do
-                    // NOT release the RCW and suppress its finalization — this avoids the
-                    // blocking COM teardown so the host can exit promptly.
-                    try { GC.SuppressFinalize((object)_engine!); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to suppress finalizer on engine COM object."); }
-                }
-                else
-                {
-                    // Transient second engine: NILM stays alive (the primary engine holds it),
-                    // so a full release is cheap and keeps the instance from leaking.
-                    try { System.Runtime.InteropServices.Marshal.FinalReleaseComObject(_engine); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to release engine COM object RCW."); }
-                }
-                _engine = null;
-            }
-        });
+        // Signal the pump loop to stop; the engine thread then tears the engine down on its own
+        // thread (where it was created) and exits. Bounded join so a stuck NILM teardown can't hang
+        // us indefinitely — the process hard-terminates on exit anyway.
+        _enginePumpRunning = false;
+        await Task.Run(() => thread.Join(TimeSpan.FromSeconds(30)));
+        _engineThread = null;
     }
 
     /// <inheritdoc/>
@@ -1262,13 +1343,22 @@ public sealed class TestStandService : ITestStandService
                     }
                 }
 
-                var execId = TryGetString(exec, "Id");
+                // Force a concrete string: TryGetString(dynamic,...) is dynamically dispatched, so
+                // `var` would infer `dynamic` and the pump's _logger.LogDebug(execId) below would
+                // fail to bind (extension methods cannot be dynamically dispatched).
+                string execId = TryGetString(exec, "Id");
                 if (string.IsNullOrEmpty(execId))
                     execId = ((object)exec).GetHashCode().ToString();
                 _executionStartTimes[execId] = DateTime.UtcNow;
                 _executionLogs[execId] = new List<LogEntry>();
                 _activeExecutions[execId] = exec;
 
+                // NOTE: the execution advances on its own from here because the dedicated engine
+                // thread (see ConnectAsync / EngineThreadProc) continuously pumps the Windows
+                // message queue of the thread that CREATED the engine — which is where TestStand
+                // posts execution-progress messages. Without that pump Engine.NewExecution creates
+                // an execution that never leaves the "Running" state and no step ever runs (the
+                // original bug). See memory teststand-execution-needs-waitforendex-pump.
                 return MapExecutionInfo(exec);
             }
             catch (Exception ex)
@@ -1300,11 +1390,13 @@ public sealed class TestStandService : ITestStandService
                     exec = FindExecution(executionId);
                 }
 
-                _activeExecutions.Remove(executionId);
-
+                // NOTE: the execution is intentionally NOT removed from _activeExecutions here.
+                // The background pump (see StartExecutionAsync) drives it to completion; this loop
+                // just observes the now-accurate run state. Keeping the completed execution around
+                // lets get_execution_results / get_execution_status work AFTER run_sequence returns.
                 if (exec == null)
                 {
-                    // Execution finished and was removed from the list
+                    // Execution was removed externally (e.g. terminate/abort) during the wait.
                     return new ExecutionResult
                     {
                         ExecutionId = executionId,
@@ -1346,7 +1438,14 @@ public sealed class TestStandService : ITestStandService
             var result = new List<ExecutionInfo>();
             foreach (var exec in _activeExecutions.Values)
             {
-                try { result.Add(MapExecutionInfo(exec)); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to map execution info entry in active executions list."); }
+                try
+                {
+                    // Completed executions are kept in _activeExecutions so their results stay
+                    // queryable, but "active" means Running(1)/Paused(2) only — skip Stopped(3).
+                    if (GetExecutionRunState((object)exec) == 3) continue;
+                    result.Add(MapExecutionInfo(exec));
+                }
+                catch (Exception ex) { _logger.LogDebug(ex, "Failed to map execution info entry in active executions list."); }
             }
             return result;
         });
@@ -2973,7 +3072,7 @@ public sealed class TestStandService : ITestStandService
         return result;
     }
 
-    // ── Legacy COM path (no longer called — kept for reference) ──────────────
+    // ── Win32 message pump (used by the dedicated engine thread to drive executions) ──
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     private static extern bool PeekMessage(out NativeMsg msg, IntPtr hWnd,
         uint wMsgFilterMin, uint wMsgFilterMax, uint wRemoveMsg);
@@ -3301,24 +3400,19 @@ public sealed class TestStandService : ITestStandService
     }
 
     /// <summary>
-    /// Call GetStates(out runState, out termState) via reflection so we can use out-params
-    /// from a dynamic reference without compiler errors.
-    /// runState: 1=Running, 2=Paused, 3=Stopped
+    /// Read the execution's run state via the TYPED Execution.GetStates(out,out) call.
+    /// runState: 1=Running, 2=Paused, 3=Stopped.
+    /// (Reflection InvokeMember with out-param ParameterModifiers does NOT marshal on the
+    /// TestStand COM RCW — it always threw and the old code then reported "Stopped" for every
+    /// execution. The typed cast works cleanly; see memory teststand-getstates-reflection-fails.)
     /// </summary>
     private static int GetExecutionRunState(object execObj)
     {
         try
         {
-            var args  = new object[2];
-            var pmods = new[] { new System.Reflection.ParameterModifier(2) };
-            pmods[0][0] = true; // out runState
-            pmods[0][1] = true; // out termState
-            execObj.GetType().InvokeMember("GetStates",
-                System.Reflection.BindingFlags.InvokeMethod |
-                System.Reflection.BindingFlags.Public |
-                System.Reflection.BindingFlags.Instance,
-                null, execObj, args, pmods, null, null);
-            return Convert.ToInt32(args[0]);
+            var exec = (NiExecution)execObj;
+            exec.GetStates(out NiExecRunStates runState, out NiExecTermStates _);
+            return (int)runState;
         }
         catch { return 3; } // assume Stopped on error
     }
@@ -3348,14 +3442,49 @@ public sealed class TestStandService : ITestStandService
         _ => "Unknown"
     };
 
+    /// <summary>Typed read of the execution's termination state (1=Normal, 2/3=Terminating,
+    /// 4=Aborting, 5=KillingThreads). Defaults to Normal(1) on error.</summary>
+    private static int GetExecutionTermState(object execObj)
+    {
+        try
+        {
+            var exec = (NiExecution)execObj;
+            exec.GetStates(out NiExecRunStates _, out NiExecTermStates termState);
+            return (int)termState;
+        }
+        catch { return 1; } // ExecTermState_Normal
+    }
+
+    /// <summary>Derive a human-readable result for runs where Execution.ResultStatus is empty
+    /// (e.g. a direct sequence run with no process model), based on run + termination state.</summary>
+    private static string DeriveResult(int runState, int termState) => termState switch
+    {
+        2 or 3 => "Terminated",
+        4 or 5 => "Aborted",
+        _      => runState switch          // ExecTermState_Normal
+        {
+            1 => "Running",
+            2 => "Paused",
+            3 => "Done",                   // finished normally
+            _ => "Unknown"
+        }
+    };
+
     private ExecutionResult BuildExecutionResult(dynamic exec, string executionId)
     {
         var elapsed = _executionStartTimes.TryGetValue(executionId, out var st)
             ? (DateTime.UtcNow - st).TotalSeconds : 0;
 
-        int    runState = GetExecutionRunState((object)exec);
-        string result   = TryGetString(exec, "ResultStatus");
-        if (string.IsNullOrEmpty(result)) result = "Unknown";
+        int runState  = GetExecutionRunState((object)exec);
+        int termState = GetExecutionTermState((object)exec);
+
+        // ResultStatus is populated for process-model / UUT runs; for a direct sequence run it is
+        // typically empty, so fall back to a status derived from the run + termination state
+        // (e.g. a normally-finished direct run reports "Done" rather than "Unknown").
+        string result;
+        try { result = ((NiExecution)(object)exec).ResultStatus ?? ""; }
+        catch { result = ""; }
+        if (string.IsNullOrEmpty(result)) result = DeriveResult(runState, termState);
 
         return new ExecutionResult
         {
@@ -4275,7 +4404,9 @@ public sealed class TestStandService : ITestStandService
         {
             var exec = FindExecution(executionId)
                 ?? throw new KeyNotFoundException($"Execution {executionId} not found.");
-            exec.Restart();
+            // Execution.Restart takes a required `breakOnEntry` bool. Calling it arg-less (or via the
+            // dynamic binder) raises TargetParameterCountException — use the typed 1-arg overload.
+            ((NiExecution)exec).Restart(false);
             _executionStartTimes[executionId] = DateTime.UtcNow;
         });
     }
