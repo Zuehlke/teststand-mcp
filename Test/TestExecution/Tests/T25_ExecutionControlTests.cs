@@ -155,6 +155,23 @@ public class T25_ExecutionControlTests : TestBase
         finally { await Ts.TerminateExecutionAsync(info.ExecutionId); }
     }
 
+    [Test]
+    public async Task SetWaitTime_MakesNIWaitStepActuallyWait()
+    {
+        // set_wait_time fills the NI_Wait step's TimeExpr (+ time mode). Without it a freshly
+        // inserted NI_Wait has no time set and finishes instantly — there was no tool to set it.
+        await Ts.CreateSequenceFileAsync(TempSeqFile);
+        await Ts.InsertStepAsync(TempSeqFile, "MainSequence", "Main", "NI_Wait", "W");
+        await Ts.SetWaitTimeAsync(TempSeqFile, "MainSequence", "Main", "W", "1.5");
+        await Ts.SaveSequenceFileAsync(TempSeqFile);
+
+        var result = await Ts.RunSequenceAsync(TempSeqFile, "MainSequence", null, 30);
+
+        Assert.That(result.Status, Is.EqualTo("Stopped"));
+        Assert.That(result.ElapsedSeconds, Is.GreaterThanOrEqualTo(1.3),
+            "An NI_Wait configured for 1.5 s must make the run take ~1.5 s");
+    }
+
     // ── Terminate stops a running execution ──────────────────────────────────────
 
     [Test]
