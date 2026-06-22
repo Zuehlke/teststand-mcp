@@ -1660,6 +1660,19 @@ public class TestStandToolRegistry
                     "Measurement expression (e.g. 'Locals.Value', 'Step.TS.NumericLimitTest.Measurement.Expression')"),
             SetStepMeasurementAsync);
 
+        Register("set_wait_time",
+            "Configure an NI_Wait step to wait a fixed time interval. Sets the wait mode to 'time' " +
+            "and the time expression (in seconds). A freshly inserted NI_Wait has no time set and " +
+            "does not actually wait until this is configured.",
+            s => s
+                .AddRequired("file_path", "string", "Path to the sequence file")
+                .AddRequired("sequence_name", "string", "Name of the sequence")
+                .AddRequired("step_group", "string", "Step group: 'Setup', 'Main', or 'Cleanup'")
+                .AddRequired("step_name", "string", "Name of the NI_Wait step")
+                .AddRequired("time_expression", "string",
+                    "Seconds to wait — a literal number ('2.5') or any expression evaluating to seconds."),
+            SetWaitTimeAsync);
+
         Register("configure_string_value_test",
             "Configure a StringValueTest step: set the expression, expected value, and comparison type.",
             s => s
@@ -4085,6 +4098,17 @@ public class TestStandToolRegistry
         var expression   = args!.Value.GetRequiredString("expression");
         await _ts.SetStepMeasurementAsync(filePath, sequenceName, stepGroup, stepName, expression);
         return Ok($"Measurement expression '{expression}' set on step '{stepName}'.");
+    }
+
+    private async Task<CallToolResult> SetWaitTimeAsync(JsonElement? args)
+    {
+        var filePath       = args!.Value.GetRequiredString("file_path");
+        var sequenceName   = args!.Value.GetRequiredString("sequence_name");
+        var stepGroup      = args!.Value.GetRequiredString("step_group");
+        var stepName       = args!.Value.GetRequiredString("step_name");
+        var timeExpression = args!.Value.GetRequiredString("time_expression");
+        await _ts.SetWaitTimeAsync(filePath, sequenceName, stepGroup, stepName, timeExpression);
+        return Ok($"NI_Wait step '{stepName}' set to wait {timeExpression} s.");
     }
 
     private async Task<CallToolResult> ConfigureStringValueTestAsync(JsonElement? args)

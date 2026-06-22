@@ -439,6 +439,11 @@ public interface ITestStandService : IDisposable
     /// <summary>Sets the measurement expression on the specified test step.</summary>
     Task SetStepMeasurementAsync(string filePath, string sequenceName, string stepGroup,
         string stepName, string expression);
+    /// <summary>Configures an NI_Wait step to wait a fixed time (seconds) — sets the wait mode to
+    /// "time interval" and the time expression. <paramref name="timeExpression"/> may be a literal
+    /// number ("2.5") or any TestStand expression that evaluates to seconds.</summary>
+    Task SetWaitTimeAsync(string filePath, string sequenceName, string stepGroup,
+        string stepName, string timeExpression);
     /// <summary>Configures a StringValueTest step with the expression, expected value, and comparison type.</summary>
     Task ConfigureStringValueTestAsync(string filePath, string sequenceName, string stepGroup,
         string stepName, string expression, string expectedValue,
@@ -6046,7 +6051,11 @@ public sealed class TestStandService : ITestStandService
             dynamic msgs = _engine!.GetOutputMessages();
             int count = 0;
             try { count = Convert.ToInt32((object)msgs.Count); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to get output message count."); }
-            for (int i = 0; i < count && i < maxMessages; i++)
+            // Return the MOST RECENT maxMessages (tail), in chronological order. The list is
+            // append-ordered (index 0 = oldest), so the old `i < maxMessages` loop returned the
+            // OLDEST N and hid all recent activity once more than maxMessages had accumulated.
+            int start = Math.Max(0, count - maxMessages);
+            for (int i = start; i < count; i++)
             {
                 try { result.Add(MapOutputMessage(msgs.Item((object)i))); }
                 catch (Exception ex) { _logger.LogDebug(ex, "Failed to map output message at index {Index}.", i); }
@@ -8457,6 +8466,29 @@ public sealed class TestStandService : ITestStandService
             NiPropertyObject po = step.AsPropertyObject();
             // DataSource is the measurement expression for NumericLimitTest
             po.SetValString("DataSource", 0, expression);
+            SaveSequenceFileWithRetry(seqFile, filePath);
+            _loadedSequenceFiles[filePath] = seqFile;
+        });
+    }
+
+    /// <inheritdoc/>
+    public async Task SetWaitTimeAsync(string filePath, string sequenceName,
+        string stepGroup, string stepName, string timeExpression)
+    {
+        EnsureConnected();
+        await Task.Run(() =>
+        {
+            var seqFile = (NiSequenceFile)(object)GetOrLoadSeqFile(filePath);
+            NiSequence seq = seqFile.GetSequenceByName(sequenceName);
+            int sgVal = ParseStepGroup(stepGroup);
+            NiStep step = seq.GetStepByName(stepName, (NiStepGroups)sgVal);
+            NiPropertyObject po = step.AsPropertyObject();
+
+            // NI_Wait: WaitForTarget=0 selects the "wait a time interval" mode; TimeExpr holds the
+            // seconds (as an expression). A freshly inserted Wait step has an EMPTY TimeExpr and so
+            // never actually waits — and there was previously no tool to set it.
+            po.SetValNumber("WaitForTarget", 0, 0);   // 0 = wait a fixed time interval
+            po.SetValString("TimeExpr", 0, timeExpression);
             SaveSequenceFileWithRetry(seqFile, filePath);
             _loadedSequenceFiles[filePath] = seqFile;
         });

@@ -48,6 +48,28 @@ public class T21_NewToolDispatchTests : TestBase
     }
 
     [Test]
+    public async Task SetWaitTime_Tool_RegisteredAndConfiguresWait()
+    {
+        // Covers the full MCP path for the new tool: registration + schema + arg extraction +
+        // handler → service → engine (the service method alone is covered in T25).
+        Assert.That(_registry.GetTools().Select(t => t.Name), Does.Contain("set_wait_time"));
+
+        await Ts.CreateSequenceFileAsync(TempSeqFile);
+        await Ts.InsertStepAsync(TempSeqFile, "MainSequence", "Main", "NI_Wait", "W");
+
+        var r = await _registry.CallToolAsync("set_wait_time",
+            Args("{\"file_path\":" + J(TempSeqFile) +
+                 ",\"sequence_name\":\"MainSequence\",\"step_group\":\"Main\"," +
+                 "\"step_name\":\"W\",\"time_expression\":\"1.5\"}"));
+        Assert.That(r.IsError, Is.False, TextOf(r));
+
+        await Ts.SaveSequenceFileAsync(TempSeqFile);
+        var result = await Ts.RunSequenceAsync(TempSeqFile, "MainSequence", null, 30);
+        Assert.That(result.ElapsedSeconds, Is.GreaterThanOrEqualTo(1.3),
+            "set_wait_time via the full tool path must configure a real NI_Wait duration");
+    }
+
+    [Test]
     public async Task EvaluateExpression_Tool_ReturnsComputedValue()
     {
         var r = await _registry.CallToolAsync("evaluate_expression",
