@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace TestStandMCP.Models;
 
@@ -499,6 +500,17 @@ public class AnalyzerMessage
     public string StepName { get; set; } = "";
 }
 
+/// <summary>A set of analyzer messages sharing a common key (a severity or a rule).</summary>
+public class AnalyzerMessageGroup
+{
+    /// <summary>The shared group key (e.g. "Error"/"Warning"/"Information", or a RuleId).</summary>
+    public string Key { get; set; } = "";
+    /// <summary>Number of messages in this group.</summary>
+    public int Count { get; set; }
+    /// <summary>The messages belonging to this group.</summary>
+    public List<AnalyzerMessage> Messages { get; init; } = new();
+}
+
 /// <summary>Aggregated result of a sequence-analyzer run, incl. severity counts.</summary>
 public class AnalyzerResult
 {
@@ -512,8 +524,62 @@ public class AnalyzerResult
     public int WarningCount { get; set; }
     /// <summary>Number of information-severity messages.</summary>
     public int InformationCount { get; set; }
-    /// <summary>The analyzer messages.</summary>
+    /// <summary>The analyzer messages (always present, flat — regardless of grouping).</summary>
     public List<AnalyzerMessage> Messages { get; init; } = new();
+    /// <summary>How <see cref="Groups"/> is keyed: "severity", "rule", or "" when not grouped.</summary>
+    public string GroupBy { get; set; } = "";
+    /// <summary>Messages grouped by <see cref="GroupBy"/>; empty when no grouping was requested.</summary>
+    public List<AnalyzerMessageGroup> Groups { get; init; } = new();
+}
+
+/// <summary>
+/// Pure helpers that group analyzer messages the way the Sequence Editor's
+/// Analysis Results pane does (its "Group By" drop-down). No engine required.
+/// </summary>
+public static class AnalyzerGrouping
+{
+    /// <summary>
+    /// True when <paramref name="groupBy"/> requests grouping — i.e. anything other than
+    /// null/empty/"none" (case-insensitive).
+    /// </summary>
+    public static bool IsGrouped(string? groupBy)
+    {
+        var g = (groupBy ?? "").Trim().ToLowerInvariant();
+        return g.Length > 0 && g != "none";
+    }
+
+    /// <summary>
+    /// Groups <paramref name="messages"/> by the requested key. "rule" groups by RuleId
+    /// (most-frequent first); any other non-empty value groups by Severity in
+    /// Error → Warning → Information order. Only non-empty groups are returned.
+    /// </summary>
+    public static List<AnalyzerMessageGroup> Group(IEnumerable<AnalyzerMessage> messages, string? groupBy)
+    {
+        var list = messages as IList<AnalyzerMessage> ?? messages.ToList();
+        var key  = (groupBy ?? "").Trim().ToLowerInvariant();
+
+        if (key == "rule")
+        {
+            return list
+                .GroupBy(m => string.IsNullOrEmpty(m.RuleId) ? "(no rule)" : m.RuleId)
+                .Select(g => new AnalyzerMessageGroup { Key = g.Key, Count = g.Count(), Messages = g.ToList() })
+                .OrderByDescending(g => g.Count)
+                .ThenBy(g => g.Key, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        // Default: group by severity in the engine's display order.
+        static int SevOrder(string s) => s switch
+        {
+            "Error" => 0, "Warning" => 1, "Information" => 2, _ => 3
+        };
+        return list
+            .GroupBy(m => string.IsNullOrEmpty(m.Severity) ? "(unknown)" : m.Severity)
+            .Select(g => new AnalyzerMessageGroup { Key = g.Key, Count = g.Count(), Messages = g.ToList() })
+            .OrderBy(g => SevOrder(g.Key))
+            .ThenBy(g => g.Key, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
 }
 
 // ── User / Privilege Models ──────────────────────────────────────────────────
@@ -765,6 +831,60 @@ public class StepDiff
     public string StepType { get; set; } = "";
     /// <summary>Names of the properties that changed (for "Modified").</summary>
     public List<string> ChangedProperties { get; init; } = new();
+}
+
+// ── Native File-Diff Models (TestStand FileDiffer) ───────────────────────────
+
+/// <summary>Per-file change tally from a native FileDiffer report header.</summary>
+public class FileDifferFileSummary
+{
+    /// <summary>Display name from the report (e.g. "File 2: Test.seq").</summary>
+    public string Name { get; set; } = "";
+    /// <summary>File path as recorded in the report.</summary>
+    public string Path { get; set; } = "";
+    /// <summary>Number of value changes attributed to this file.</summary>
+    public int Changes { get; set; }
+    /// <summary>Number of insertions attributed to this file.</summary>
+    public int Insertions { get; set; }
+    /// <summary>Number of deletions attributed to this file.</summary>
+    public int Deletions { get; set; }
+}
+
+/// <summary>A single classified difference from a native FileDiffer report.</summary>
+public class FileDifferChange
+{
+    /// <summary>Kind of change: Insert, Delete, ValueChange, Conflict, Moved, MovedModified.</summary>
+    public string ChangeType { get; set; } = "";
+    /// <summary>Tree path of the ancestor property names (e.g. "MainSequence &gt; Setup &gt; Hallo").</summary>
+    public string Path { get; set; } = "";
+    /// <summary>Name of the changed node (e.g. a step name or a property like "Value").</summary>
+    public string Name { get; set; } = "";
+    /// <summary>Nesting depth of the node in the property tree.</summary>
+    public int Level { get; set; }
+    /// <summary>The node's displayed text/value in file 1 (empty when inserted).</summary>
+    public string File1Value { get; set; } = "";
+    /// <summary>The node's displayed text/value in file 2 (empty when deleted).</summary>
+    public string File2Value { get; set; } = "";
+}
+
+/// <summary>
+/// Result of a native TestStand FileDiffer comparison: per-file change tallies plus a flat,
+/// classified list of the individual differences with their tree path and per-file values.
+/// </summary>
+public class FileDifferReport
+{
+    /// <summary>First (base) file path.</summary>
+    public string File1 { get; set; } = "";
+    /// <summary>Second file path.</summary>
+    public string File2 { get; set; } = "";
+    /// <summary>Total differences (sum of per-file Changes + Insertions + Deletions).</summary>
+    public int TotalDifferences { get; set; }
+    /// <summary>True when no differences were found (no leaf changes and zero header tallies).</summary>
+    public bool Identical => Changes.Count == 0 && TotalDifferences == 0;
+    /// <summary>Per-file change tallies from the report header.</summary>
+    public List<FileDifferFileSummary> FileSummaries { get; init; } = new();
+    /// <summary>The individual classified differences.</summary>
+    public List<FileDifferChange> Changes { get; init; } = new();
 }
 
 // ── Sync Manager Models ──────────────────────────────────────────────────────

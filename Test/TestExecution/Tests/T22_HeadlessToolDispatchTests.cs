@@ -586,6 +586,41 @@ public class T22_HeadlessToolDispatchTests : TestBase
         }
     }
 
+    // ── diff_sequence_files (native FileDiffer) ─────────────────────────────────────
+
+    [Test]
+    public async Task DiffSequenceFiles_DetectsAddedStep_EndToEnd()
+    {
+        var file2 = Path.Combine(Path.GetTempPath(), $"TS_T22_diff_{Guid.NewGuid():N}.seq");
+        try
+        {
+            // File 1: a sequence with no steps. File 2: same sequence plus one extra Main step.
+            await Ts.CreateSequenceFileAsync(TempSeqFile);
+            await Ts.InsertSequenceAsync(TempSeqFile, "DiffSeq");
+            await Ts.SaveSequenceFileAsync(TempSeqFile);
+
+            await Ts.CreateSequenceFileAsync(file2);
+            await Ts.InsertSequenceAsync(file2, "DiffSeq");
+            await Ts.InsertStepAsync(file2, "DiffSeq", "Main", "Statement", "AddedStep");
+            await Ts.SaveSequenceFileAsync(file2);
+
+            var r = await Call("diff_sequence_files",
+                $"{{\"file_path_1\":{J(TempSeqFile)},\"file_path_2\":{J(file2)}}}");
+            Assert.That(r.IsError, Is.False, TextOf(r));
+
+            var doc = Doc(r);
+            Assert.That(doc.GetProperty("identical").GetBoolean(), Is.False,
+                "files differ by one added step → not identical");
+            Assert.That(doc.GetProperty("changes").GetArrayLength(), Is.GreaterThan(0),
+                "the native differ must report at least one change");
+        }
+        finally
+        {
+            try { await Ts.CloseSequenceFileAsync(file2); } catch { }
+            try { if (File.Exists(file2)) File.Delete(file2); } catch { }
+        }
+    }
+
     // ── cancel_undo_group ──────────────────────────────────────────────────────────
 
     [Test]

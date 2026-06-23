@@ -186,6 +186,205 @@ public class T24_PureLogicCoverageTests
             Is.EqualTo(""), "no NI_Types palette available → empty");
     }
 
+    // ── ParseRuleSeverities: analyzer report rule-catalog → RuleId→severity map ──
+    // The report carries the default TestStand namespace, so the parser must match by local-name.
+    // Rule-catalog Objs expose Id + Severity; result-message Objs expose RuleId and must be skipped.
+    private const string SampleReportXml =
+@"<?xml version='1.0' encoding='UTF-8'?>
+<teststandfileheader type='TEOLEDataSource' xmlns='http://www.ni.com/TestStand/23.0.0/PropertyObjectFile'>
+  <TEOLEDataSource>
+    <ReportData classname='Obj'>
+      <subprops>
+        <Obj classname='Obj'><subprops>
+          <Id classname='Str'><value>NI_AlphaRule</value></Id>
+          <Name classname='Str'><value>Alpha</value></Name>
+          <Severity classname='Num'><value>0</value></Severity>
+        </subprops></Obj>
+        <Obj classname='Obj'><subprops>
+          <Id classname='Str'><value>NI_BetaRule</value></Id>
+          <Severity classname='Num'><value>1</value></Severity>
+        </subprops></Obj>
+        <Obj classname='Obj'><subprops>
+          <Id classname='Str'><value>NI_GammaRule</value></Id>
+          <Severity classname='Num'><value>2</value></Severity>
+        </subprops></Obj>
+        <Obj classname='Obj'><subprops>
+          <RuleId classname='Str'><value>NI_AlphaRule</value></RuleId>
+          <Text classname='Str'><value>a finding, not a rule</value></Text>
+        </subprops></Obj>
+      </subprops>
+    </ReportData>
+  </TEOLEDataSource>
+</teststandfileheader>";
+
+    [Test]
+    public void ParseRuleSeverities_MapsCatalogRules_SkipsMessageObjs()
+    {
+        var map = TestStandService.ParseRuleSeverities(SampleReportXml, _ => { });
+        Assert.That(map.Count, Is.EqualTo(3),
+            "only the three Id+Severity rule objs map; the RuleId message obj is skipped");
+        Assert.That(map["NI_AlphaRule"], Is.EqualTo(0));
+        Assert.That(map["NI_BetaRule"],  Is.EqualTo(1));
+        Assert.That(map["NI_GammaRule"], Is.EqualTo(2));
+    }
+
+    [Test]
+    public void ParseRuleSeverities_RuleIdLookupIsCaseInsensitive()
+    {
+        var map = TestStandService.ParseRuleSeverities(SampleReportXml, _ => { });
+        Assert.That(map.ContainsKey("ni_alpharule"), Is.True);
+    }
+
+    [Test]
+    public void ParseRuleSeverities_EmptyOrInvalid_ReturnsEmptyMap()
+    {
+        Assert.That(TestStandService.ParseRuleSeverities("", _ => { }), Is.Empty);
+        Assert.That(TestStandService.ParseRuleSeverities("<not-valid-xml", _ => { }), Is.Empty);
+    }
+
+    // ── ParseAnalyzerMessages: nested Locations[] → Location/SequenceName/StepName ──
+    // A finding's location is the first element of a Locations[] array of Objs, each exposing
+    // PropertyPath (step-ID form), PropertyPathWithNames (friendly names) and FilePath.
+    private static string MsgProjectXml(string locationSubprops) =>
+@"<teststandfileheader><Messages classname='Objs'><value lbound='[0]' ubound='[0]'><value arrayindex='[0]'>
+  <Obj name=''><subprops>
+    <RuleId classname='Str'><value>NI_TestRule</value></RuleId>
+    <Text classname='Str'><value>finding text</value></Text>
+    <Locations classname='Objs'><value lbound='[0]' ubound='[0]'><value><Obj name=''><subprops>"
++ locationSubprops +
+@"</subprops></Obj></value></value></Locations>
+  </subprops></Obj>
+</value></value></Messages></teststandfileheader>";
+
+    [Test]
+    public void ParseAnalyzerMessages_StepLocation_ExtractsFriendlyPathSeqAndStep()
+    {
+        string xml = MsgProjectXml(
+            @"<PropertyPath classname='Str'><value>Data.Seq[""MainSequence""].Main[""ID#:abc123""].TS.Mode</value></PropertyPath>
+              <PropertyPathWithNames classname='Str'><value>Data.Seq[""MainSequence""].Main[""Label_Disabled""].TS.Mode</value></PropertyPathWithNames>
+              <FilePath classname='Str'><value>C:\proj\Demo.seq</value></FilePath>");
+
+        var msgs = TestStandService.ParseAnalyzerMessages(xml, _ => { });
+        Assert.That(msgs.Count, Is.EqualTo(1), "the nested location Obj must NOT be counted as a message");
+        var m = msgs[0];
+        Assert.That(m.RuleId, Is.EqualTo("NI_TestRule"));
+        Assert.That(m.Location, Is.EqualTo(@"Data.Seq[""MainSequence""].Main[""Label_Disabled""].TS.Mode"),
+            "friendly PropertyPathWithNames must win over the ID-based PropertyPath");
+        Assert.That(m.SequenceName, Is.EqualTo("MainSequence"));
+        Assert.That(m.StepName, Is.EqualTo("Label_Disabled"));
+    }
+
+    [Test]
+    public void ParseAnalyzerMessages_NonStepLocation_HasSequenceButNoStep()
+    {
+        // A parameter/variable location has only PropertyPath (no friendly names) and no step token.
+        string xml = MsgProjectXml(
+            @"<PropertyPath classname='Str'><value>Data.Seq[""MainSequence""].Parameters.Schnittstelle</value></PropertyPath>
+              <FilePath classname='Str'><value>C:\proj\Demo.seq</value></FilePath>");
+
+        var m = TestStandService.ParseAnalyzerMessages(xml, _ => { })[0];
+        Assert.That(m.Location, Is.EqualTo(@"Data.Seq[""MainSequence""].Parameters.Schnittstelle"));
+        Assert.That(m.SequenceName, Is.EqualTo("MainSequence"));
+        Assert.That(m.StepName, Is.Empty, "a non-step location must not yield a step name");
+    }
+
+    [Test]
+    public void ParseAnalyzerMessages_SeverityComesFromRuleMap()
+    {
+        string xml = MsgProjectXml(
+            @"<PropertyPath classname='Str'><value>Data.Seq[""S""].Parameters.X</value></PropertyPath>");
+        var map = new System.Collections.Generic.Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
+            { ["NI_TestRule"] = 1 };
+        var m = TestStandService.ParseAnalyzerMessages(xml, _ => { }, map)[0];
+        Assert.That(m.Severity, Is.EqualTo("Warning"), "severity must come from the rule map (1=Warning)");
+    }
+
+    // ── ParseDifferReport: native FileDiffer report → classified change list ─────
+    // The report is a row/col tree (col0 = name + BlockLevel, col1 = file1, col2 = file2 + StyleID),
+    // carrying the default DifferReport namespace. The parser tracks ancestors via BlockLevel and
+    // emits only leaf changes (ID_Children rows are context that build the path).
+    private const string SampleDifferReportXml =
+@"<?xml version='1.0' encoding='UTF-8'?>
+<DifferReport xmlns='http://www.ni.com/TestStand/23.0.0/DifferReport'>
+  <Header StationID='S' Date='d' Time='t' TSVersion='v'>
+    <File><Path>C:\a.seq</Path><Name>File 1: a.seq</Name>
+      <Changes Count='0'><LocalizedText>Changes</LocalizedText></Changes>
+      <Insertions Count='0'><LocalizedText>Ins</LocalizedText></Insertions>
+      <Deletions Count='0'><LocalizedText>Del</LocalizedText></Deletions></File>
+    <File><Path>C:\b.seq</Path><Name>File 2: b.seq</Name>
+      <Changes Count='1'><LocalizedText>Changes</LocalizedText></Changes>
+      <Insertions Count='0'><LocalizedText>Ins</LocalizedText></Insertions>
+      <Deletions Count='1'><LocalizedText>Del</LocalizedText></Deletions></File>
+    <AppliedFilters></AppliedFilters>
+  </Header>
+  <RowDifference>
+    <ColDifference><DifferenceInfo BlockLevel='0'><Text>MainSequence</Text></DifferenceInfo></ColDifference>
+    <ColDifference><DifferenceInfo><Text>MainSequence</Text></DifferenceInfo></ColDifference>
+    <ColDifference><DifferenceInfo StyleID='ID_Children'><Text>MainSequence</Text></DifferenceInfo></ColDifference>
+  </RowDifference>
+  <RowDifference>
+    <ColDifference><DifferenceInfo BlockLevel='1'><Text>Cleanup</Text></DifferenceInfo></ColDifference>
+    <ColDifference><DifferenceInfo><Text>Cleanup</Text></DifferenceInfo></ColDifference>
+    <ColDifference><DifferenceInfo StyleID='ID_Children'><Text>Cleanup</Text></DifferenceInfo></ColDifference>
+  </RowDifference>
+  <RowDifference>
+    <ColDifference><DifferenceInfo BlockLevel='2'><Text>OldStep</Text></DifferenceInfo></ColDifference>
+    <ColDifference><DifferenceInfo><Text>OldStep</Text></DifferenceInfo></ColDifference>
+    <ColDifference><DifferenceInfo StyleID='ID_Delete'><Text>OldStep</Text></DifferenceInfo></ColDifference>
+  </RowDifference>
+  <RowDifference>
+    <ColDifference><DifferenceInfo BlockLevel='1'><Text>Setup</Text></DifferenceInfo></ColDifference>
+    <ColDifference><DifferenceInfo><Text>Setup</Text></DifferenceInfo></ColDifference>
+    <ColDifference><DifferenceInfo StyleID='ID_Children'><Text>Setup</Text></DifferenceInfo></ColDifference>
+  </RowDifference>
+  <RowDifference>
+    <ColDifference><DifferenceInfo BlockLevel='2'><Text>Value</Text></DifferenceInfo></ColDifference>
+    <ColDifference><DifferenceInfo><Text>old</Text></DifferenceInfo></ColDifference>
+    <ColDifference><DifferenceInfo StyleID='ID_ValueChange'><Text>new</Text></DifferenceInfo></ColDifference>
+  </RowDifference>
+</DifferReport>";
+
+    [Test]
+    public void ParseDifferReport_ReadsHeaderTallies()
+    {
+        var r = TestStandService.ParseDifferReport(SampleDifferReportXml, @"C:\a.seq", @"C:\b.seq", _ => { });
+        Assert.That(r.File1, Is.EqualTo(@"C:\a.seq"));
+        Assert.That(r.FileSummaries.Count, Is.EqualTo(2));
+        var f2 = r.FileSummaries[1];
+        Assert.That(f2.Changes, Is.EqualTo(1));
+        Assert.That(f2.Deletions, Is.EqualTo(1));
+        Assert.That(r.TotalDifferences, Is.EqualTo(2), "sum of per-file changes+insertions+deletions");
+        Assert.That(r.Identical, Is.False);
+    }
+
+    [Test]
+    public void ParseDifferReport_EmitsLeafChanges_WithTypePathAndValues()
+    {
+        var r = TestStandService.ParseDifferReport(SampleDifferReportXml, @"C:\a.seq", @"C:\b.seq", _ => { });
+        Assert.That(r.Changes.Count, Is.EqualTo(2), "ID_Children context rows must NOT be emitted as changes");
+
+        var del = r.Changes[0];
+        Assert.That(del.ChangeType, Is.EqualTo("Delete"));
+        Assert.That(del.Name, Is.EqualTo("OldStep"));
+        Assert.That(del.Path, Is.EqualTo("MainSequence > Cleanup"));
+
+        var vc = r.Changes[1];
+        Assert.That(vc.ChangeType, Is.EqualTo("ValueChange"));
+        Assert.That(vc.Name, Is.EqualTo("Value"));
+        Assert.That(vc.Path, Is.EqualTo("MainSequence > Setup"));
+        Assert.That(vc.File1Value, Is.EqualTo("old"));
+        Assert.That(vc.File2Value, Is.EqualTo("new"));
+    }
+
+    [Test]
+    public void ParseDifferReport_EmptyOrInvalid_ReturnsIdentical()
+    {
+        var r = TestStandService.ParseDifferReport("", @"C:\a", @"C:\b", _ => { });
+        Assert.That(r.Changes, Is.Empty);
+        Assert.That(r.Identical, Is.True);
+        Assert.That(TestStandService.ParseDifferReport("<nope", @"C:\a", @"C:\b", _ => { }).Changes, Is.Empty);
+    }
+
     // ── SequencePlanValidator: rules not covered by T10 / T23 ────────────────────
 
     private static PlanStepInput Step(string name, string type, string? expr = null) =>

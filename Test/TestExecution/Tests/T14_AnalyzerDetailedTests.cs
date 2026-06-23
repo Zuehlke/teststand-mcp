@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Threading.Tasks;
 using NUnit.Framework;
 
@@ -42,5 +43,39 @@ public class T14_AnalyzerDetailedTests : TestBase
             "Error filter must exclude warnings");
         Assert.That(errorsOnly.InformationCount, Is.EqualTo(0),
             "Error filter must exclude information messages");
+    }
+
+    [Test]
+    public async Task AnalyzeDetailed_GroupBySeverity_GroupsPartitionFlatList()
+    {
+        await Ts.CreateSequenceFileAsync(TempSeqFile);
+        await Ts.InsertSequenceAsync(TempSeqFile, "GroupSeqSev");
+        await Ts.SaveSequenceFileAsync(TempSeqFile);
+
+        var result = await Ts.RunSequenceAnalyzerDetailedAsync(TempSeqFile, "Information", "severity");
+
+        Assert.That(result.GroupBy, Is.EqualTo("severity"));
+        // Groups partition the flat message list exactly — no gaps, no double-counting.
+        Assert.That(result.Groups.Sum(g => g.Count), Is.EqualTo(result.TotalMessages),
+            "group counts must sum to the total");
+        Assert.That(result.Groups.Sum(g => g.Messages.Count), Is.EqualTo(result.Messages.Count));
+        foreach (var g in result.Groups)
+            Assert.That(g.Messages.All(m => m.Severity == g.Key), Is.True,
+                $"every message in group '{g.Key}' must carry that severity");
+    }
+
+    [Test]
+    public async Task AnalyzeDetailed_GroupByNone_LeavesGroupsEmpty()
+    {
+        await Ts.CreateSequenceFileAsync(TempSeqFile);
+        await Ts.InsertSequenceAsync(TempSeqFile, "GroupSeqNone");
+        await Ts.SaveSequenceFileAsync(TempSeqFile);
+
+        var result = await Ts.RunSequenceAnalyzerDetailedAsync(TempSeqFile, "Information", "none");
+
+        Assert.That(result.GroupBy, Is.Empty, "group_by=none must not set a grouping label");
+        Assert.That(result.Groups, Is.Empty, "group_by=none must not populate groups");
+        Assert.That(result.Messages.Count, Is.EqualTo(result.TotalMessages),
+            "the flat list is unaffected by the grouping option");
     }
 }

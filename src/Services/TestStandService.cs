@@ -370,6 +370,9 @@ public interface ITestStandService : IDisposable
     /// <summary>Compares two sequence files and returns the structural differences between them.</summary>
     Task<SequenceFileDiff> CompareSequenceFilesAsync(string filePath1, string filePath2);
 
+    /// <summary>Runs the native TestStand FileDiffer and returns its detailed, classified diff report.</summary>
+    Task<FileDifferReport> DiffSequenceFilesAsync(string filePath1, string filePath2);
+
     // Sync Manager
     /// <summary>Returns all synchronization objects registered with the SyncManager.</summary>
     Task<List<SyncObjectInfo>> GetSyncObjectsAsync();
@@ -610,9 +613,10 @@ public interface ITestStandService : IDisposable
         string targetSequenceName, string targetSequenceFile = "", bool save = true);
 
     // ── Sequence Analyzer (detailed) ─────────────────────────────────────────
-    /// <summary>Runs the Sequence Analyzer and returns a detailed result filtered by minimum severity.</summary>
+    /// <summary>Runs the Sequence Analyzer and returns a detailed result filtered by minimum
+    /// severity and optionally grouped (by "severity", "rule", or "none" for a flat list).</summary>
     Task<AnalyzerResult> RunSequenceAnalyzerDetailedAsync(string filePath,
-        string minSeverity = "Information");
+        string minSeverity = "Information", string groupBy = "severity");
 
     // ── Output & UI Messages ─────────────────────────────────────────────────
     /// <summary>Posts a message to the engine output window.</summary>
@@ -741,6 +745,10 @@ public sealed class TestStandService : ITestStandService
     private static readonly Regex _messagesCaptureRx  = new(@"<Messages classname='Objs'>(.*?)</Messages>", XmlRx);
     private static readonly Regex _firstValueRx       = new(@"<Messages classname='Objs'>\s*<value\b([^>]*)>?", XmlRx);
     private static readonly Regex _selfClosingValueRx = new(@"<Messages classname='Objs'>\s*<value\b[^>]*/\s*>", XmlRx);
+    // Analyzer location paths embed the sequence + step as bracketed, double-quoted names,
+    // e.g.  Data.Seq["MainSequence"].Main["Label_Disabled"].TS.Mode
+    private static readonly Regex _analyzerSeqNameRx  = new(@"\bSeq\[""([^""]+)""\]", RegexOptions.Compiled);
+    private static readonly Regex _analyzerStepNameRx = new(@"\b(?:Setup|Main|Cleanup)\[""([^""]+)""\]", RegexOptions.Compiled);
 
     /// <summary>Creates the service with the given logger.</summary>
     public TestStandService(ILogger<TestStandService> logger)
@@ -2778,6 +2786,14 @@ public sealed class TestStandService : ITestStandService
         Log($"Resolved saved project:   {(string.IsNullOrEmpty(savedProject) ? "(public dir unknown)" : savedProject)}");
         string tempProject = System.IO.Path.Combine(
             System.IO.Path.GetTempPath(), "ts_mcp_analysis_" + System.IO.Path.GetFileNameWithoutExtension(filePath) + ".tsaproj");
+        // The saved project's per-message records carry NO severity — only a RuleId. Effective
+        // severity (what the editor's Analysis-Results pane shows) is per-RULE and only materialises
+        // in the analyzer REPORT, so we also ask AnalyzerApp to emit an XML report and read the
+        // resolved RuleId→Severity map from its rule catalog. (See ParseRuleSeverities.)
+        string reportPath = System.IO.Path.Combine(
+            System.IO.Path.GetTempPath(), "ts_mcp_report_" + System.IO.Path.GetFileNameWithoutExtension(filePath) + ".xml");
+        try { if (System.IO.File.Exists(reportPath)) System.IO.File.Delete(reportPath); }
+        catch (Exception) { /* best-effort: clear stale report before the run */ }
 
         // ── 1. Build temp project XML ─────────────────────────────────────────
         // Start from the user's saved project (rules configured) or a minimal template.
@@ -2835,7 +2851,7 @@ public sealed class TestStandService : ITestStandService
         var psi = new System.Diagnostics.ProcessStartInfo
         {
             FileName               = analyzerExe,
-            Arguments              = $"\"{tempProject}\" /analyze /save /quit",
+            Arguments              = $"\"{tempProject}\" /analyze /report \"{reportPath}\" /save /quit",
             UseShellExecute        = false,
             RedirectStandardOutput = true,
             RedirectStandardError  = true,
@@ -2921,10 +2937,30 @@ public sealed class TestStandService : ITestStandService
             throw new InvalidOperationException("AnalyzerApp.exe did not save the project file.");
 
         string savedXml = System.IO.File.ReadAllText(tempProject, System.Text.Encoding.UTF8);
-        var result = ParseAnalyzerMessages(savedXml, Log);
 
-        // Clean up temp file
+        // Build the RuleId→Severity map from the report's rule catalog (resolves Default→effective
+        // severity). Best-effort: if the report is missing/unparseable, ParseAnalyzerMessages falls
+        // back to the legacy per-message Severity value.
+        var ruleSeverity = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            if (System.IO.File.Exists(reportPath))
+            {
+                string reportXml = System.IO.File.ReadAllText(reportPath, System.Text.Encoding.UTF8);
+                ruleSeverity = ParseRuleSeverities(reportXml, Log);
+            }
+            else
+            {
+                Log($"Analyzer report not found at {reportPath} — severities fall back to per-message parse.");
+            }
+        }
+        catch (Exception ex) { Log($"Failed to read analyzer report: {ex.Message}"); }
+
+        var result = ParseAnalyzerMessages(savedXml, Log, ruleSeverity);
+
+        // Clean up temp files
         try { System.IO.File.Delete(tempProject); } catch (Exception) { /* best-effort: delete temp analyzer project file — intentionally ignored */ }
+        try { System.IO.File.Delete(reportPath); } catch (Exception) { /* best-effort: delete temp analyzer report file — intentionally ignored */ }
 
         Log($"Total messages collected: {result.Count}");
         Flush();
@@ -3041,7 +3077,8 @@ public sealed class TestStandService : ITestStandService
         return null;
     }
 
-    private static List<AnalyzerMessage> ParseAnalyzerMessages(string projectXml, Action<string> Log)
+    internal static List<AnalyzerMessage> ParseAnalyzerMessages(string projectXml, Action<string> Log,
+        IReadOnlyDictionary<string, int>? ruleSeverity = null)
     {
         var result = new List<AnalyzerMessage>();
 
@@ -3103,20 +3140,44 @@ public sealed class TestStandService : ITestStandService
             string sevStr  = GetSubProp("Severity") ?? "";
             string ruleId  = GetSubProp("RuleId")   ?? "";
             string text    = GetSubProp("Text")      ?? "";
-            string loc     = GetSubProp("Location")  ?? GetSubProp("LocationString") ?? "";
-            string seqName = GetSubProp("SequenceName") ?? GetSubProp("SeqName") ?? "";
-            string stepName = GetSubProp("StepName") ?? "";
 
             if (string.IsNullOrEmpty(ruleId) && string.IsNullOrEmpty(text))
                 continue; // skip empty/sentinel objects
 
-            int.TryParse(sevStr, out int sevInt);
+            // The finding's location is NOT a flat property — it is the first element of a
+            // Locations[] array of Objs, each exposing PropertyPath (step-ID form),
+            // PropertyPathWithNames (friendly step name, when the location is a step) and FilePath.
+            // Prefer the friendly path; derive the sequence + step names from its bracketed tokens.
+            string loc = "", seqName = "", stepName = "";
+            var locSub = obj.SelectSingleNode("subprops/Locations/value/value/Obj/subprops");
+            if (locSub != null)
+            {
+                string pathNamed = locSub.SelectSingleNode("PropertyPathWithNames/value")?.InnerText?.Trim() ?? "";
+                string pathRaw   = locSub.SelectSingleNode("PropertyPath/value")?.InnerText?.Trim() ?? "";
+                loc = pathNamed.Length > 0 ? pathNamed : pathRaw;
+
+                var seqMatch  = _analyzerSeqNameRx.Match(loc);
+                if (seqMatch.Success)  seqName  = seqMatch.Groups[1].Value;
+                var stepMatch = _analyzerStepNameRx.Match(loc);
+                if (stepMatch.Success) stepName = stepMatch.Groups[1].Value;
+            }
+
+            // Effective severity comes from the report's per-rule catalog (ruleSeverity). The saved
+            // project messages carry no Severity, so fall back to the (legacy) per-message value only
+            // when the rule is absent from the map — e.g. the report could not be generated.
+            int sevInt;
+            if (!string.IsNullOrEmpty(ruleId) && ruleSeverity != null
+                && ruleSeverity.TryGetValue(ruleId, out int ruleSev))
+                sevInt = ruleSev;
+            else
+                int.TryParse(sevStr, out sevInt);
+
             string sevLabel = sevInt switch
             {
                 0 => "Error",
                 1 => "Warning",
                 2 => "Information",
-                _ => "Information"   // 3 = Default (use rule's own default)
+                _ => "Information"   // 3 = Default/Disabled (rules at 3 do not produce messages)
             };
 
             result.Add(new AnalyzerMessage
@@ -3131,6 +3192,56 @@ public sealed class TestStandService : ITestStandService
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// Builds a RuleId → severity map (0=Error, 1=Warning, 2=Information, 3=Default/Disabled) from
+    /// the analyzer REPORT XML. The saved project's messages carry no severity — only a RuleId — so
+    /// the effective severity (what the editor's Analysis-Results pane shows) is taken from the
+    /// report's rule catalog, where each rule <c>&lt;Obj&gt;</c> exposes its resolved <c>Id</c> +
+    /// <c>Severity</c>. Result-message Objs (keyed <c>RuleId</c>, not <c>Id</c>) are ignored here.
+    /// The report carries the default TestStand namespace, so all matching is by local-name.
+    /// </summary>
+    internal static Dictionary<string, int> ParseRuleSeverities(string reportXml, Action<string> Log)
+    {
+        var map = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(reportXml)) return map;
+
+        var doc = new System.Xml.XmlDocument();
+        try { doc.LoadXml(reportXml); }
+        catch (Exception ex) { Log($"Report XML parse error: {ex.Message}"); return map; }
+
+        var objNodes = doc.SelectNodes("//*[local-name()='Obj']");
+        if (objNodes == null) return map;
+
+        static string? LeafChildVal(System.Xml.XmlNode subprops, string name)
+        {
+            foreach (System.Xml.XmlNode c in subprops.ChildNodes)
+            {
+                if (!string.Equals(c.LocalName, name, StringComparison.Ordinal)) continue;
+                foreach (System.Xml.XmlNode v in c.ChildNodes)
+                    if (string.Equals(v.LocalName, "value", StringComparison.Ordinal))
+                        return v.InnerText?.Trim();
+            }
+            return null;
+        }
+
+        foreach (System.Xml.XmlNode obj in objNodes)
+        {
+            System.Xml.XmlNode? sp = null;
+            foreach (System.Xml.XmlNode c in obj.ChildNodes)
+                if (string.Equals(c.LocalName, "subprops", StringComparison.Ordinal)) { sp = c; break; }
+            if (sp == null) continue;
+
+            // Rule-catalog entries expose Id + Severity; everything else (messages, options) is skipped.
+            string? id  = LeafChildVal(sp, "Id");
+            string? sev = LeafChildVal(sp, "Severity");
+            if (!string.IsNullOrEmpty(id) && int.TryParse(sev, out int si))
+                map[id!] = si;
+        }
+
+        Log($"Rule-severity map built from report: {map.Count} rules");
+        return map;
     }
 
     // ── Win32 message pump (used by the dedicated engine thread to drive executions) ──
@@ -6095,7 +6206,7 @@ public sealed class TestStandService : ITestStandService
 
     /// <inheritdoc/>
     public async Task<AnalyzerResult> RunSequenceAnalyzerDetailedAsync(string filePath,
-        string minSeverity = "Information")
+        string minSeverity = "Information", string groupBy = "severity")
     {
         var messages = await RunSequenceAnalyzerAsync(filePath);
 
@@ -6106,6 +6217,8 @@ public sealed class TestStandService : ITestStandService
         int threshold = Rank(minSeverity);
         var filtered = messages.Where(m => Rank(m.Severity) >= threshold).ToList();
 
+        bool grouped = AnalyzerGrouping.IsGrouped(groupBy);
+
         return new AnalyzerResult
         {
             FilePath         = filePath,
@@ -6113,7 +6226,11 @@ public sealed class TestStandService : ITestStandService
             ErrorCount       = filtered.Count(m => m.Severity == "Error"),
             WarningCount     = filtered.Count(m => m.Severity == "Warning"),
             InformationCount = filtered.Count(m => m.Severity == "Information"),
-            Messages         = filtered
+            Messages         = filtered,
+            GroupBy          = grouped ? groupBy.Trim().ToLowerInvariant() : "",
+            Groups           = grouped
+                                   ? AnalyzerGrouping.Group(filtered, groupBy)
+                                   : new List<AnalyzerMessageGroup>()
         };
     }
 
@@ -6942,6 +7059,268 @@ public sealed class TestStandService : ITestStandService
 
         return changed;
     }
+
+    // ── Native FileDiffer (detailed, TestStand-faithful diff) ──────────────────
+
+    /// <inheritdoc/>
+    public async Task<FileDifferReport> DiffSequenceFilesAsync(string filePath1, string filePath2)
+    {
+        EnsureConnected();
+        if (!System.IO.File.Exists(filePath1))
+            throw new System.IO.FileNotFoundException("Diff file 1 not found.", filePath1);
+        if (!System.IO.File.Exists(filePath2))
+            throw new System.IO.FileNotFoundException("Diff file 2 not found.", filePath2);
+
+        return await Task.Run(() =>
+        {
+            var diag = new System.Text.StringBuilder();
+            string diagPath = Path.Combine(Path.GetTempPath(), "ts_differ_diag.txt");
+            void Log(string msg) { diag.AppendLine(msg); }
+            void Flush() { try { System.IO.File.WriteAllText(diagPath, diag.ToString()); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to write differ diagnostics."); } }
+
+            // FileDiffer.exe ships in the connected engine's Bin directory — never hard-code a release.
+            var (binDir, _, _) = ResolveAnalyzerLocations();
+            string differExe = !string.IsNullOrEmpty(binDir)
+                ? Path.Combine(binDir, "FileDiffer.exe")
+                : "FileDiffer.exe";
+            if (!System.IO.File.Exists(differExe))
+                throw new InvalidOperationException($"FileDiffer.exe not found at: {differExe}");
+
+            string reportPath = Path.Combine(Path.GetTempPath(),
+                "ts_mcp_diff_" + Path.GetFileNameWithoutExtension(filePath1) + "_vs_"
+                + Path.GetFileNameWithoutExtension(filePath2) + ".xml");
+            try { if (System.IO.File.Exists(reportPath)) System.IO.File.Delete(reportPath); }
+            catch (Exception) { /* best-effort: clear stale report */ }
+
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName               = differExe,
+                Arguments              = $"/GenerateReport \"{reportPath}\" \"{filePath1}\" \"{filePath2}\"",
+                UseShellExecute        = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError  = true,
+                CreateNoWindow         = true,
+            };
+            ApplyTestStandToolChildEnv(psi);
+            Log($"Launching: {differExe} {psi.Arguments}");
+            Flush();
+
+            using var proc = System.Diagnostics.Process.Start(psi)
+                ?? throw new InvalidOperationException("Failed to start FileDiffer.exe.");
+            string stdout = proc.StandardOutput.ReadToEnd();
+            string stderr = proc.StandardError.ReadToEnd();
+            bool exited   = proc.WaitForExit(120_000);
+            if (!exited)
+            {
+                try { proc.Kill(); } catch (Exception) { /* best-effort: kill timed-out FileDiffer */ }
+                throw new InvalidOperationException("FileDiffer.exe timed out after 120 seconds.");
+            }
+            Log($"FileDiffer exit code: {proc.ExitCode}");
+            if (!string.IsNullOrWhiteSpace(stdout)) Log($"stdout: {stdout.Trim()}");
+            if (!string.IsNullOrWhiteSpace(stderr)) Log($"stderr: {stderr.Trim()}");
+
+            // FileDiffer reliably WRITES the report but then crashes on teardown with a negative exit
+            // code (0xC0000409), exactly like the engine / AnalyzerApp. Success is therefore judged by
+            // the report existing and parsing — NOT by the exit code.
+            if (!System.IO.File.Exists(reportPath))
+            {
+                Flush();
+                throw new InvalidOperationException(
+                    $"FileDiffer.exe produced no report (exit {proc.ExitCode}). stderr: {stderr.Trim()}");
+            }
+
+            string reportXml = System.IO.File.ReadAllText(reportPath, System.Text.Encoding.UTF8);
+            var report = ParseDifferReport(reportXml, filePath1, filePath2, Log);
+            try { System.IO.File.Delete(reportPath); } catch (Exception) { /* best-effort cleanup */ }
+
+            Log($"Parsed {report.Changes.Count} change(s); identical={report.Identical}");
+            Flush();
+            return report;
+        });
+    }
+
+    /// <summary>
+    /// Normalises a child <see cref="System.Diagnostics.ProcessStartInfo"/> environment so 32-bit NI
+    /// tools (AnalyzerApp.exe, FileDiffer.exe) and the LabVIEW RTE they may load find the system
+    /// variables they require — notably ProgramFiles(x86), whose absence crashes lvrt.dll with
+    /// 0xC0000409. The MCP host can inherit a heavily reduced environment, so these are set from the
+    /// OS regardless of this process's own environment. Requires UseShellExecute=false.
+    /// </summary>
+    private static void ApplyTestStandToolChildEnv(System.Diagnostics.ProcessStartInfo psi)
+    {
+        void Ensure(string key, string? value) { if (!string.IsNullOrEmpty(value)) psi.Environment[key] = value; }
+        Ensure("ProgramFiles(x86)",       Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86));
+        Ensure("ProgramFiles",            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles));
+        Ensure("ProgramData",             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData));
+        Ensure("ALLUSERSPROFILE",         Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData));
+        Ensure("CommonProgramFiles",      Environment.GetFolderPath(Environment.SpecialFolder.CommonProgramFiles));
+        Ensure("CommonProgramFiles(x86)", Environment.GetFolderPath(Environment.SpecialFolder.CommonProgramFilesX86));
+        Ensure("ComSpec",                 Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe"));
+        Ensure("TMP",                     Path.GetTempPath());
+        Ensure("TEMP",                    Path.GetTempPath());
+        Ensure("NUMBER_OF_PROCESSORS",    Environment.ProcessorCount.ToString());
+    }
+
+    /// <summary>
+    /// Parses a native FileDiffer report (DifferReport XML) into a <see cref="FileDifferReport"/>:
+    /// per-file tallies from the Header, plus a flat list of the leaf changes. The report is a
+    /// row/column tree (col0 = node name + BlockLevel, col1 = file-1 value, col2 = file-2 value +
+    /// StyleID); we walk it depth-first, track the ancestor path via BlockLevel, and emit only the
+    /// real leaf changes (Insert/Delete/ValueChange/Conflict/Move) — ID_Children rows are context.
+    /// The report carries the default DifferReport namespace, so all matching is by local-name.
+    /// </summary>
+    internal static FileDifferReport ParseDifferReport(string reportXml, string file1, string file2, Action<string> Log)
+    {
+        var report = new FileDifferReport { File1 = file1, File2 = file2 };
+        if (string.IsNullOrWhiteSpace(reportXml)) return report;
+
+        var doc = new System.Xml.XmlDocument();
+        try { doc.LoadXml(reportXml); }
+        catch (Exception ex) { Log($"Differ report parse error: {ex.Message}"); return report; }
+
+        static System.Xml.XmlNode? Child(System.Xml.XmlNode n, string local)
+        {
+            foreach (System.Xml.XmlNode c in n.ChildNodes)
+                if (string.Equals(c.LocalName, local, StringComparison.Ordinal)) return c;
+            return null;
+        }
+
+        // ── Header: per-file change tallies (Count attribute on Changes/Insertions/Deletions) ──
+        var fileNodes = doc.SelectNodes("//*[local-name()='Header']/*[local-name()='File']");
+        if (fileNodes != null)
+        {
+            foreach (System.Xml.XmlNode fileNode in fileNodes)
+            {
+                int Count(string local)
+                {
+                    if (Child(fileNode, local) is System.Xml.XmlElement e
+                        && int.TryParse(e.GetAttribute("Count"), out int v)) return v;
+                    return 0;
+                }
+                report.FileSummaries.Add(new FileDifferFileSummary
+                {
+                    Name       = Child(fileNode, "Name")?.InnerText?.Trim() ?? "",
+                    Path       = Child(fileNode, "Path")?.InnerText?.Trim() ?? "",
+                    Changes    = Count("Changes"),
+                    Insertions = Count("Insertions"),
+                    Deletions  = Count("Deletions"),
+                });
+            }
+        }
+
+        // ── Rows: DFS over the property tree; build the path, emit leaf changes ──
+        var pathStack = new List<string>();
+        var rowNodes  = doc.SelectNodes("//*[local-name()='RowDifference']");
+        if (rowNodes != null)
+        {
+            foreach (System.Xml.XmlNode row in rowNodes)
+            {
+                var cells = new List<System.Xml.XmlNode>();
+                foreach (System.Xml.XmlNode c in row.ChildNodes)
+                    if (string.Equals(c.LocalName, "ColDifference", StringComparison.Ordinal)) cells.Add(c);
+                if (cells.Count == 0) continue;
+
+                // col0 carries the node name + BlockLevel (nesting depth).
+                var (name0, level0) = DifferNameAndLevel(cells[0]);
+                if (level0 >= 0 && !string.IsNullOrEmpty(name0))
+                {
+                    while (pathStack.Count > level0) pathStack.RemoveAt(pathStack.Count - 1);
+                    while (pathStack.Count < level0) pathStack.Add("");
+                    pathStack.Add(name0);
+                }
+
+                // The change indicator (StyleID) sits on the result/last column.
+                string style = "";
+                for (int i = cells.Count - 1; i >= 0; i--)
+                {
+                    string s = DifferStyleOf(cells[i]);
+                    if (!string.IsNullOrEmpty(s)) { style = s; break; }
+                }
+
+                string? changeType = MapDifferStyle(style);
+                if (changeType == null) continue;   // ID_Children / NoDifference / ignored → context only
+
+                int upto = level0 >= 0 ? Math.Min(level0, pathStack.Count) : pathStack.Count;
+                var ancestors = new List<string>();
+                for (int i = 0; i < upto; i++)
+                    if (!string.IsNullOrEmpty(pathStack[i])) ancestors.Add(pathStack[i]);
+
+                report.Changes.Add(new FileDifferChange
+                {
+                    ChangeType = changeType,
+                    Path       = string.Join(" > ", ancestors),
+                    Name       = name0,
+                    Level      = level0 < 0 ? 0 : level0,
+                    File1Value = cells.Count > 1 ? DifferCellText(cells[1]) : "",
+                    File2Value = cells.Count > 2 ? DifferCellText(cells[2]) : "",
+                });
+            }
+        }
+
+        report.TotalDifferences = report.FileSummaries.Sum(s => s.Changes + s.Insertions + s.Deletions);
+        if (report.TotalDifferences == 0) report.TotalDifferences = report.Changes.Count;
+        return report;
+    }
+
+    /// <summary>Reads a ColDifference cell's DifferenceInfo Text + BlockLevel (name column).</summary>
+    private static (string name, int level) DifferNameAndLevel(System.Xml.XmlNode cell)
+    {
+        foreach (System.Xml.XmlNode c in cell.ChildNodes)
+        {
+            if (string.Equals(c.LocalName, "DifferenceInfo", StringComparison.Ordinal)
+                && c is System.Xml.XmlElement e)
+            {
+                string text = "";
+                foreach (System.Xml.XmlNode t in e.ChildNodes)
+                    if (string.Equals(t.LocalName, "Text", StringComparison.Ordinal))
+                    { text = t.InnerText?.Trim() ?? ""; break; }
+                int level = int.TryParse(e.GetAttribute("BlockLevel"), out int bl) ? bl : -1;
+                return (text, level);
+            }
+        }
+        return ("", -1);
+    }
+
+    /// <summary>Reads a ColDifference cell's StyleID (empty when the cell has no DifferenceInfo).</summary>
+    private static string DifferStyleOf(System.Xml.XmlNode cell)
+    {
+        foreach (System.Xml.XmlNode c in cell.ChildNodes)
+            if (string.Equals(c.LocalName, "DifferenceInfo", StringComparison.Ordinal)
+                && c is System.Xml.XmlElement e)
+                return e.GetAttribute("StyleID") ?? "";
+        return "";
+    }
+
+    /// <summary>Reads a ColDifference cell's displayed text (or "" for an Empty side).</summary>
+    private static string DifferCellText(System.Xml.XmlNode cell)
+    {
+        foreach (System.Xml.XmlNode c in cell.ChildNodes)
+        {
+            if (string.Equals(c.LocalName, "DifferenceInfo", StringComparison.Ordinal))
+            {
+                foreach (System.Xml.XmlNode t in c.ChildNodes)
+                    if (string.Equals(t.LocalName, "Text", StringComparison.Ordinal))
+                        return t.InnerText?.Trim() ?? "";
+                return "";
+            }
+            if (string.Equals(c.LocalName, "IsEmptyOrHashed", StringComparison.Ordinal))
+                return string.Equals(c.InnerText?.Trim(), "Hashed", StringComparison.OrdinalIgnoreCase)
+                    ? "(unchanged)" : "";
+        }
+        return "";
+    }
+
+    /// <summary>Maps a DifferReport StyleID to a public change type, or null for context/ignored rows.</summary>
+    private static string? MapDifferStyle(string styleId) => styleId switch
+    {
+        "ID_Insert"        => "Insert",
+        "ID_Delete"        => "Delete",
+        "ID_ValueChange"   => "ValueChange",
+        "ID_Conflict"      => "Conflict",
+        "ID_NoDifference0" => "Moved",
+        "ID_NoDifference1" => "MovedModified",
+        _                  => null,
+    };
 
     private List<string> ComparePropertyBlock(dynamic block1, dynamic block2, string prefix)
     {
