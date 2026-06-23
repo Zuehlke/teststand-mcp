@@ -136,4 +136,41 @@ public class T10_SequencePlanValidatorTests
         Assert.That(r.Valid, Is.True);
         Assert.That(r.Warnings.Any(w => w.Code == "W_UNUSED_LOCAL"), Is.True);
     }
+
+    // ── Sweep/Stream loops are real loops: they open a block (End matches) and ──
+    // ── Break/Continue inside them is valid (not E_JUMP_OUTSIDE_LOOP). ──────────
+    [Test]
+    public void SweepLoop_IsLoop_BreakInsideIsValid()
+    {
+        var r = Validate(new[]
+        {
+            S("Sweep", "NI_Flow_SweepLoop"),
+            S("Brk",   "NI_Flow_Break"),
+            S("End",   "NI_Flow_End"),
+        });
+        Assert.That(r.Valid, Is.True, "SweepLoop should be a valid loop block: " +
+            string.Join("; ", r.Errors.Select(e => e.Code + ":" + e.Message)));
+    }
+
+    [Test]
+    public void StreamLoop_IsLoop_ContinueInsideIsValid()
+    {
+        var r = Validate(new[]
+        {
+            S("Stream", "NI_Flow_StreamLoop"),
+            S("Cont",   "NI_Flow_Continue"),
+            S("End",    "NI_Flow_End"),
+        });
+        Assert.That(r.Valid, Is.True, "StreamLoop should be a valid loop block: " +
+            string.Join("; ", r.Errors.Select(e => e.Code + ":" + e.Message)));
+    }
+
+    [Test]
+    public void SweepLoop_Unclosed_IsError()
+    {
+        var r = Validate(new[] { S("Sweep", "NI_Flow_SweepLoop"), S("A", "SequenceCall") });
+        Assert.That(r.Valid, Is.False);
+        Assert.That(r.Errors.Any(e => e.Code == "E_UNCLOSED_BLOCK"), Is.True,
+            "An unclosed SweepLoop must report E_UNCLOSED_BLOCK");
+    }
 }

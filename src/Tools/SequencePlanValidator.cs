@@ -87,10 +87,12 @@ public static class SequencePlanValidator
 {
     private static readonly HashSet<string> Openers = new(StringComparer.OrdinalIgnoreCase)
         { "NI_Flow_If", "NI_Flow_While", "NI_Flow_DoWhile", "NI_Flow_For",
-          "NI_Flow_ForEach", "NI_Flow_Select" };
+          "NI_Flow_ForEach", "NI_Flow_Select",
+          "NI_Flow_SweepLoop", "NI_Flow_StreamLoop" };
 
     private static readonly HashSet<string> LoopTypes = new(StringComparer.OrdinalIgnoreCase)
-        { "NI_Flow_While", "NI_Flow_DoWhile", "NI_Flow_For", "NI_Flow_ForEach" };
+        { "NI_Flow_While", "NI_Flow_DoWhile", "NI_Flow_For", "NI_Flow_ForEach",
+          "NI_Flow_SweepLoop", "NI_Flow_StreamLoop" };
 
     // Flow steps that carry a boolean condition (warn when the expression is empty).
     private static readonly HashSet<string> ConditionBearing = new(StringComparer.OrdinalIgnoreCase)

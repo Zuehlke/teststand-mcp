@@ -34,11 +34,13 @@ NI_Flow_End     →  End of the If-block
 
 **ALWAYS use for loops:**
 ```
-NI_Flow_While    →  While loop
-NI_Flow_DoWhile  →  Do-While loop
-NI_Flow_For      →  For loop
-NI_Flow_ForEach  →  ForEach loop
-NI_Flow_End      →  End of the loop
+NI_Flow_While      →  While loop
+NI_Flow_DoWhile    →  Do-While loop
+NI_Flow_For        →  For loop
+NI_Flow_ForEach    →  ForEach loop
+NI_Flow_SweepLoop  →  Sweep loop (iterates over a parameter range)
+NI_Flow_StreamLoop →  Stream loop (iterates while a data source streams)
+NI_Flow_End        →  End of the loop
 ```
 
 **FORBIDDEN (except justified exceptions):**
@@ -85,6 +87,7 @@ Label  →  Only as a target for the mentioned Goto exceptions
 ### All Available Step Types (from get_step_types):
 - Flow Control: `NI_Flow_If`, `NI_Flow_ElseIf`, `NI_Flow_Else`, `NI_Flow_End`,
   `NI_Flow_While`, `NI_Flow_DoWhile`, `NI_Flow_For`, `NI_Flow_ForEach`,
+  `NI_Flow_SweepLoop`, `NI_Flow_StreamLoop`,
   `NI_Flow_Select`, `NI_Flow_Case`, `NI_Flow_Break`, `NI_Flow_Continue`
 - Tests: `NumericLimitTest`, `StringValueTest`, `PassFailTest`, `NI_MultipleNumericLimitTest`
 - Actions: `Statement`, `Action`, `MessagePopup`, `CallExecutable`, `SequenceCall`

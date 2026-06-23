@@ -5355,12 +5355,40 @@ public sealed class TestStandService : ITestStandService
         "labview flex" or "g flex"             => "G Flexible VI Adapter",
         "cvi" or "c" or "c/cvi"                => "C/CVI Std Prototype Adapter",
         "cvi flex" or "c flex"                 => "C/CVI Flexible Prototype Adapter",
+        "dll" or "c++" or "cpp" or
+        "c/c++ dll" or "c++/dll" or "c++ dll"  => "DLL Flexible Prototype Adapter",
         "dotnet" or ".net"                     => "DotNet Adapter",
         "python"                               => "Python Adapter",
+        "activex" or "com" or
+        "activex/com" or "automation"          => "Automation Adapter",
         "none" or "<none>"                     => "None Adapter",
         "sequence adapter" or "sequence"       => "Sequence Adapter",
         _                                      => name ?? ""
     };
+
+    // Resolve an adapter's friendly DisplayName (e.g. ".NET", "ActiveX/COM") from its
+    // KeyName (e.g. "DotNet Adapter", "Automation Adapter") by scanning the loaded
+    // adapters. Returns "" when the engine is unavailable or the key is not found.
+    private string ResolveAdapterDisplayName(string keyName)
+    {
+        if (string.IsNullOrEmpty(keyName)) return "";
+        try
+        {
+            int count = (int)_engine!.NumAdapters;
+            for (int i = 0; i < count; i++)
+            {
+                dynamic adapter = _engine!.GetAdapter(i);
+                if (string.Equals(TryGetString(adapter, "KeyName"), keyName,
+                        StringComparison.OrdinalIgnoreCase))
+                    return TryGetString(adapter, "DisplayName");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to resolve adapter DisplayName for key '{Key}'.", keyName);
+        }
+        return "";
+    }
 
     /// <inheritdoc/>
     public async Task ChangeStepAdapterAsync(string filePath, string sequenceName,
@@ -6027,7 +6055,7 @@ public sealed class TestStandService : ITestStandService
 
             // Ensure the step uses the requested adapter before configuring its module.
             string resolvedKey = ResolveAdapterKeyName(adapterKey);
-            string currentKey  = TryGetString(step, "AdapterName");
+            string currentKey  = TryGetString(step, "AdapterKeyName");
             if (!string.Equals(currentKey, resolvedKey, StringComparison.OrdinalIgnoreCase))
             {
                 try { step.ChangeAdapter((object)resolvedKey); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to change step adapter to '{Adapter}'.", resolvedKey); }
@@ -6906,11 +6934,11 @@ public sealed class TestStandService : ITestStandService
         // Compare adapter
         try
         {
-            var a1 = TryGetString(step1, "AdapterName");
-            var a2 = TryGetString(step2, "AdapterName");
-            if (a1 != a2) changed.Add($"AdapterName: '{a1}' → '{a2}'");
+            var a1 = TryGetString(step1, "AdapterKeyName");
+            var a2 = TryGetString(step2, "AdapterKeyName");
+            if (a1 != a2) changed.Add($"Adapter: '{a1}' → '{a2}'");
         }
-        catch (Exception ex) { _logger.LogDebug(ex, "Failed to compare step AdapterName property."); }
+        catch (Exception ex) { _logger.LogDebug(ex, "Failed to compare step AdapterKeyName property."); }
 
         return changed;
     }
@@ -7299,9 +7327,13 @@ public sealed class TestStandService : ITestStandService
             int sgVal = ParseStepGroup(stepGroup);
             var step  = seq.GetStepByName(stepName, (object)sgVal);
 
-            string adapterKey  = TryGetString(step, "AdapterName");
-            string adapterDisp = "";
-            try { adapterDisp = (string)step.StepType.Adapter.DisplayName; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read adapter DisplayName for step '{Step}'.", stepName); }
+            // The Step COM property is AdapterKeyName (e.g. "DotNet Adapter"),
+            // NOT "AdapterName" — the latter does not exist and always read back "".
+            string adapterKey  = TryGetString(step, "AdapterKeyName");
+            // Resolve the friendly DisplayName from the loaded adapters by KeyName.
+            // step.StepType.Adapter would return the step TYPE's default adapter, not
+            // the adapter actually assigned to this step.
+            string adapterDisp = ResolveAdapterDisplayName(adapterKey);
 
             var info = new StepModuleInfo
             {

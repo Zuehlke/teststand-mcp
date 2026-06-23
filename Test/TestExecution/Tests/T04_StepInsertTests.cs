@@ -158,6 +158,22 @@ public class T04_StepInsertTests : TestBase
     }
 
     [Test]
+    public async Task Insert_NI_Flow_SweepLoop_NameAndCommentRoundTrip()
+    {
+        await SetupAsync();
+        await AssertStepRoundTrip("NI_Flow_SweepLoop", "Sweep_Voltage", "Sweeps the supply voltage across a range.");
+        await AssertStepRoundTrip("NI_Flow_End",       "End_Sweep",     "Ends the sweep loop.");
+    }
+
+    [Test]
+    public async Task Insert_NI_Flow_StreamLoop_NameAndCommentRoundTrip()
+    {
+        await SetupAsync();
+        await AssertStepRoundTrip("NI_Flow_StreamLoop", "Stream_Samples", "Streams samples while the source has data.");
+        await AssertStepRoundTrip("NI_Flow_End",        "End_Stream",     "Ends the stream loop.");
+    }
+
+    [Test]
     public async Task Insert_NI_Flow_Select_NameAndCommentRoundTrip()
     {
         await SetupAsync();
@@ -206,6 +222,12 @@ public class T04_StepInsertTests : TestBase
             Assert.That(s, Is.Not.Null, $"Step '{name}' not found");
             Assert.That(s!.Description, Is.EqualTo(comment), $"Comment mismatch for '{name}'");
         }
+
+        // Verify the Break/Continue step types themselves round-tripped
+        Assert.That(steps.First(x => x.Name == "Break_Exit").StepType,
+            Is.EqualTo("NI_Flow_Break"),    "Break step type should round-trip");
+        Assert.That(steps.First(x => x.Name == "Continue_Next").StepType,
+            Is.EqualTo("NI_Flow_Continue"), "Continue step type should round-trip");
     }
 
     // ── Rename step ────────────────────────────────────────────────────────────
