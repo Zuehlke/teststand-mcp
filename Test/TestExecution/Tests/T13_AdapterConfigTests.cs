@@ -87,4 +87,58 @@ public class T13_AdapterConfigTests : TestBase
                 $"Python adapter: {result.Adapter}; applied: {result.AppliedSettings.Count}");
         });
     }
+
+    // ── Apply each adapter to an Action step and verify it is set ───────────────
+    // These tests place a plain Action step, switch its adapter via the friendly
+    // name (LabVIEW, .NET, Python, ActiveX, C++/DLL, None) and read the result
+    // back with get_step_module_info. No module target is linked — we only assert
+    // that the adapter property was applied to the step.
+    //
+    // The expected KEY NAMES are the ones TestStand actually resolves to on this
+    // station (verified live), which can differ from the raw resolve-map value:
+    // e.g. "LabVIEW" maps to "G Std Prototype Adapter" but ChangeAdapter
+    // normalises it to the loaded "G Flexible VI Adapter".
+    [TestCase("LabVIEW", "G Flexible VI Adapter",          "LabVIEW")]
+    [TestCase("DotNet",  "DotNet Adapter",                 ".NET")]
+    [TestCase(".NET",    "DotNet Adapter",                 ".NET")]
+    [TestCase("Python",  "Python Adapter",                 "Python")]
+    [TestCase("ActiveX", "Automation Adapter",             "ActiveX/COM")]
+    [TestCase("C++/DLL", "DLL Flexible Prototype Adapter", "C/C++ DLL")]
+    [TestCase("None",    "None Adapter",                   "<None>")]
+    public async Task ChangeStepAdapter_OnActionStep_AppliesAdapter(
+        string friendlyAdapter, string expectedKeyName, string expectedDisplayName)
+    {
+        await PrepareStepAsync("AdapterStep", "Action");
+
+        await Ts.ChangeStepAdapterAsync(TempSeqFile, Seq, Grp, "AdapterStep", friendlyAdapter);
+
+        var info = await Ts.GetStepModuleInfoAsync(TempSeqFile, Seq, Grp, "AdapterStep");
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(info.AdapterName, Is.EqualTo(expectedKeyName),
+                $"Action step should report adapter key '{expectedKeyName}' " +
+                $"after change to '{friendlyAdapter}'");
+            Assert.That(info.AdapterDisplayName, Is.EqualTo(expectedDisplayName),
+                $"Action step should report display name '{expectedDisplayName}' " +
+                $"after change to '{friendlyAdapter}'");
+        });
+
+        TestContext.WriteLine(
+            $"'{friendlyAdapter}' -> key='{info.AdapterName}', display='{info.AdapterDisplayName}'");
+    }
+
+    [Test]
+    public async Task ChangeStepAdapter_ExactKeyName_AlsoApplies()
+    {
+        // Passing the exact TestStand key name (not just the friendly alias) must
+        // work too, since unknown names pass through the resolve map unchanged.
+        await PrepareStepAsync("ExactStep", "Action");
+
+        await Ts.ChangeStepAdapterAsync(TempSeqFile, Seq, Grp, "ExactStep",
+            "Automation Adapter");
+
+        var info = await Ts.GetStepModuleInfoAsync(TempSeqFile, Seq, Grp, "ExactStep");
+        Assert.That(info.AdapterName, Is.EqualTo("Automation Adapter"));
+    }
 }

@@ -124,11 +124,12 @@ public class TestStandToolRegistry
             "PREFERRED step types for conditional branching (if/else): " +
             "'NI_Flow_If' (condition), 'NI_Flow_ElseIf', 'NI_Flow_Else', 'NI_Flow_End' — " +
             "ALWAYS use these for if/else logic. NEVER use Goto/Label for branching. " +
-            "Loop step types: 'NI_Flow_While', 'NI_Flow_DoWhile', 'NI_Flow_For', 'NI_Flow_ForEach', 'NI_Flow_End'. " +
+            "Loop step types: 'NI_Flow_While', 'NI_Flow_DoWhile', 'NI_Flow_For', 'NI_Flow_ForEach', " +
+            "'NI_Flow_SweepLoop', 'NI_Flow_StreamLoop', 'NI_Flow_End'. " +
             "Other step types: 'Statement', 'NumericLimitTest', 'StringValueTest', 'PassFailTest', " +
             "'MessagePopup', 'CallExecutable', 'SequenceCall', 'Action'. " +
             "FORBIDDEN unless exceptional: 'Goto', 'Label' — legacy only, not for if/else or loops. " +
-            "Adapters: 'LabVIEW', 'CVI', 'DotNet', 'Python', 'None' (default).",
+            "Adapters: 'LabVIEW', 'CVI', 'C++/DLL', 'DotNet', 'Python', 'ActiveX', 'None' (default).",
             s => s
                 .AddRequired("sequence_file_path", "string", "Path to the sequence file")
                 .AddRequired("sequence_name", "string", "Name of the sequence")
@@ -136,7 +137,7 @@ public class TestStandToolRegistry
                 .AddRequired("step_type", "string", "Step type. Use 'NI_Flow_If'/'NI_Flow_Else'/'NI_Flow_End' for branching, never 'Goto'/'Label'.")
                 .AddRequired("step_name", "string", "Name for the new step")
                 .AddOptional("index", "integer", "Insert position (default: append at end)", -1)
-                .AddOptional("adapter", "string", "Adapter name: 'LabVIEW', 'CVI', 'DotNet', 'Python', 'None' (default)"),
+                .AddOptional("adapter", "string", "Adapter name: 'LabVIEW', 'CVI', 'C++/DLL', 'DotNet', 'Python', 'ActiveX', 'None' (default)"),
             InsertStepAsync);
 
         Register("insert_steps_bulk",
@@ -160,7 +161,7 @@ public class TestStandToolRegistry
                         .AddRequired("step_type", "string",
                             "Step type, e.g. 'SequenceCall', 'NI_Flow_If', 'NI_Flow_End', 'NI_Wait', 'Statement'.")
                         .AddOptional("adapter", "string",
-                            "Adapter: 'LabVIEW', 'CVI', 'DotNet', 'Python', 'None' (default)")
+                            "Adapter: 'LabVIEW', 'CVI', 'C++/DLL', 'DotNet', 'Python', 'ActiveX', 'None' (default)")
                         .AddOptional("comment", "string", "Step comment/description (kept short)")
                         .AddOptional("expression", "string",
                             "Step expression (e.g. an NI_Flow_If condition)")
@@ -1034,14 +1035,16 @@ public class TestStandToolRegistry
             SetStepBatchSyncOptionAsync);
 
         Register("change_step_adapter",
-            "Change the adapter (LabVIEW, CVI, .NET, etc.) of a step.",
+            "Change the adapter (LabVIEW, CVI, C++/DLL, .NET, Python, ActiveX/COM, None, etc.) of a step.",
             s => s
                 .AddRequired("file_path", "string", "Path to the sequence file")
                 .AddRequired("sequence_name", "string", "Name of the sequence")
                 .AddRequired("step_group", "string", "Step group: 'Setup', 'Main', or 'Cleanup'")
                 .AddRequired("step_name", "string", "Name of the step")
                 .AddRequired("new_adapter", "string",
-                    "Adapter key name: 'LabVIEW', 'CVI', 'DotNet', 'Python', 'None'"),
+                    "Adapter: 'LabVIEW', 'CVI', 'C++/DLL', 'DotNet', 'Python', 'ActiveX', 'None' " +
+                    "(friendly name or exact key name, e.g. 'Automation Adapter' for ActiveX, " +
+                    "'DLL Flexible Prototype Adapter' for C++/DLL)"),
             ChangeStepAdapterAsync);
 
         Register("get_step_unique_id",
