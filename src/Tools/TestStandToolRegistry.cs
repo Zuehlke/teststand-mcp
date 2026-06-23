@@ -1145,6 +1145,18 @@ public class TestStandToolRegistry
                 .AddRequired("file_path_2", "string", "Path to the second sequence file"),
             CompareSequenceFilesAsync);
 
+        Register("diff_sequence_files",
+            "Run NI TestStand's NATIVE FileDiffer on two sequence files and return its detailed, " +
+            "classified diff — exactly what the Sequence Editor's Diff/Merge view shows. Returns " +
+            "per-file tallies (changes/insertions/deletions) plus a flat list of differences, each " +
+            "with a change type (Insert, Delete, ValueChange, Conflict, Moved), the property-tree " +
+            "path, and the value in each file. More detailed than compare_sequence_files (which is " +
+            "a lighter, in-process structural comparison).",
+            s => s
+                .AddRequired("file_path_1", "string", "Path to the first (base) sequence file")
+                .AddRequired("file_path_2", "string", "Path to the second sequence file to diff against file 1"),
+            DiffSequenceFilesAsync);
+
         // ── Sync Manager ─────────────────────────────────────────────────────
 
         Register("get_sync_objects",
@@ -3289,6 +3301,14 @@ public class TestStandToolRegistry
         var path2 = args!.Value.GetRequiredString("file_path_2");
         var diff  = await _ts.CompareSequenceFilesAsync(path1, path2);
         return OkJson(diff);
+    }
+
+    private async Task<CallToolResult> DiffSequenceFilesAsync(JsonElement? args)
+    {
+        var path1 = args!.Value.GetRequiredString("file_path_1");
+        var path2 = args!.Value.GetRequiredString("file_path_2");
+        var report = await _ts.DiffSequenceFilesAsync(path1, path2);
+        return OkJson(report);
     }
 
     // ── Sync Manager Handlers ─────────────────────────────────────────────────

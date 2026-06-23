@@ -833,6 +833,60 @@ public class StepDiff
     public List<string> ChangedProperties { get; init; } = new();
 }
 
+// ── Native File-Diff Models (TestStand FileDiffer) ───────────────────────────
+
+/// <summary>Per-file change tally from a native FileDiffer report header.</summary>
+public class FileDifferFileSummary
+{
+    /// <summary>Display name from the report (e.g. "File 2: Test.seq").</summary>
+    public string Name { get; set; } = "";
+    /// <summary>File path as recorded in the report.</summary>
+    public string Path { get; set; } = "";
+    /// <summary>Number of value changes attributed to this file.</summary>
+    public int Changes { get; set; }
+    /// <summary>Number of insertions attributed to this file.</summary>
+    public int Insertions { get; set; }
+    /// <summary>Number of deletions attributed to this file.</summary>
+    public int Deletions { get; set; }
+}
+
+/// <summary>A single classified difference from a native FileDiffer report.</summary>
+public class FileDifferChange
+{
+    /// <summary>Kind of change: Insert, Delete, ValueChange, Conflict, Moved, MovedModified.</summary>
+    public string ChangeType { get; set; } = "";
+    /// <summary>Tree path of the ancestor property names (e.g. "MainSequence &gt; Setup &gt; Hallo").</summary>
+    public string Path { get; set; } = "";
+    /// <summary>Name of the changed node (e.g. a step name or a property like "Value").</summary>
+    public string Name { get; set; } = "";
+    /// <summary>Nesting depth of the node in the property tree.</summary>
+    public int Level { get; set; }
+    /// <summary>The node's displayed text/value in file 1 (empty when inserted).</summary>
+    public string File1Value { get; set; } = "";
+    /// <summary>The node's displayed text/value in file 2 (empty when deleted).</summary>
+    public string File2Value { get; set; } = "";
+}
+
+/// <summary>
+/// Result of a native TestStand FileDiffer comparison: per-file change tallies plus a flat,
+/// classified list of the individual differences with their tree path and per-file values.
+/// </summary>
+public class FileDifferReport
+{
+    /// <summary>First (base) file path.</summary>
+    public string File1 { get; set; } = "";
+    /// <summary>Second file path.</summary>
+    public string File2 { get; set; } = "";
+    /// <summary>Total differences (sum of per-file Changes + Insertions + Deletions).</summary>
+    public int TotalDifferences { get; set; }
+    /// <summary>True when no differences were found (no leaf changes and zero header tallies).</summary>
+    public bool Identical => Changes.Count == 0 && TotalDifferences == 0;
+    /// <summary>Per-file change tallies from the report header.</summary>
+    public List<FileDifferFileSummary> FileSummaries { get; init; } = new();
+    /// <summary>The individual classified differences.</summary>
+    public List<FileDifferChange> Changes { get; init; } = new();
+}
+
 // ── Sync Manager Models ──────────────────────────────────────────────────────
 
 /// <summary>Information about a synchronization object.</summary>

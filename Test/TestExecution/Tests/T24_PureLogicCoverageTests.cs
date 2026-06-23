@@ -299,6 +299,92 @@ public class T24_PureLogicCoverageTests
         Assert.That(m.Severity, Is.EqualTo("Warning"), "severity must come from the rule map (1=Warning)");
     }
 
+    // ── ParseDifferReport: native FileDiffer report → classified change list ─────
+    // The report is a row/col tree (col0 = name + BlockLevel, col1 = file1, col2 = file2 + StyleID),
+    // carrying the default DifferReport namespace. The parser tracks ancestors via BlockLevel and
+    // emits only leaf changes (ID_Children rows are context that build the path).
+    private const string SampleDifferReportXml =
+@"<?xml version='1.0' encoding='UTF-8'?>
+<DifferReport xmlns='http://www.ni.com/TestStand/23.0.0/DifferReport'>
+  <Header StationID='S' Date='d' Time='t' TSVersion='v'>
+    <File><Path>C:\a.seq</Path><Name>File 1: a.seq</Name>
+      <Changes Count='0'><LocalizedText>Changes</LocalizedText></Changes>
+      <Insertions Count='0'><LocalizedText>Ins</LocalizedText></Insertions>
+      <Deletions Count='0'><LocalizedText>Del</LocalizedText></Deletions></File>
+    <File><Path>C:\b.seq</Path><Name>File 2: b.seq</Name>
+      <Changes Count='1'><LocalizedText>Changes</LocalizedText></Changes>
+      <Insertions Count='0'><LocalizedText>Ins</LocalizedText></Insertions>
+      <Deletions Count='1'><LocalizedText>Del</LocalizedText></Deletions></File>
+    <AppliedFilters></AppliedFilters>
+  </Header>
+  <RowDifference>
+    <ColDifference><DifferenceInfo BlockLevel='0'><Text>MainSequence</Text></DifferenceInfo></ColDifference>
+    <ColDifference><DifferenceInfo><Text>MainSequence</Text></DifferenceInfo></ColDifference>
+    <ColDifference><DifferenceInfo StyleID='ID_Children'><Text>MainSequence</Text></DifferenceInfo></ColDifference>
+  </RowDifference>
+  <RowDifference>
+    <ColDifference><DifferenceInfo BlockLevel='1'><Text>Cleanup</Text></DifferenceInfo></ColDifference>
+    <ColDifference><DifferenceInfo><Text>Cleanup</Text></DifferenceInfo></ColDifference>
+    <ColDifference><DifferenceInfo StyleID='ID_Children'><Text>Cleanup</Text></DifferenceInfo></ColDifference>
+  </RowDifference>
+  <RowDifference>
+    <ColDifference><DifferenceInfo BlockLevel='2'><Text>OldStep</Text></DifferenceInfo></ColDifference>
+    <ColDifference><DifferenceInfo><Text>OldStep</Text></DifferenceInfo></ColDifference>
+    <ColDifference><DifferenceInfo StyleID='ID_Delete'><Text>OldStep</Text></DifferenceInfo></ColDifference>
+  </RowDifference>
+  <RowDifference>
+    <ColDifference><DifferenceInfo BlockLevel='1'><Text>Setup</Text></DifferenceInfo></ColDifference>
+    <ColDifference><DifferenceInfo><Text>Setup</Text></DifferenceInfo></ColDifference>
+    <ColDifference><DifferenceInfo StyleID='ID_Children'><Text>Setup</Text></DifferenceInfo></ColDifference>
+  </RowDifference>
+  <RowDifference>
+    <ColDifference><DifferenceInfo BlockLevel='2'><Text>Value</Text></DifferenceInfo></ColDifference>
+    <ColDifference><DifferenceInfo><Text>old</Text></DifferenceInfo></ColDifference>
+    <ColDifference><DifferenceInfo StyleID='ID_ValueChange'><Text>new</Text></DifferenceInfo></ColDifference>
+  </RowDifference>
+</DifferReport>";
+
+    [Test]
+    public void ParseDifferReport_ReadsHeaderTallies()
+    {
+        var r = TestStandService.ParseDifferReport(SampleDifferReportXml, @"C:\a.seq", @"C:\b.seq", _ => { });
+        Assert.That(r.File1, Is.EqualTo(@"C:\a.seq"));
+        Assert.That(r.FileSummaries.Count, Is.EqualTo(2));
+        var f2 = r.FileSummaries[1];
+        Assert.That(f2.Changes, Is.EqualTo(1));
+        Assert.That(f2.Deletions, Is.EqualTo(1));
+        Assert.That(r.TotalDifferences, Is.EqualTo(2), "sum of per-file changes+insertions+deletions");
+        Assert.That(r.Identical, Is.False);
+    }
+
+    [Test]
+    public void ParseDifferReport_EmitsLeafChanges_WithTypePathAndValues()
+    {
+        var r = TestStandService.ParseDifferReport(SampleDifferReportXml, @"C:\a.seq", @"C:\b.seq", _ => { });
+        Assert.That(r.Changes.Count, Is.EqualTo(2), "ID_Children context rows must NOT be emitted as changes");
+
+        var del = r.Changes[0];
+        Assert.That(del.ChangeType, Is.EqualTo("Delete"));
+        Assert.That(del.Name, Is.EqualTo("OldStep"));
+        Assert.That(del.Path, Is.EqualTo("MainSequence > Cleanup"));
+
+        var vc = r.Changes[1];
+        Assert.That(vc.ChangeType, Is.EqualTo("ValueChange"));
+        Assert.That(vc.Name, Is.EqualTo("Value"));
+        Assert.That(vc.Path, Is.EqualTo("MainSequence > Setup"));
+        Assert.That(vc.File1Value, Is.EqualTo("old"));
+        Assert.That(vc.File2Value, Is.EqualTo("new"));
+    }
+
+    [Test]
+    public void ParseDifferReport_EmptyOrInvalid_ReturnsIdentical()
+    {
+        var r = TestStandService.ParseDifferReport("", @"C:\a", @"C:\b", _ => { });
+        Assert.That(r.Changes, Is.Empty);
+        Assert.That(r.Identical, Is.True);
+        Assert.That(TestStandService.ParseDifferReport("<nope", @"C:\a", @"C:\b", _ => { }).Changes, Is.Empty);
+    }
+
     // ── SequencePlanValidator: rules not covered by T10 / T23 ────────────────────
 
     private static PlanStepInput Step(string name, string type, string? expr = null) =>

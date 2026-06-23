@@ -370,6 +370,9 @@ public interface ITestStandService : IDisposable
     /// <summary>Compares two sequence files and returns the structural differences between them.</summary>
     Task<SequenceFileDiff> CompareSequenceFilesAsync(string filePath1, string filePath2);
 
+    /// <summary>Runs the native TestStand FileDiffer and returns its detailed, classified diff report.</summary>
+    Task<FileDifferReport> DiffSequenceFilesAsync(string filePath1, string filePath2);
+
     // Sync Manager
     /// <summary>Returns all synchronization objects registered with the SyncManager.</summary>
     Task<List<SyncObjectInfo>> GetSyncObjectsAsync();
@@ -7056,6 +7059,268 @@ public sealed class TestStandService : ITestStandService
 
         return changed;
     }
+
+    // ── Native FileDiffer (detailed, TestStand-faithful diff) ──────────────────
+
+    /// <inheritdoc/>
+    public async Task<FileDifferReport> DiffSequenceFilesAsync(string filePath1, string filePath2)
+    {
+        EnsureConnected();
+        if (!System.IO.File.Exists(filePath1))
+            throw new System.IO.FileNotFoundException("Diff file 1 not found.", filePath1);
+        if (!System.IO.File.Exists(filePath2))
+            throw new System.IO.FileNotFoundException("Diff file 2 not found.", filePath2);
+
+        return await Task.Run(() =>
+        {
+            var diag = new System.Text.StringBuilder();
+            string diagPath = Path.Combine(Path.GetTempPath(), "ts_differ_diag.txt");
+            void Log(string msg) { diag.AppendLine(msg); }
+            void Flush() { try { System.IO.File.WriteAllText(diagPath, diag.ToString()); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to write differ diagnostics."); } }
+
+            // FileDiffer.exe ships in the connected engine's Bin directory — never hard-code a release.
+            var (binDir, _, _) = ResolveAnalyzerLocations();
+            string differExe = !string.IsNullOrEmpty(binDir)
+                ? Path.Combine(binDir, "FileDiffer.exe")
+                : "FileDiffer.exe";
+            if (!System.IO.File.Exists(differExe))
+                throw new InvalidOperationException($"FileDiffer.exe not found at: {differExe}");
+
+            string reportPath = Path.Combine(Path.GetTempPath(),
+                "ts_mcp_diff_" + Path.GetFileNameWithoutExtension(filePath1) + "_vs_"
+                + Path.GetFileNameWithoutExtension(filePath2) + ".xml");
+            try { if (System.IO.File.Exists(reportPath)) System.IO.File.Delete(reportPath); }
+            catch (Exception) { /* best-effort: clear stale report */ }
+
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName               = differExe,
+                Arguments              = $"/GenerateReport \"{reportPath}\" \"{filePath1}\" \"{filePath2}\"",
+                UseShellExecute        = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError  = true,
+                CreateNoWindow         = true,
+            };
+            ApplyTestStandToolChildEnv(psi);
+            Log($"Launching: {differExe} {psi.Arguments}");
+            Flush();
+
+            using var proc = System.Diagnostics.Process.Start(psi)
+                ?? throw new InvalidOperationException("Failed to start FileDiffer.exe.");
+            string stdout = proc.StandardOutput.ReadToEnd();
+            string stderr = proc.StandardError.ReadToEnd();
+            bool exited   = proc.WaitForExit(120_000);
+            if (!exited)
+            {
+                try { proc.Kill(); } catch (Exception) { /* best-effort: kill timed-out FileDiffer */ }
+                throw new InvalidOperationException("FileDiffer.exe timed out after 120 seconds.");
+            }
+            Log($"FileDiffer exit code: {proc.ExitCode}");
+            if (!string.IsNullOrWhiteSpace(stdout)) Log($"stdout: {stdout.Trim()}");
+            if (!string.IsNullOrWhiteSpace(stderr)) Log($"stderr: {stderr.Trim()}");
+
+            // FileDiffer reliably WRITES the report but then crashes on teardown with a negative exit
+            // code (0xC0000409), exactly like the engine / AnalyzerApp. Success is therefore judged by
+            // the report existing and parsing — NOT by the exit code.
+            if (!System.IO.File.Exists(reportPath))
+            {
+                Flush();
+                throw new InvalidOperationException(
+                    $"FileDiffer.exe produced no report (exit {proc.ExitCode}). stderr: {stderr.Trim()}");
+            }
+
+            string reportXml = System.IO.File.ReadAllText(reportPath, System.Text.Encoding.UTF8);
+            var report = ParseDifferReport(reportXml, filePath1, filePath2, Log);
+            try { System.IO.File.Delete(reportPath); } catch (Exception) { /* best-effort cleanup */ }
+
+            Log($"Parsed {report.Changes.Count} change(s); identical={report.Identical}");
+            Flush();
+            return report;
+        });
+    }
+
+    /// <summary>
+    /// Normalises a child <see cref="System.Diagnostics.ProcessStartInfo"/> environment so 32-bit NI
+    /// tools (AnalyzerApp.exe, FileDiffer.exe) and the LabVIEW RTE they may load find the system
+    /// variables they require — notably ProgramFiles(x86), whose absence crashes lvrt.dll with
+    /// 0xC0000409. The MCP host can inherit a heavily reduced environment, so these are set from the
+    /// OS regardless of this process's own environment. Requires UseShellExecute=false.
+    /// </summary>
+    private static void ApplyTestStandToolChildEnv(System.Diagnostics.ProcessStartInfo psi)
+    {
+        void Ensure(string key, string? value) { if (!string.IsNullOrEmpty(value)) psi.Environment[key] = value; }
+        Ensure("ProgramFiles(x86)",       Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86));
+        Ensure("ProgramFiles",            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles));
+        Ensure("ProgramData",             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData));
+        Ensure("ALLUSERSPROFILE",         Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData));
+        Ensure("CommonProgramFiles",      Environment.GetFolderPath(Environment.SpecialFolder.CommonProgramFiles));
+        Ensure("CommonProgramFiles(x86)", Environment.GetFolderPath(Environment.SpecialFolder.CommonProgramFilesX86));
+        Ensure("ComSpec",                 Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe"));
+        Ensure("TMP",                     Path.GetTempPath());
+        Ensure("TEMP",                    Path.GetTempPath());
+        Ensure("NUMBER_OF_PROCESSORS",    Environment.ProcessorCount.ToString());
+    }
+
+    /// <summary>
+    /// Parses a native FileDiffer report (DifferReport XML) into a <see cref="FileDifferReport"/>:
+    /// per-file tallies from the Header, plus a flat list of the leaf changes. The report is a
+    /// row/column tree (col0 = node name + BlockLevel, col1 = file-1 value, col2 = file-2 value +
+    /// StyleID); we walk it depth-first, track the ancestor path via BlockLevel, and emit only the
+    /// real leaf changes (Insert/Delete/ValueChange/Conflict/Move) — ID_Children rows are context.
+    /// The report carries the default DifferReport namespace, so all matching is by local-name.
+    /// </summary>
+    internal static FileDifferReport ParseDifferReport(string reportXml, string file1, string file2, Action<string> Log)
+    {
+        var report = new FileDifferReport { File1 = file1, File2 = file2 };
+        if (string.IsNullOrWhiteSpace(reportXml)) return report;
+
+        var doc = new System.Xml.XmlDocument();
+        try { doc.LoadXml(reportXml); }
+        catch (Exception ex) { Log($"Differ report parse error: {ex.Message}"); return report; }
+
+        static System.Xml.XmlNode? Child(System.Xml.XmlNode n, string local)
+        {
+            foreach (System.Xml.XmlNode c in n.ChildNodes)
+                if (string.Equals(c.LocalName, local, StringComparison.Ordinal)) return c;
+            return null;
+        }
+
+        // ── Header: per-file change tallies (Count attribute on Changes/Insertions/Deletions) ──
+        var fileNodes = doc.SelectNodes("//*[local-name()='Header']/*[local-name()='File']");
+        if (fileNodes != null)
+        {
+            foreach (System.Xml.XmlNode fileNode in fileNodes)
+            {
+                int Count(string local)
+                {
+                    if (Child(fileNode, local) is System.Xml.XmlElement e
+                        && int.TryParse(e.GetAttribute("Count"), out int v)) return v;
+                    return 0;
+                }
+                report.FileSummaries.Add(new FileDifferFileSummary
+                {
+                    Name       = Child(fileNode, "Name")?.InnerText?.Trim() ?? "",
+                    Path       = Child(fileNode, "Path")?.InnerText?.Trim() ?? "",
+                    Changes    = Count("Changes"),
+                    Insertions = Count("Insertions"),
+                    Deletions  = Count("Deletions"),
+                });
+            }
+        }
+
+        // ── Rows: DFS over the property tree; build the path, emit leaf changes ──
+        var pathStack = new List<string>();
+        var rowNodes  = doc.SelectNodes("//*[local-name()='RowDifference']");
+        if (rowNodes != null)
+        {
+            foreach (System.Xml.XmlNode row in rowNodes)
+            {
+                var cells = new List<System.Xml.XmlNode>();
+                foreach (System.Xml.XmlNode c in row.ChildNodes)
+                    if (string.Equals(c.LocalName, "ColDifference", StringComparison.Ordinal)) cells.Add(c);
+                if (cells.Count == 0) continue;
+
+                // col0 carries the node name + BlockLevel (nesting depth).
+                var (name0, level0) = DifferNameAndLevel(cells[0]);
+                if (level0 >= 0 && !string.IsNullOrEmpty(name0))
+                {
+                    while (pathStack.Count > level0) pathStack.RemoveAt(pathStack.Count - 1);
+                    while (pathStack.Count < level0) pathStack.Add("");
+                    pathStack.Add(name0);
+                }
+
+                // The change indicator (StyleID) sits on the result/last column.
+                string style = "";
+                for (int i = cells.Count - 1; i >= 0; i--)
+                {
+                    string s = DifferStyleOf(cells[i]);
+                    if (!string.IsNullOrEmpty(s)) { style = s; break; }
+                }
+
+                string? changeType = MapDifferStyle(style);
+                if (changeType == null) continue;   // ID_Children / NoDifference / ignored → context only
+
+                int upto = level0 >= 0 ? Math.Min(level0, pathStack.Count) : pathStack.Count;
+                var ancestors = new List<string>();
+                for (int i = 0; i < upto; i++)
+                    if (!string.IsNullOrEmpty(pathStack[i])) ancestors.Add(pathStack[i]);
+
+                report.Changes.Add(new FileDifferChange
+                {
+                    ChangeType = changeType,
+                    Path       = string.Join(" > ", ancestors),
+                    Name       = name0,
+                    Level      = level0 < 0 ? 0 : level0,
+                    File1Value = cells.Count > 1 ? DifferCellText(cells[1]) : "",
+                    File2Value = cells.Count > 2 ? DifferCellText(cells[2]) : "",
+                });
+            }
+        }
+
+        report.TotalDifferences = report.FileSummaries.Sum(s => s.Changes + s.Insertions + s.Deletions);
+        if (report.TotalDifferences == 0) report.TotalDifferences = report.Changes.Count;
+        return report;
+    }
+
+    /// <summary>Reads a ColDifference cell's DifferenceInfo Text + BlockLevel (name column).</summary>
+    private static (string name, int level) DifferNameAndLevel(System.Xml.XmlNode cell)
+    {
+        foreach (System.Xml.XmlNode c in cell.ChildNodes)
+        {
+            if (string.Equals(c.LocalName, "DifferenceInfo", StringComparison.Ordinal)
+                && c is System.Xml.XmlElement e)
+            {
+                string text = "";
+                foreach (System.Xml.XmlNode t in e.ChildNodes)
+                    if (string.Equals(t.LocalName, "Text", StringComparison.Ordinal))
+                    { text = t.InnerText?.Trim() ?? ""; break; }
+                int level = int.TryParse(e.GetAttribute("BlockLevel"), out int bl) ? bl : -1;
+                return (text, level);
+            }
+        }
+        return ("", -1);
+    }
+
+    /// <summary>Reads a ColDifference cell's StyleID (empty when the cell has no DifferenceInfo).</summary>
+    private static string DifferStyleOf(System.Xml.XmlNode cell)
+    {
+        foreach (System.Xml.XmlNode c in cell.ChildNodes)
+            if (string.Equals(c.LocalName, "DifferenceInfo", StringComparison.Ordinal)
+                && c is System.Xml.XmlElement e)
+                return e.GetAttribute("StyleID") ?? "";
+        return "";
+    }
+
+    /// <summary>Reads a ColDifference cell's displayed text (or "" for an Empty side).</summary>
+    private static string DifferCellText(System.Xml.XmlNode cell)
+    {
+        foreach (System.Xml.XmlNode c in cell.ChildNodes)
+        {
+            if (string.Equals(c.LocalName, "DifferenceInfo", StringComparison.Ordinal))
+            {
+                foreach (System.Xml.XmlNode t in c.ChildNodes)
+                    if (string.Equals(t.LocalName, "Text", StringComparison.Ordinal))
+                        return t.InnerText?.Trim() ?? "";
+                return "";
+            }
+            if (string.Equals(c.LocalName, "IsEmptyOrHashed", StringComparison.Ordinal))
+                return string.Equals(c.InnerText?.Trim(), "Hashed", StringComparison.OrdinalIgnoreCase)
+                    ? "(unchanged)" : "";
+        }
+        return "";
+    }
+
+    /// <summary>Maps a DifferReport StyleID to a public change type, or null for context/ignored rows.</summary>
+    private static string? MapDifferStyle(string styleId) => styleId switch
+    {
+        "ID_Insert"        => "Insert",
+        "ID_Delete"        => "Delete",
+        "ID_ValueChange"   => "ValueChange",
+        "ID_Conflict"      => "Conflict",
+        "ID_NoDifference0" => "Moved",
+        "ID_NoDifference1" => "MovedModified",
+        _                  => null,
+    };
 
     private List<string> ComparePropertyBlock(dynamic block1, dynamic block2, string prefix)
     {
