@@ -282,9 +282,14 @@ public class TestStandToolRegistry
             SetStepModulePathAsync);
 
         Register("run_sequence_analyzer",
-            "Run the NI TestStand Sequence Analyzer on a sequence file and return all messages sorted by severity.",
+            "Run the NI TestStand Sequence Analyzer on a sequence file and return all messages, " +
+            "grouped by severity by default (like the editor's Analysis Results 'Group By' pane). " +
+            "Use group_by='rule' to group by rule, or group_by='none' for a flat sorted list.",
             s => s
-                .AddRequired("file_path", "string", "Absolute path to the sequence file to analyze"),
+                .AddRequired("file_path", "string", "Absolute path to the sequence file to analyze")
+                .AddOptional("group_by", "string",
+                    "How to group the output: 'severity' (default), 'rule', or 'none' for a flat list.",
+                    "severity", new[] { "severity", "rule", "none" }),
             RunSequenceAnalyzerAsync);
 
         // Executions
@@ -1921,12 +1926,18 @@ public class TestStandToolRegistry
 
         Register("analyze_sequence_file",
             "Run the TestStand Sequence Analyzer on a file and return typed messages with " +
-            "severity counts. Filter by minimum severity.",
+            "severity counts. Filter by minimum severity, and optionally group the results " +
+            "(by severity or rule) like the editor's Analysis Results 'Group By' pane. The flat " +
+            "'messages' list and counts are always present; grouping adds a 'groups' array.",
             s => s
                 .AddRequired("file_path", "string", "Path to the sequence file to analyze")
                 .AddOptional("min_severity", "string",
                     "Minimum severity to include: 'Information' (default), 'Warning', or 'Error'",
-                    "Information", new[] { "Information", "Warning", "Error" }),
+                    "Information", new[] { "Information", "Warning", "Error" })
+                .AddOptional("group_by", "string",
+                    "Group the returned messages: 'severity' (default), 'rule', or 'none' for a " +
+                    "flat list only. Grouped results populate the 'groups' array.",
+                    "severity", new[] { "severity", "rule", "none" }),
             AnalyzeSequenceFileAsync);
 
         // ── Output & UI Messages ───────────────────────────────────────────────
@@ -2294,14 +2305,33 @@ public class TestStandToolRegistry
     private async Task<CallToolResult> RunSequenceAnalyzerAsync(JsonElement? args)
     {
         var filePath = args!.Value.GetRequiredString("file_path");
+        var groupBy  = args!.Value.GetStringOrDefault("group_by", "severity");
         var messages = await _ts.RunSequenceAnalyzerAsync(filePath);
         if (messages.Count == 0)
             return Ok("Sequence Analyzer found no issues.");
+
         var sb = new System.Text.StringBuilder();
         sb.AppendLine($"Sequence Analyzer found {messages.Count} message(s):\n");
-        foreach (var m in messages)
-            sb.AppendLine($"[{m.Severity}] {m.RuleId}: {m.Text}");
-        return Ok(sb.ToString());
+
+        if (AnalyzerGrouping.IsGrouped(groupBy))
+        {
+            // The grouped field is shown in the header, so omit it from each line.
+            bool byRule = groupBy.Trim().ToLowerInvariant() == "rule";
+            foreach (var g in AnalyzerGrouping.Group(messages, groupBy))
+            {
+                sb.AppendLine($"{g.Key} ({g.Count}):");
+                foreach (var m in g.Messages)
+                    sb.AppendLine(byRule ? $"  [{m.Severity}] {m.Text}"
+                                         : $"  [{m.RuleId}] {m.Text}");
+                sb.AppendLine();
+            }
+        }
+        else
+        {
+            foreach (var m in messages)
+                sb.AppendLine($"[{m.Severity}] {m.RuleId}: {m.Text}");
+        }
+        return Ok(sb.ToString().TrimEnd());
     }
 
     private async Task<CallToolResult> SetStepModulePathAsync(JsonElement? args)
@@ -3565,7 +3595,8 @@ public class TestStandToolRegistry
     {
         var filePath    = args!.Value.GetRequiredString("file_path");
         var minSeverity = args!.Value.GetStringOrDefault("min_severity", "Information");
-        var result      = await _ts.RunSequenceAnalyzerDetailedAsync(filePath, minSeverity);
+        var groupBy     = args!.Value.GetStringOrDefault("group_by", "severity");
+        var result      = await _ts.RunSequenceAnalyzerDetailedAsync(filePath, minSeverity, groupBy);
         return OkJson(result);
     }
 

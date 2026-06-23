@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace TestStandMCP.Models;
 
@@ -499,6 +500,17 @@ public class AnalyzerMessage
     public string StepName { get; set; } = "";
 }
 
+/// <summary>A set of analyzer messages sharing a common key (a severity or a rule).</summary>
+public class AnalyzerMessageGroup
+{
+    /// <summary>The shared group key (e.g. "Error"/"Warning"/"Information", or a RuleId).</summary>
+    public string Key { get; set; } = "";
+    /// <summary>Number of messages in this group.</summary>
+    public int Count { get; set; }
+    /// <summary>The messages belonging to this group.</summary>
+    public List<AnalyzerMessage> Messages { get; init; } = new();
+}
+
 /// <summary>Aggregated result of a sequence-analyzer run, incl. severity counts.</summary>
 public class AnalyzerResult
 {
@@ -512,8 +524,62 @@ public class AnalyzerResult
     public int WarningCount { get; set; }
     /// <summary>Number of information-severity messages.</summary>
     public int InformationCount { get; set; }
-    /// <summary>The analyzer messages.</summary>
+    /// <summary>The analyzer messages (always present, flat — regardless of grouping).</summary>
     public List<AnalyzerMessage> Messages { get; init; } = new();
+    /// <summary>How <see cref="Groups"/> is keyed: "severity", "rule", or "" when not grouped.</summary>
+    public string GroupBy { get; set; } = "";
+    /// <summary>Messages grouped by <see cref="GroupBy"/>; empty when no grouping was requested.</summary>
+    public List<AnalyzerMessageGroup> Groups { get; init; } = new();
+}
+
+/// <summary>
+/// Pure helpers that group analyzer messages the way the Sequence Editor's
+/// Analysis Results pane does (its "Group By" drop-down). No engine required.
+/// </summary>
+public static class AnalyzerGrouping
+{
+    /// <summary>
+    /// True when <paramref name="groupBy"/> requests grouping — i.e. anything other than
+    /// null/empty/"none" (case-insensitive).
+    /// </summary>
+    public static bool IsGrouped(string? groupBy)
+    {
+        var g = (groupBy ?? "").Trim().ToLowerInvariant();
+        return g.Length > 0 && g != "none";
+    }
+
+    /// <summary>
+    /// Groups <paramref name="messages"/> by the requested key. "rule" groups by RuleId
+    /// (most-frequent first); any other non-empty value groups by Severity in
+    /// Error → Warning → Information order. Only non-empty groups are returned.
+    /// </summary>
+    public static List<AnalyzerMessageGroup> Group(IEnumerable<AnalyzerMessage> messages, string? groupBy)
+    {
+        var list = messages as IList<AnalyzerMessage> ?? messages.ToList();
+        var key  = (groupBy ?? "").Trim().ToLowerInvariant();
+
+        if (key == "rule")
+        {
+            return list
+                .GroupBy(m => string.IsNullOrEmpty(m.RuleId) ? "(no rule)" : m.RuleId)
+                .Select(g => new AnalyzerMessageGroup { Key = g.Key, Count = g.Count(), Messages = g.ToList() })
+                .OrderByDescending(g => g.Count)
+                .ThenBy(g => g.Key, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        // Default: group by severity in the engine's display order.
+        static int SevOrder(string s) => s switch
+        {
+            "Error" => 0, "Warning" => 1, "Information" => 2, _ => 3
+        };
+        return list
+            .GroupBy(m => string.IsNullOrEmpty(m.Severity) ? "(unknown)" : m.Severity)
+            .Select(g => new AnalyzerMessageGroup { Key = g.Key, Count = g.Count(), Messages = g.ToList() })
+            .OrderBy(g => SevOrder(g.Key))
+            .ThenBy(g => g.Key, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
 }
 
 // ── User / Privilege Models ──────────────────────────────────────────────────

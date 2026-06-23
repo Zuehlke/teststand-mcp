@@ -610,9 +610,10 @@ public interface ITestStandService : IDisposable
         string targetSequenceName, string targetSequenceFile = "", bool save = true);
 
     // ── Sequence Analyzer (detailed) ─────────────────────────────────────────
-    /// <summary>Runs the Sequence Analyzer and returns a detailed result filtered by minimum severity.</summary>
+    /// <summary>Runs the Sequence Analyzer and returns a detailed result filtered by minimum
+    /// severity and optionally grouped (by "severity", "rule", or "none" for a flat list).</summary>
     Task<AnalyzerResult> RunSequenceAnalyzerDetailedAsync(string filePath,
-        string minSeverity = "Information");
+        string minSeverity = "Information", string groupBy = "severity");
 
     // ── Output & UI Messages ─────────────────────────────────────────────────
     /// <summary>Posts a message to the engine output window.</summary>
@@ -741,6 +742,10 @@ public sealed class TestStandService : ITestStandService
     private static readonly Regex _messagesCaptureRx  = new(@"<Messages classname='Objs'>(.*?)</Messages>", XmlRx);
     private static readonly Regex _firstValueRx       = new(@"<Messages classname='Objs'>\s*<value\b([^>]*)>?", XmlRx);
     private static readonly Regex _selfClosingValueRx = new(@"<Messages classname='Objs'>\s*<value\b[^>]*/\s*>", XmlRx);
+    // Analyzer location paths embed the sequence + step as bracketed, double-quoted names,
+    // e.g.  Data.Seq["MainSequence"].Main["Label_Disabled"].TS.Mode
+    private static readonly Regex _analyzerSeqNameRx  = new(@"\bSeq\[""([^""]+)""\]", RegexOptions.Compiled);
+    private static readonly Regex _analyzerStepNameRx = new(@"\b(?:Setup|Main|Cleanup)\[""([^""]+)""\]", RegexOptions.Compiled);
 
     /// <summary>Creates the service with the given logger.</summary>
     public TestStandService(ILogger<TestStandService> logger)
@@ -2778,6 +2783,14 @@ public sealed class TestStandService : ITestStandService
         Log($"Resolved saved project:   {(string.IsNullOrEmpty(savedProject) ? "(public dir unknown)" : savedProject)}");
         string tempProject = System.IO.Path.Combine(
             System.IO.Path.GetTempPath(), "ts_mcp_analysis_" + System.IO.Path.GetFileNameWithoutExtension(filePath) + ".tsaproj");
+        // The saved project's per-message records carry NO severity — only a RuleId. Effective
+        // severity (what the editor's Analysis-Results pane shows) is per-RULE and only materialises
+        // in the analyzer REPORT, so we also ask AnalyzerApp to emit an XML report and read the
+        // resolved RuleId→Severity map from its rule catalog. (See ParseRuleSeverities.)
+        string reportPath = System.IO.Path.Combine(
+            System.IO.Path.GetTempPath(), "ts_mcp_report_" + System.IO.Path.GetFileNameWithoutExtension(filePath) + ".xml");
+        try { if (System.IO.File.Exists(reportPath)) System.IO.File.Delete(reportPath); }
+        catch (Exception) { /* best-effort: clear stale report before the run */ }
 
         // ── 1. Build temp project XML ─────────────────────────────────────────
         // Start from the user's saved project (rules configured) or a minimal template.
@@ -2835,7 +2848,7 @@ public sealed class TestStandService : ITestStandService
         var psi = new System.Diagnostics.ProcessStartInfo
         {
             FileName               = analyzerExe,
-            Arguments              = $"\"{tempProject}\" /analyze /save /quit",
+            Arguments              = $"\"{tempProject}\" /analyze /report \"{reportPath}\" /save /quit",
             UseShellExecute        = false,
             RedirectStandardOutput = true,
             RedirectStandardError  = true,
@@ -2921,10 +2934,30 @@ public sealed class TestStandService : ITestStandService
             throw new InvalidOperationException("AnalyzerApp.exe did not save the project file.");
 
         string savedXml = System.IO.File.ReadAllText(tempProject, System.Text.Encoding.UTF8);
-        var result = ParseAnalyzerMessages(savedXml, Log);
 
-        // Clean up temp file
+        // Build the RuleId→Severity map from the report's rule catalog (resolves Default→effective
+        // severity). Best-effort: if the report is missing/unparseable, ParseAnalyzerMessages falls
+        // back to the legacy per-message Severity value.
+        var ruleSeverity = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            if (System.IO.File.Exists(reportPath))
+            {
+                string reportXml = System.IO.File.ReadAllText(reportPath, System.Text.Encoding.UTF8);
+                ruleSeverity = ParseRuleSeverities(reportXml, Log);
+            }
+            else
+            {
+                Log($"Analyzer report not found at {reportPath} — severities fall back to per-message parse.");
+            }
+        }
+        catch (Exception ex) { Log($"Failed to read analyzer report: {ex.Message}"); }
+
+        var result = ParseAnalyzerMessages(savedXml, Log, ruleSeverity);
+
+        // Clean up temp files
         try { System.IO.File.Delete(tempProject); } catch (Exception) { /* best-effort: delete temp analyzer project file — intentionally ignored */ }
+        try { System.IO.File.Delete(reportPath); } catch (Exception) { /* best-effort: delete temp analyzer report file — intentionally ignored */ }
 
         Log($"Total messages collected: {result.Count}");
         Flush();
@@ -3041,7 +3074,8 @@ public sealed class TestStandService : ITestStandService
         return null;
     }
 
-    private static List<AnalyzerMessage> ParseAnalyzerMessages(string projectXml, Action<string> Log)
+    internal static List<AnalyzerMessage> ParseAnalyzerMessages(string projectXml, Action<string> Log,
+        IReadOnlyDictionary<string, int>? ruleSeverity = null)
     {
         var result = new List<AnalyzerMessage>();
 
@@ -3103,20 +3137,44 @@ public sealed class TestStandService : ITestStandService
             string sevStr  = GetSubProp("Severity") ?? "";
             string ruleId  = GetSubProp("RuleId")   ?? "";
             string text    = GetSubProp("Text")      ?? "";
-            string loc     = GetSubProp("Location")  ?? GetSubProp("LocationString") ?? "";
-            string seqName = GetSubProp("SequenceName") ?? GetSubProp("SeqName") ?? "";
-            string stepName = GetSubProp("StepName") ?? "";
 
             if (string.IsNullOrEmpty(ruleId) && string.IsNullOrEmpty(text))
                 continue; // skip empty/sentinel objects
 
-            int.TryParse(sevStr, out int sevInt);
+            // The finding's location is NOT a flat property — it is the first element of a
+            // Locations[] array of Objs, each exposing PropertyPath (step-ID form),
+            // PropertyPathWithNames (friendly step name, when the location is a step) and FilePath.
+            // Prefer the friendly path; derive the sequence + step names from its bracketed tokens.
+            string loc = "", seqName = "", stepName = "";
+            var locSub = obj.SelectSingleNode("subprops/Locations/value/value/Obj/subprops");
+            if (locSub != null)
+            {
+                string pathNamed = locSub.SelectSingleNode("PropertyPathWithNames/value")?.InnerText?.Trim() ?? "";
+                string pathRaw   = locSub.SelectSingleNode("PropertyPath/value")?.InnerText?.Trim() ?? "";
+                loc = pathNamed.Length > 0 ? pathNamed : pathRaw;
+
+                var seqMatch  = _analyzerSeqNameRx.Match(loc);
+                if (seqMatch.Success)  seqName  = seqMatch.Groups[1].Value;
+                var stepMatch = _analyzerStepNameRx.Match(loc);
+                if (stepMatch.Success) stepName = stepMatch.Groups[1].Value;
+            }
+
+            // Effective severity comes from the report's per-rule catalog (ruleSeverity). The saved
+            // project messages carry no Severity, so fall back to the (legacy) per-message value only
+            // when the rule is absent from the map — e.g. the report could not be generated.
+            int sevInt;
+            if (!string.IsNullOrEmpty(ruleId) && ruleSeverity != null
+                && ruleSeverity.TryGetValue(ruleId, out int ruleSev))
+                sevInt = ruleSev;
+            else
+                int.TryParse(sevStr, out sevInt);
+
             string sevLabel = sevInt switch
             {
                 0 => "Error",
                 1 => "Warning",
                 2 => "Information",
-                _ => "Information"   // 3 = Default (use rule's own default)
+                _ => "Information"   // 3 = Default/Disabled (rules at 3 do not produce messages)
             };
 
             result.Add(new AnalyzerMessage
@@ -3131,6 +3189,56 @@ public sealed class TestStandService : ITestStandService
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// Builds a RuleId → severity map (0=Error, 1=Warning, 2=Information, 3=Default/Disabled) from
+    /// the analyzer REPORT XML. The saved project's messages carry no severity — only a RuleId — so
+    /// the effective severity (what the editor's Analysis-Results pane shows) is taken from the
+    /// report's rule catalog, where each rule <c>&lt;Obj&gt;</c> exposes its resolved <c>Id</c> +
+    /// <c>Severity</c>. Result-message Objs (keyed <c>RuleId</c>, not <c>Id</c>) are ignored here.
+    /// The report carries the default TestStand namespace, so all matching is by local-name.
+    /// </summary>
+    internal static Dictionary<string, int> ParseRuleSeverities(string reportXml, Action<string> Log)
+    {
+        var map = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(reportXml)) return map;
+
+        var doc = new System.Xml.XmlDocument();
+        try { doc.LoadXml(reportXml); }
+        catch (Exception ex) { Log($"Report XML parse error: {ex.Message}"); return map; }
+
+        var objNodes = doc.SelectNodes("//*[local-name()='Obj']");
+        if (objNodes == null) return map;
+
+        static string? LeafChildVal(System.Xml.XmlNode subprops, string name)
+        {
+            foreach (System.Xml.XmlNode c in subprops.ChildNodes)
+            {
+                if (!string.Equals(c.LocalName, name, StringComparison.Ordinal)) continue;
+                foreach (System.Xml.XmlNode v in c.ChildNodes)
+                    if (string.Equals(v.LocalName, "value", StringComparison.Ordinal))
+                        return v.InnerText?.Trim();
+            }
+            return null;
+        }
+
+        foreach (System.Xml.XmlNode obj in objNodes)
+        {
+            System.Xml.XmlNode? sp = null;
+            foreach (System.Xml.XmlNode c in obj.ChildNodes)
+                if (string.Equals(c.LocalName, "subprops", StringComparison.Ordinal)) { sp = c; break; }
+            if (sp == null) continue;
+
+            // Rule-catalog entries expose Id + Severity; everything else (messages, options) is skipped.
+            string? id  = LeafChildVal(sp, "Id");
+            string? sev = LeafChildVal(sp, "Severity");
+            if (!string.IsNullOrEmpty(id) && int.TryParse(sev, out int si))
+                map[id!] = si;
+        }
+
+        Log($"Rule-severity map built from report: {map.Count} rules");
+        return map;
     }
 
     // ── Win32 message pump (used by the dedicated engine thread to drive executions) ──
@@ -6095,7 +6203,7 @@ public sealed class TestStandService : ITestStandService
 
     /// <inheritdoc/>
     public async Task<AnalyzerResult> RunSequenceAnalyzerDetailedAsync(string filePath,
-        string minSeverity = "Information")
+        string minSeverity = "Information", string groupBy = "severity")
     {
         var messages = await RunSequenceAnalyzerAsync(filePath);
 
@@ -6106,6 +6214,8 @@ public sealed class TestStandService : ITestStandService
         int threshold = Rank(minSeverity);
         var filtered = messages.Where(m => Rank(m.Severity) >= threshold).ToList();
 
+        bool grouped = AnalyzerGrouping.IsGrouped(groupBy);
+
         return new AnalyzerResult
         {
             FilePath         = filePath,
@@ -6113,7 +6223,11 @@ public sealed class TestStandService : ITestStandService
             ErrorCount       = filtered.Count(m => m.Severity == "Error"),
             WarningCount     = filtered.Count(m => m.Severity == "Warning"),
             InformationCount = filtered.Count(m => m.Severity == "Information"),
-            Messages         = filtered
+            Messages         = filtered,
+            GroupBy          = grouped ? groupBy.Trim().ToLowerInvariant() : "",
+            Groups           = grouped
+                                   ? AnalyzerGrouping.Group(filtered, groupBy)
+                                   : new List<AnalyzerMessageGroup>()
         };
     }
 

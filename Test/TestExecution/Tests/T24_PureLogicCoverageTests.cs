@@ -186,6 +186,119 @@ public class T24_PureLogicCoverageTests
             Is.EqualTo(""), "no NI_Types palette available → empty");
     }
 
+    // ── ParseRuleSeverities: analyzer report rule-catalog → RuleId→severity map ──
+    // The report carries the default TestStand namespace, so the parser must match by local-name.
+    // Rule-catalog Objs expose Id + Severity; result-message Objs expose RuleId and must be skipped.
+    private const string SampleReportXml =
+@"<?xml version='1.0' encoding='UTF-8'?>
+<teststandfileheader type='TEOLEDataSource' xmlns='http://www.ni.com/TestStand/23.0.0/PropertyObjectFile'>
+  <TEOLEDataSource>
+    <ReportData classname='Obj'>
+      <subprops>
+        <Obj classname='Obj'><subprops>
+          <Id classname='Str'><value>NI_AlphaRule</value></Id>
+          <Name classname='Str'><value>Alpha</value></Name>
+          <Severity classname='Num'><value>0</value></Severity>
+        </subprops></Obj>
+        <Obj classname='Obj'><subprops>
+          <Id classname='Str'><value>NI_BetaRule</value></Id>
+          <Severity classname='Num'><value>1</value></Severity>
+        </subprops></Obj>
+        <Obj classname='Obj'><subprops>
+          <Id classname='Str'><value>NI_GammaRule</value></Id>
+          <Severity classname='Num'><value>2</value></Severity>
+        </subprops></Obj>
+        <Obj classname='Obj'><subprops>
+          <RuleId classname='Str'><value>NI_AlphaRule</value></RuleId>
+          <Text classname='Str'><value>a finding, not a rule</value></Text>
+        </subprops></Obj>
+      </subprops>
+    </ReportData>
+  </TEOLEDataSource>
+</teststandfileheader>";
+
+    [Test]
+    public void ParseRuleSeverities_MapsCatalogRules_SkipsMessageObjs()
+    {
+        var map = TestStandService.ParseRuleSeverities(SampleReportXml, _ => { });
+        Assert.That(map.Count, Is.EqualTo(3),
+            "only the three Id+Severity rule objs map; the RuleId message obj is skipped");
+        Assert.That(map["NI_AlphaRule"], Is.EqualTo(0));
+        Assert.That(map["NI_BetaRule"],  Is.EqualTo(1));
+        Assert.That(map["NI_GammaRule"], Is.EqualTo(2));
+    }
+
+    [Test]
+    public void ParseRuleSeverities_RuleIdLookupIsCaseInsensitive()
+    {
+        var map = TestStandService.ParseRuleSeverities(SampleReportXml, _ => { });
+        Assert.That(map.ContainsKey("ni_alpharule"), Is.True);
+    }
+
+    [Test]
+    public void ParseRuleSeverities_EmptyOrInvalid_ReturnsEmptyMap()
+    {
+        Assert.That(TestStandService.ParseRuleSeverities("", _ => { }), Is.Empty);
+        Assert.That(TestStandService.ParseRuleSeverities("<not-valid-xml", _ => { }), Is.Empty);
+    }
+
+    // ── ParseAnalyzerMessages: nested Locations[] → Location/SequenceName/StepName ──
+    // A finding's location is the first element of a Locations[] array of Objs, each exposing
+    // PropertyPath (step-ID form), PropertyPathWithNames (friendly names) and FilePath.
+    private static string MsgProjectXml(string locationSubprops) =>
+@"<teststandfileheader><Messages classname='Objs'><value lbound='[0]' ubound='[0]'><value arrayindex='[0]'>
+  <Obj name=''><subprops>
+    <RuleId classname='Str'><value>NI_TestRule</value></RuleId>
+    <Text classname='Str'><value>finding text</value></Text>
+    <Locations classname='Objs'><value lbound='[0]' ubound='[0]'><value><Obj name=''><subprops>"
++ locationSubprops +
+@"</subprops></Obj></value></value></Locations>
+  </subprops></Obj>
+</value></value></Messages></teststandfileheader>";
+
+    [Test]
+    public void ParseAnalyzerMessages_StepLocation_ExtractsFriendlyPathSeqAndStep()
+    {
+        string xml = MsgProjectXml(
+            @"<PropertyPath classname='Str'><value>Data.Seq[""MainSequence""].Main[""ID#:abc123""].TS.Mode</value></PropertyPath>
+              <PropertyPathWithNames classname='Str'><value>Data.Seq[""MainSequence""].Main[""Label_Disabled""].TS.Mode</value></PropertyPathWithNames>
+              <FilePath classname='Str'><value>C:\proj\Demo.seq</value></FilePath>");
+
+        var msgs = TestStandService.ParseAnalyzerMessages(xml, _ => { });
+        Assert.That(msgs.Count, Is.EqualTo(1), "the nested location Obj must NOT be counted as a message");
+        var m = msgs[0];
+        Assert.That(m.RuleId, Is.EqualTo("NI_TestRule"));
+        Assert.That(m.Location, Is.EqualTo(@"Data.Seq[""MainSequence""].Main[""Label_Disabled""].TS.Mode"),
+            "friendly PropertyPathWithNames must win over the ID-based PropertyPath");
+        Assert.That(m.SequenceName, Is.EqualTo("MainSequence"));
+        Assert.That(m.StepName, Is.EqualTo("Label_Disabled"));
+    }
+
+    [Test]
+    public void ParseAnalyzerMessages_NonStepLocation_HasSequenceButNoStep()
+    {
+        // A parameter/variable location has only PropertyPath (no friendly names) and no step token.
+        string xml = MsgProjectXml(
+            @"<PropertyPath classname='Str'><value>Data.Seq[""MainSequence""].Parameters.Schnittstelle</value></PropertyPath>
+              <FilePath classname='Str'><value>C:\proj\Demo.seq</value></FilePath>");
+
+        var m = TestStandService.ParseAnalyzerMessages(xml, _ => { })[0];
+        Assert.That(m.Location, Is.EqualTo(@"Data.Seq[""MainSequence""].Parameters.Schnittstelle"));
+        Assert.That(m.SequenceName, Is.EqualTo("MainSequence"));
+        Assert.That(m.StepName, Is.Empty, "a non-step location must not yield a step name");
+    }
+
+    [Test]
+    public void ParseAnalyzerMessages_SeverityComesFromRuleMap()
+    {
+        string xml = MsgProjectXml(
+            @"<PropertyPath classname='Str'><value>Data.Seq[""S""].Parameters.X</value></PropertyPath>");
+        var map = new System.Collections.Generic.Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
+            { ["NI_TestRule"] = 1 };
+        var m = TestStandService.ParseAnalyzerMessages(xml, _ => { }, map)[0];
+        Assert.That(m.Severity, Is.EqualTo("Warning"), "severity must come from the rule map (1=Warning)");
+    }
+
     // ── SequencePlanValidator: rules not covered by T10 / T23 ────────────────────
 
     private static PlanStepInput Step(string name, string type, string? expr = null) =>
