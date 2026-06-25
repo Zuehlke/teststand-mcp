@@ -182,7 +182,8 @@ public class TestStandToolRegistry
             "names. Returns {valid, errorCount, warningCount, errors[], warnings[], stats{}}. " +
             "ONLY proceed to build when valid==true (errors block the build; warnings are " +
             "advisory — e.g. unlinked SequenceCall placeholders). Checks: balanced NI_Flow_* " +
-            "blocks (openers ↔ End), ElseIf/Else inside If, Case inside Select, Break/Continue " +
+            "blocks (openers ↔ End), ElseIf/Else inside If, each Case closed by its OWN End " +
+            "inside a Select (a single End for the whole Select nests the cases), Break/Continue " +
             "inside a loop, no Goto/Label, unique step names, known step types, and that every " +
             "Locals.X referenced in a condition is declared in 'locals'.",
             s => s
@@ -976,6 +977,28 @@ public class TestStandToolRegistry
                 .AddOptional("while_expr", "string", "While/condition expression")
                 .AddOptional("inc_expr", "string", "Increment expression (For loop)"),
             SetStepLoopAsync);
+
+        Register("set_flow_condition",
+            "Set the flow-control CONDITION of a branch step — the dedicated property the engine " +
+            "actually evaluates to branch (NOT Pre/Post/Status). Writes ConditionExpr for " +
+            "NI_Flow_If / NI_Flow_ElseIf / NI_Flow_While / NI_Flow_DoWhile (the boolean condition), " +
+            "and ItemExpr for NI_Flow_Select (the switch expression) and NI_Flow_Case (the case " +
+            "value(s), e.g. \"A\", \"B\" or {Enums.X.A, Enums.X.B}). For a default Case pass " +
+            "is_default=true (condition may be empty). NOTE: the bulk-insert / set_step_expression " +
+            "'expression' field does NOT set this — it writes the Post Expression, which would " +
+            "evaluate-and-discard without branching; this tool also clears such a duplicate Post " +
+            "Expression automatically.",
+            s => s
+                .AddRequired("file_path", "string", "Path to the sequence file")
+                .AddRequired("sequence_name", "string", "Name of the sequence")
+                .AddRequired("step_group", "string", "Step group: 'Setup', 'Main', or 'Cleanup'")
+                .AddRequired("step_name", "string", "Name of the flow step (If/ElseIf/While/DoWhile/Select/Case)")
+                .AddRequired("condition", "string",
+                    "Condition expression: ConditionExpr for If/ElseIf/While/DoWhile; ItemExpr (switch " +
+                    "for Select, case value(s) for Case). May be empty only for a default Case.")
+                .AddOptional("is_default", "boolean",
+                    "NI_Flow_Case only: mark this as the default case (IsDefault=true)."),
+            SetFlowConditionAsync);
 
         Register("set_step_record_result",
             "Set result recording mode for a step. " +
@@ -3131,6 +3154,21 @@ public class TestStandToolRegistry
         await _ts.SetStepLoopAsync(filePath, sequenceName, stepGroup, stepName,
             loopType, initExpr, whileExpr, incExpr);
         return Ok($"Loop settings of step '{stepName}' updated to '{loopType}'.");
+    }
+
+    private async Task<CallToolResult> SetFlowConditionAsync(JsonElement? args)
+    {
+        var filePath     = args!.Value.GetRequiredString("file_path");
+        var sequenceName = args!.Value.GetRequiredString("sequence_name");
+        var stepGroup    = args!.Value.GetRequiredString("step_group");
+        var stepName     = args!.Value.GetRequiredString("step_name");
+        var condition    = args!.Value.GetRequiredString("condition");
+        bool? isDefault  = args!.Value.TryGetProperty("is_default", out var d)
+                           && d.ValueKind != JsonValueKind.Null
+            ? d.GetBoolean()
+            : (bool?)null;
+        await _ts.SetFlowConditionAsync(filePath, sequenceName, stepGroup, stepName, condition, isDefault);
+        return Ok($"Flow condition set on step '{stepName}'.");
     }
 
     private async Task<CallToolResult> SetStepRecordResultAsync(JsonElement? args)

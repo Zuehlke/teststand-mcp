@@ -84,6 +84,30 @@ Label  →  Only as a target for the mentioned Goto exceptions
 [8] End_If                    NI_Flow_End
 ```
 
+### Correct Structure for a Select/Case Block:
+
+**Each `NI_Flow_Case` opens its OWN block and needs its OWN `NI_Flow_End`** —
+this is the key asymmetry vs. `If`: `NI_Flow_ElseIf`/`NI_Flow_Else` are *clauses*
+of one `If` and share a single closing `End`, but every `Case` is its own block.
+A single `End` for the whole `Select` makes TestStand **nest** the cases inside
+one another instead of rendering them as siblings.
+
+```
+[0] Select_State    NI_Flow_Select   → ItemExpr (set_flow_condition): Locals.State
+[1]   Case_A        NI_Flow_Case     → case value(s): "A"
+[2]     Do_A        Statement
+[3]   End_Case_A    NI_Flow_End      → closes Case_A
+[4]   Case_B        NI_Flow_Case     → "B"
+[5]     Do_B        Statement
+[6]   End_Case_B    NI_Flow_End      → closes Case_B
+[7] End_Select      NI_Flow_End      → closes Select
+```
+
+`validate_sequence_plan` enforces this: a `Case` whose parent block is not the
+`Select` (because the previous `Case` was not closed) raises
+`E_CASE_WITHOUT_SELECT`, and any unclosed `Case`/`Select` raises
+`E_UNCLOSED_BLOCK`. So `n` cases ⇒ `n` case-`End`s + 1 select-`End`.
+
 ### All Available Step Types (from get_step_types):
 - Flow Control: `NI_Flow_If`, `NI_Flow_ElseIf`, `NI_Flow_Else`, `NI_Flow_End`,
   `NI_Flow_While`, `NI_Flow_DoWhile`, `NI_Flow_For`, `NI_Flow_ForEach`,
