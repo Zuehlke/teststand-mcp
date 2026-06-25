@@ -438,14 +438,17 @@ public class T24_PureLogicCoverageTests
     public void Validator_BreakInsideSelect_IsAllowed()
     {
         // Break may terminate a Select (not only a loop) — must NOT raise E_JUMP_OUTSIDE_LOOP.
+        // Each Case opens its own block, so it needs its own End before the Select's End.
         var r = SequencePlanValidator.Validate("Seq", new[]
         {
             Step("Sel",  "NI_Flow_Select", "Locals.X"),
             Step("Case", "NI_Flow_Case"),
             Step("Brk",  "NI_Flow_Break"),
-            Step("End",  "NI_Flow_End")
-        }, Array.Empty<string>());
+            Step("EndCase", "NI_Flow_End"),
+            Step("EndSel",  "NI_Flow_End")
+        }, new[] { "X" });
         Assert.That(r.Errors.Any(e => e.Code == "E_JUMP_OUTSIDE_LOOP"), Is.False);
+        Assert.That(r.Valid, Is.True, string.Join(";", r.Errors.Select(e => e.Code)));
     }
 
     [Test]

@@ -322,6 +322,12 @@ public interface ITestStandService : IDisposable
     Task SetStepLoopAsync(string filePath, string sequenceName, string stepGroup,
         string stepName, string loopType, string? initExpr = null,
         string? whileExpr = null, string? incExpr = null);
+    /// <summary>Sets the flow-control CONDITION on a branch step — the dedicated property the
+    /// engine evaluates to branch (NOT Pre/Post/Status). Writes <c>ConditionExpr</c> for
+    /// NI_Flow_If/ElseIf/While/DoWhile and <c>ItemExpr</c> for NI_Flow_Select (switch) /
+    /// NI_Flow_Case (case value(s)). Optionally marks a Case as the default branch.</summary>
+    Task SetFlowConditionAsync(string filePath, string sequenceName, string stepGroup,
+        string stepName, string condition, bool? isDefault = null);
     /// <summary>Sets the result-recording option for the specified step.</summary>
     Task SetStepRecordResultAsync(string filePath, string sequenceName, string stepGroup,
         string stepName, string recordingOption);
@@ -5292,6 +5298,55 @@ public sealed class TestStandService : ITestStandService
             if (!string.IsNullOrEmpty(incExpr))
                 try { step.LoopIncExpression   = incExpr;   } catch (Exception ex) { _logger.LogDebug(ex, "Failed to set LoopIncExpression on step '{Step}'.", stepName); }
             SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
+        });
+    }
+
+    /// <inheritdoc/>
+    public async Task SetFlowConditionAsync(string filePath, string sequenceName,
+        string stepGroup, string stepName, string condition, bool? isDefault = null)
+    {
+        EnsureConnected();
+        await Task.Run(() =>
+        {
+            var sf    = GetOrLoadSeqFile(filePath);
+            var seq   = sf.GetSequenceByName(sequenceName);
+            int sgVal = ParseStepGroup(stepGroup);
+            var step  = seq.GetStepByName(stepName, (object)sgVal);
+
+            string stepType = "";
+            try { stepType = (string)step.StepType.Name; }
+            catch (Exception ex) { _logger.LogDebug(ex, "Failed to read StepType.Name for flow condition on '{Step}'.", stepName); }
+
+            // The branch condition's home is a DEDICATED step property — NOT Pre/Post/Status:
+            //   NI_Flow_If / ElseIf / While / DoWhile -> ConditionExpr (the boolean condition)
+            //   NI_Flow_Select                        -> ItemExpr (the switch expression)
+            //   NI_Flow_Case                          -> ItemExpr (the case value(s), e.g. "A","B")
+            bool isSelectOrCase =
+                stepType.IndexOf("Select", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                stepType.IndexOf("Case",   StringComparison.OrdinalIgnoreCase) >= 0;
+            string propName = isSelectOrCase ? "ItemExpr" : "ConditionExpr";
+
+            NiPropertyObject stepPo = ((NiStep)(object)step).AsPropertyObject();
+            stepPo.SetValString(propName, 0, condition ?? "");
+
+            // Mark/clear default case when requested (NI_Flow_Case.IsDefault).
+            if (isDefault.HasValue)
+                try { stepPo.SetValBoolean("IsDefault", 0, isDefault.Value); }
+                catch (Exception ex) { _logger.LogDebug(ex, "Failed to set IsDefault on Case step '{Step}'.", stepName); }
+
+            // Migrate the legacy mis-placement: if the same expression was previously written to
+            // the Post Expression (the only slot the generic 'expression' field could reach), clear
+            // it so the condition is not also evaluated-and-discarded after the step.
+            try
+            {
+                string curPost = (string)step.PostExpression;
+                if (!string.IsNullOrEmpty(curPost) && curPost == condition)
+                    step.PostExpression = "";
+            }
+            catch (Exception ex) { _logger.LogDebug(ex, "Failed to clear duplicate PostExpression on '{Step}'.", stepName); }
+
+            SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
+            _loadedSequenceFiles[filePath] = sf;
         });
     }
 

@@ -211,9 +211,20 @@ public static class SequencePlanValidator
             }
             else if (type.Equals("NI_Flow_Case", StringComparison.OrdinalIgnoreCase))
             {
+                // A Case opens its OWN block that must be closed by a matching NI_Flow_End
+                // before the next Case — unlike ElseIf/Else, which are clauses of an If and
+                // need no End of their own. TestStand renders Cases as siblings ONLY when each
+                // is explicitly closed; with a single End for the whole Select the editor nests
+                // each Case inside the previous one. The Case's immediate parent must therefore
+                // be the Select itself: if the previous Case was not closed, the top of the
+                // stack is that still-open Case (not the Select) — the error we report here.
                 var top = stack.Count > 0 ? stack.Peek() : null;
                 if (top == null || !top.Type.Equals("NI_Flow_Select", StringComparison.OrdinalIgnoreCase))
-                    Err("E_CASE_WITHOUT_SELECT", $"NI_Flow_Case '{label}' is not inside an NI_Flow_Select block.", i, label);
+                    Err("E_CASE_WITHOUT_SELECT",
+                        $"NI_Flow_Case '{label}' is not directly inside an NI_Flow_Select block — each Case must be closed by its own NI_Flow_End before the next Case (or the Select's End).",
+                        i, label);
+                stack.Push(new Block { Type = type, Name = name, Index = i });
+                if (stack.Count > r.Stats.MaxNestingDepth) r.Stats.MaxNestingDepth = stack.Count;
             }
             else if (type.Equals("NI_Flow_End", StringComparison.OrdinalIgnoreCase))
             {

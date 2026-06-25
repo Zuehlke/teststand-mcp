@@ -173,4 +173,47 @@ public class T10_SequencePlanValidatorTests
         Assert.That(r.Errors.Any(e => e.Code == "E_UNCLOSED_BLOCK"), Is.True,
             "An unclosed SweepLoop must report E_UNCLOSED_BLOCK");
     }
+
+    // ── Select / Case: each Case opens its own block and needs its own End ────────
+    // Unlike ElseIf/Else (clauses of an If, one shared End), every NI_Flow_Case must be
+    // closed by its own NI_Flow_End before the next Case — otherwise TestStand nests the
+    // cases instead of rendering them as siblings.
+    [Test]
+    public void SelectCase_WithoutPerCaseEnd_IsError()
+    {
+        // Select → Case → Case → End is WRONG: the 2nd Case is not directly inside the
+        // Select because the 1st Case is still open.
+        var r = Validate(new[]
+        {
+            S("Sel",   "NI_Flow_Select", "Locals.X"),
+            S("CaseA", "NI_Flow_Case"),
+            S("StmtA", "Statement"),
+            S("CaseB", "NI_Flow_Case"),
+            S("StmtB", "Statement"),
+            S("End",   "NI_Flow_End"),
+        }, "X");
+        Assert.That(r.Valid, Is.False);
+        Assert.That(r.Errors.Any(e => e.Code == "E_CASE_WITHOUT_SELECT"), Is.True,
+            "A Case following an unclosed Case must report E_CASE_WITHOUT_SELECT");
+    }
+
+    [Test]
+    public void SelectCase_WithPerCaseEnd_IsValid()
+    {
+        // Correct: every Case block is closed by its own End before the Select's End.
+        var r = Validate(new[]
+        {
+            S("Sel",    "NI_Flow_Select", "Locals.X"),
+            S("CaseA",  "NI_Flow_Case"),
+            S("StmtA",  "Statement"),
+            S("EndA",   "NI_Flow_End"),
+            S("CaseB",  "NI_Flow_Case"),
+            S("StmtB",  "Statement"),
+            S("EndB",   "NI_Flow_End"),
+            S("EndSel", "NI_Flow_End"),
+        }, "X");
+        Assert.That(r.Valid, Is.True,
+            string.Join("; ", r.Errors.Select(e => e.Code + ":" + e.Message)));
+        Assert.That(r.Stats.MaxNestingDepth, Is.EqualTo(2));
+    }
 }
