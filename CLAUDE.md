@@ -220,3 +220,21 @@ max+1. (`T22`.)
   `E_UNDECLARED_LOCAL`, `E_DUP_NAME`. Warnings (advisory only): `W_UNLINKED_CALLS`
   (unlinked `SequenceCall` placeholders are fine), `W_UNUSED_LOCAL`. Build only when
   `valid==true`. (`T10`.)
+
+### Post-build validation (reference audit)
+- `audit_sequence_references` reads the ACTUAL built sequence — `ConditionExpr` / `ItemExpr` /
+  `PreExpression` / `PostExpression` / `StatusExpression` — and flags every `Locals.X` /
+  `Parameters.X` / `FileGlobals.X` reference that is **not declared** in that sequence's
+  locals/parameters (or the file globals). Codes: `E_UNDECLARED_LOCAL`, `E_UNDECLARED_PARAM`,
+  `E_UNDECLARED_FILEGLOBAL`. Returns `{valid, issueCount, issues[], stats{}}`. Omit
+  `sequence_name` to audit every sequence in the file. Read-only/advisory — it reports, it never
+  modifies. Other scopes (`StationGlobals`, `RunState.*`, `Step.*`) are intentionally not audited.
+- **Run it AFTER building** and after any `set_flow_condition` / `set_step_expression`. It is the
+  complement to `validate_sequence_plan`, which (pre-build) only checks `Locals.X` in the build
+  PLAN — it never sees `Parameters.X` refs, nor conditions written later via `set_flow_condition`
+  (those land in `ConditionExpr`/`ItemExpr`, outside the plan). The audit reads the real sequence,
+  so it catches BOTH paths. (`T28`; pure logic in `ReferenceAuditor`.)
+- **Therefore, while building, declare every `Locals.X` AND `Parameters.X` you reference**
+  (`insert_local_variable` / `insert_sequence_parameter`) — do not rely on the pre-build validator
+  to catch a missing `Parameters`. A parameter written inside a sub-sequence and read back by the
+  caller must be passed **by reference** (`pass_by_reference:true`).

@@ -289,6 +289,11 @@ public interface ITestStandService : IDisposable
         bool? passByReference = null);
     /// <summary>Deletes the specified local variable from the given sequence.</summary>
     Task DeleteLocalVariableAsync(string filePath, string sequenceName, string variableName);
+    /// <summary>Reads the expressions and declared scopes needed to audit Locals./Parameters./
+    /// FileGlobals. references in a built sequence. When <paramref name="sequenceName"/> is null
+    /// or empty, every sequence in the file is read. Pure COM read — the auditing itself is done
+    /// by the engine-free <c>TestStandMCP.Tools.ReferenceAuditor</c>.</summary>
+    Task<ReferenceAuditData> ReadReferenceAuditDataAsync(string filePath, string? sequenceName = null);
     /// <summary>Returns all step templates available in the specified sequence file.</summary>
     Task<List<StepTemplateInfo>> GetStepTemplatesAsync(string filePath);
     /// <summary>Inserts a step based on the named template into the specified sequence.</summary>
@@ -5121,6 +5126,93 @@ public sealed class TestStandService : ITestStandService
             var sf  = GetOrLoadSeqFile(filePath);
             var seq = sf.GetSequenceByName(sequenceName);
             return MapVariables(seq.Locals);
+        });
+    }
+
+    /// <inheritdoc/>
+    public async Task<ReferenceAuditData> ReadReferenceAuditDataAsync(string filePath, string? sequenceName = null)
+    {
+        EnsureConnected();
+        return await Task.Run(() =>
+        {
+            var sf   = GetOrLoadSeqFile(filePath);
+            var data = new ReferenceAuditData();
+
+            // File globals are file-level (shared by every sequence).
+            try { foreach (var v in MapVariables(GetFileGlobals(sf))) data.FileGlobals.Add(v.Name); }
+            catch (Exception ex) { _logger.LogDebug(ex, "Failed to read file globals for reference audit."); }
+
+            // Which sequences to audit: the named one, or every sequence in the file.
+            var seqNames = new List<string>();
+            if (!string.IsNullOrWhiteSpace(sequenceName))
+                seqNames.Add(sequenceName!);
+            else
+            {
+                int n = 0;
+                try { n = Convert.ToInt32((object)sf.NumSequences); }
+                catch (Exception ex) { _logger.LogDebug(ex, "Failed to read NumSequences for reference audit."); }
+                for (int i = 0; i < n; i++)
+                {
+                    try { seqNames.Add((string)sf.GetSequence(i).Name); }
+                    catch (Exception ex) { _logger.LogDebug(ex, "Failed to read sequence name at index {Index}.", i); }
+                }
+            }
+
+            string[] groupNames = { "Setup", "Main", "Cleanup" };
+            foreach (var sn in seqNames)
+            {
+                var seq = sf.GetSequenceByName(sn);
+
+                var scope = new DeclaredScope { SequenceName = sn };
+                try { foreach (var v in MapVariables(seq.Locals))     scope.Locals.Add(v.Name); }
+                catch (Exception ex) { _logger.LogDebug(ex, "Failed to read locals of '{Seq}'.", sn); }
+                try { foreach (var p in MapParameters(seq.Parameters)) scope.Parameters.Add(p.Name); }
+                catch (Exception ex) { _logger.LogDebug(ex, "Failed to read parameters of '{Seq}'.", sn); }
+                data.Scopes.Add(scope);
+
+                for (int g = 0; g <= 2; g++)
+                {
+                    int count;
+                    try { count = Convert.ToInt32((object)seq.GetNumSteps((NiStepGroups)g)); }
+                    catch (Exception ex) { _logger.LogDebug(ex, "Failed GetNumSteps group {Group} of '{Seq}'.", g, sn); continue; }
+
+                    for (int i = 0; i < count; i++)
+                    {
+                        object step;
+                        try { step = seq.GetStep(i, (NiStepGroups)g); }
+                        catch (Exception ex) { _logger.LogDebug(ex, "Failed GetStep {Index} group {Group} of '{Seq}'.", i, g, sn); continue; }
+
+                        string stepName = "";
+                        try { stepName = (string)((NiStep)step).Name; } catch { /* best-effort */ }
+
+                        NiPropertyObject po = ((NiStep)step).AsPropertyObject();
+                        string grpName = groupNames[g];
+
+                        void Collect(string prop, string? value)
+                        {
+                            if (!string.IsNullOrWhiteSpace(value))
+                                data.Expressions.Add(new ExpressionEntry
+                                {
+                                    SequenceName = sn,
+                                    StepGroup    = grpName,
+                                    StepName     = stepName,
+                                    Property     = prop,
+                                    Expression   = value!
+                                });
+                        }
+
+                        // Statement actions + Pre/Post/Status conditions live on these step properties;
+                        // branch conditions live in ConditionExpr (If/ElseIf/While/DoWhile) / ItemExpr
+                        // (Select/Case) — present only on flow steps, hence the per-read try/catch.
+                        try { Collect("PreExpression",    (string)((NiStep)step).PreExpression); }    catch { }
+                        try { Collect("PostExpression",   (string)((NiStep)step).PostExpression); }   catch { }
+                        try { Collect("StatusExpression", (string)((NiStep)step).StatusExpression); } catch { }
+                        try { Collect("ConditionExpr",    (string)po.GetValString("ConditionExpr", 0)); } catch { }
+                        try { Collect("ItemExpr",         (string)po.GetValString("ItemExpr", 0)); }      catch { }
+                    }
+                }
+            }
+            return data;
         });
     }
 

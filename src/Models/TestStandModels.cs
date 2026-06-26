@@ -257,6 +257,99 @@ public class ParameterInfo
     public string? Description { get; set; }
 }
 
+// ── Reference Audit ────────────────────────────────────────────────────────────
+// Post-build check that every Locals./Parameters./FileGlobals. reference in a built
+// sequence's expressions resolves to a declared variable. Unlike validate_sequence_plan
+// (which only sees the plan's Locals refs), the auditor reads the ACTUAL sequence, so it
+// also covers conditions written via set_flow_condition. The service produces the data
+// below; TestStandMCP.Tools.ReferenceAuditor consumes it.
+
+/// <summary>One expression slot read from a built step (input to the reference auditor).</summary>
+public class ExpressionEntry
+{
+    /// <summary>Sequence the step belongs to.</summary>
+    public string SequenceName { get; set; } = "";
+    /// <summary>Step group: "Setup", "Main" or "Cleanup".</summary>
+    public string? StepGroup { get; set; }
+    /// <summary>Step name.</summary>
+    public string StepName { get; set; } = "";
+    /// <summary>Property the expression was read from (e.g. ConditionExpr, PostExpression).</summary>
+    public string Property { get; set; } = "";
+    /// <summary>The raw expression text.</summary>
+    public string Expression { get; set; } = "";
+}
+
+/// <summary>The variables a sequence may legally reference: its own Locals and Parameters.</summary>
+public class DeclaredScope
+{
+    /// <summary>Sequence name.</summary>
+    public string SequenceName { get; set; } = "";
+    /// <summary>Declared local-variable names.</summary>
+    public List<string> Locals { get; set; } = new();
+    /// <summary>Declared parameter names.</summary>
+    public List<string> Parameters { get; set; } = new();
+}
+
+/// <summary>Engine-read input for the reference auditor: expressions + declared scopes + file globals.</summary>
+public class ReferenceAuditData
+{
+    /// <summary>All non-empty expressions collected from the audited sequences.</summary>
+    public List<ExpressionEntry> Expressions { get; set; } = new();
+    /// <summary>Per-sequence declared locals/parameters.</summary>
+    public List<DeclaredScope> Scopes { get; set; } = new();
+    /// <summary>Declared file-global names (file level).</summary>
+    public List<string> FileGlobals { get; set; } = new();
+}
+
+/// <summary>A single undeclared-reference finding from the reference audit.</summary>
+public class ReferenceIssue
+{
+    /// <summary>Severity (always "error" — an undeclared reference fails at runtime).</summary>
+    public string Severity { get; set; } = "error";
+    /// <summary>Machine-readable code: E_UNDECLARED_LOCAL / E_UNDECLARED_PARAM / E_UNDECLARED_FILEGLOBAL.</summary>
+    public string Code { get; set; } = "";
+    /// <summary>Reference scope: "Locals", "Parameters" or "FileGlobals".</summary>
+    public string Scope { get; set; } = "";
+    /// <summary>The undeclared name.</summary>
+    public string Name { get; set; } = "";
+    /// <summary>Sequence the reference appears in.</summary>
+    public string SequenceName { get; set; } = "";
+    /// <summary>Step group of the referencing step.</summary>
+    public string? StepGroup { get; set; }
+    /// <summary>Step that holds the expression.</summary>
+    public string StepName { get; set; } = "";
+    /// <summary>Property that holds the expression.</summary>
+    public string Property { get; set; } = "";
+    /// <summary>The full expression text containing the reference.</summary>
+    public string Expression { get; set; } = "";
+}
+
+/// <summary>Aggregate statistics for a reference audit.</summary>
+public class ReferenceAuditStats
+{
+    /// <summary>Number of sequences inspected.</summary>
+    public int SequencesAudited { get; set; }
+    /// <summary>Number of non-empty expressions scanned.</summary>
+    public int ExpressionsScanned { get; set; }
+    /// <summary>Number of Locals./Parameters./FileGlobals. references found.</summary>
+    public int ReferencesFound { get; set; }
+    /// <summary>Number of undeclared references (equals the issue count).</summary>
+    public int UndeclaredCount { get; set; }
+}
+
+/// <summary>Outcome of a post-build reference audit.</summary>
+public class ReferenceAuditResult
+{
+    /// <summary>True when no undeclared references were found.</summary>
+    public bool Valid { get; set; }
+    /// <summary>Number of issues.</summary>
+    public int IssueCount { get; set; }
+    /// <summary>The undeclared-reference findings.</summary>
+    public List<ReferenceIssue> Issues { get; init; } = new();
+    /// <summary>Aggregate statistics.</summary>
+    public ReferenceAuditStats Stats { get; init; } = new();
+}
+
 /// <summary>A named property value with its type and optional lookup string.</summary>
 public class PropertyValue
 {
