@@ -86,6 +86,20 @@ public class BulkStepSpec
     public string? Expression { get; set; }
     /// <summary>Which expression field the <see cref="Expression"/> targets (optional).</summary>
     public string? ExpressionType { get; set; }
+    /// <summary>For an NI_Flow_For step: the loop initialization expression (InitializationExpr),
+    /// e.g. "Locals.i = 0" (optional).</summary>
+    public string? InitExpr { get; set; }
+    /// <summary>For an NI_Flow_For step: the loop increment expression (IncrementExpr),
+    /// e.g. "Locals.i += 1" (optional).</summary>
+    public string? IncrementExpr { get; set; }
+    /// <summary>For an NI_Flow_ForEach step: the collection/array expression (ArrayExpr),
+    /// e.g. "Locals.Items" (optional).</summary>
+    public string? ArrayExpr { get; set; }
+    /// <summary>For an NI_Flow_ForEach step: the per-element variable expression
+    /// (ArrayElementExpr), e.g. "Locals.Item" (optional).</summary>
+    public string? ElementExpr { get; set; }
+    /// <summary>For an NI_Flow_Case step: mark this as the default case (IsDefault=true) (optional).</summary>
+    public bool? IsDefault { get; set; }
     /// <summary>Target sequence for a SequenceCall step (optional).</summary>
     public string? TargetSequenceName { get; set; }
     /// <summary>Target sequence file (empty/omitted = same/current file).</summary>
@@ -111,6 +125,38 @@ public class BulkInsertResult
     public List<string> InsertedSteps { get; init; } = new();
     /// <summary>Non-fatal warnings raised during the operation.</summary>
     public List<string> Warnings { get; init; } = new();
+}
+
+/// <summary>Outcome of a configure_for_loop operation — the effective expressions written.</summary>
+public class ForLoopConfigResult
+{
+    /// <summary>Name of the configured NI_Flow_For step.</summary>
+    public string StepName { get; set; } = "";
+    /// <summary>Effective InitializationExpr written to the step.</summary>
+    public string InitializationExpr { get; set; } = "";
+    /// <summary>Effective ConditionExpr written to the step.</summary>
+    public string ConditionExpr { get; set; } = "";
+    /// <summary>Effective IncrementExpr written to the step.</summary>
+    public string IncrementExpr { get; set; } = "";
+    /// <summary>Non-fatal advisory notes (e.g. that the index variable must be declared).</summary>
+    public List<string> Notes { get; init; } = new();
+}
+
+/// <summary>Outcome of a configure_foreach_loop operation — the effective expressions written.</summary>
+public class ForEachLoopConfigResult
+{
+    /// <summary>Name of the configured NI_Flow_ForEach step.</summary>
+    public string StepName { get; set; } = "";
+    /// <summary>Effective ArrayExpr (the collection iterated over).</summary>
+    public string ArrayExpr { get; set; } = "";
+    /// <summary>Effective ArrayElementExpr (the per-element variable).</summary>
+    public string ElementExpr { get; set; } = "";
+    /// <summary>Effective OffsetExpr, if set.</summary>
+    public string OffsetExpr { get; set; } = "";
+    /// <summary>Effective SubscriptExpr, if set.</summary>
+    public string SubscriptExpr { get; set; } = "";
+    /// <summary>Non-fatal advisory notes.</summary>
+    public List<string> Notes { get; init; } = new();
 }
 
 // ── Sequence File Models ─────────────────────────────────────────────────────
@@ -216,6 +262,11 @@ public class PropertyNode
 {
     /// <summary>Property name (array elements use an index label like "[0]").</summary>
     public string Name { get; set; } = "";
+    /// <summary>For ARRAY ELEMENTS that carry their own PropertyObject.Name (e.g. the
+    /// VIParameter entries of ViCall.Parms are named after the connector-pane label):
+    /// that real name. Null for unnamed elements and non-element nodes. The Sequence
+    /// Editor and FileDiffer display "[i] ElementName" and PAIR elements by this name.</summary>
+    public string? ElementName { get; set; }
     /// <summary>Human-readable TestStand type (GetTypeDisplayString), if available.</summary>
     public string? Type { get; set; }
     /// <summary>Node kind: "Container", "Array", "Number", "Boolean", "String" or "Empty".</summary>
@@ -255,6 +306,99 @@ public class ParameterInfo
     public bool PassByReference { get; set; }
     /// <summary>Parameter comment/description, if any.</summary>
     public string? Description { get; set; }
+}
+
+// ── Reference Audit ────────────────────────────────────────────────────────────
+// Post-build check that every Locals./Parameters./FileGlobals. reference in a built
+// sequence's expressions resolves to a declared variable. Unlike validate_sequence_plan
+// (which only sees the plan's Locals refs), the auditor reads the ACTUAL sequence, so it
+// also covers conditions written via set_flow_condition. The service produces the data
+// below; TestStandMCP.Tools.ReferenceAuditor consumes it.
+
+/// <summary>One expression slot read from a built step (input to the reference auditor).</summary>
+public class ExpressionEntry
+{
+    /// <summary>Sequence the step belongs to.</summary>
+    public string SequenceName { get; set; } = "";
+    /// <summary>Step group: "Setup", "Main" or "Cleanup".</summary>
+    public string? StepGroup { get; set; }
+    /// <summary>Step name.</summary>
+    public string StepName { get; set; } = "";
+    /// <summary>Property the expression was read from (e.g. ConditionExpr, PostExpression).</summary>
+    public string Property { get; set; } = "";
+    /// <summary>The raw expression text.</summary>
+    public string Expression { get; set; } = "";
+}
+
+/// <summary>The variables a sequence may legally reference: its own Locals and Parameters.</summary>
+public class DeclaredScope
+{
+    /// <summary>Sequence name.</summary>
+    public string SequenceName { get; set; } = "";
+    /// <summary>Declared local-variable names.</summary>
+    public List<string> Locals { get; set; } = new();
+    /// <summary>Declared parameter names.</summary>
+    public List<string> Parameters { get; set; } = new();
+}
+
+/// <summary>Engine-read input for the reference auditor: expressions + declared scopes + file globals.</summary>
+public class ReferenceAuditData
+{
+    /// <summary>All non-empty expressions collected from the audited sequences.</summary>
+    public List<ExpressionEntry> Expressions { get; set; } = new();
+    /// <summary>Per-sequence declared locals/parameters.</summary>
+    public List<DeclaredScope> Scopes { get; set; } = new();
+    /// <summary>Declared file-global names (file level).</summary>
+    public List<string> FileGlobals { get; set; } = new();
+}
+
+/// <summary>A single undeclared-reference finding from the reference audit.</summary>
+public class ReferenceIssue
+{
+    /// <summary>Severity (always "error" — an undeclared reference fails at runtime).</summary>
+    public string Severity { get; set; } = "error";
+    /// <summary>Machine-readable code: E_UNDECLARED_LOCAL / E_UNDECLARED_PARAM / E_UNDECLARED_FILEGLOBAL.</summary>
+    public string Code { get; set; } = "";
+    /// <summary>Reference scope: "Locals", "Parameters" or "FileGlobals".</summary>
+    public string Scope { get; set; } = "";
+    /// <summary>The undeclared name.</summary>
+    public string Name { get; set; } = "";
+    /// <summary>Sequence the reference appears in.</summary>
+    public string SequenceName { get; set; } = "";
+    /// <summary>Step group of the referencing step.</summary>
+    public string? StepGroup { get; set; }
+    /// <summary>Step that holds the expression.</summary>
+    public string StepName { get; set; } = "";
+    /// <summary>Property that holds the expression.</summary>
+    public string Property { get; set; } = "";
+    /// <summary>The full expression text containing the reference.</summary>
+    public string Expression { get; set; } = "";
+}
+
+/// <summary>Aggregate statistics for a reference audit.</summary>
+public class ReferenceAuditStats
+{
+    /// <summary>Number of sequences inspected.</summary>
+    public int SequencesAudited { get; set; }
+    /// <summary>Number of non-empty expressions scanned.</summary>
+    public int ExpressionsScanned { get; set; }
+    /// <summary>Number of Locals./Parameters./FileGlobals. references found.</summary>
+    public int ReferencesFound { get; set; }
+    /// <summary>Number of undeclared references (equals the issue count).</summary>
+    public int UndeclaredCount { get; set; }
+}
+
+/// <summary>Outcome of a post-build reference audit.</summary>
+public class ReferenceAuditResult
+{
+    /// <summary>True when no undeclared references were found.</summary>
+    public bool Valid { get; set; }
+    /// <summary>Number of issues.</summary>
+    public int IssueCount { get; set; }
+    /// <summary>The undeclared-reference findings.</summary>
+    public List<ReferenceIssue> Issues { get; init; } = new();
+    /// <summary>Aggregate statistics.</summary>
+    public ReferenceAuditStats Stats { get; init; } = new();
 }
 
 /// <summary>A named property value with its type and optional lookup string.</summary>
@@ -938,6 +1082,27 @@ public class StepModuleInfo
     public Dictionary<string, object> ModuleProperties { get; init; } = new();
 }
 
+/// <summary>Result of set_step_property: the value read back from a step's PropertyObject after a
+/// write, with its inferred type. The generic step-property writer targets any property by a
+/// dotted path relative to the step (e.g. "VIModule.ViCall.VIPath", "RemoteHost", "PortNumber") —
+/// the scope no other writer reaches (set_property_value/set_property only see Globals/Locals, the
+/// configure_*_module tools only the adapter module).</summary>
+public class StepPropertyValue
+{
+    /// <summary>Step name.</summary>
+    public string StepName { get; set; } = "";
+    /// <summary>The property path that was written, relative to the step.</summary>
+    public string PropertyPath { get; set; } = "";
+    /// <summary>Number / Boolean / String / Container / Array / Empty / Unknown.</summary>
+    public string ValueType { get; set; } = "";
+    /// <summary>The scalar value read back (number/boolean/string); null for containers/arrays.</summary>
+    public object? Value { get; set; }
+    /// <summary>True when the property is an array.</summary>
+    public bool IsArray { get; set; }
+    /// <summary>Number of elements for arrays, else null.</summary>
+    public int? NumElements { get; set; }
+}
+
 // ── Search Models ────────────────────────────────────────────────────────────
 
 /// <summary>A single match from a sequence-content search.</summary>
@@ -1053,6 +1218,67 @@ public class CallStackFrame
     public string StepName { get; set; } = "";
     /// <summary>Step group at this frame.</summary>
     public string StepGroup { get; set; } = "";
+}
+
+// ── Live Thread-Context Inspection (runtime debugging) ──────────────────────────
+// Read/write of the LIVE SequenceContext (== ThisContext) and RunState of a running or
+// paused thread, at any call-stack frame. The static get_property_tree / evaluate_expression
+// tools cannot reach this scope (they resolve against engine Globals); these models back the
+// tools that do, via Thread.GetSequenceContext(frame).AsPropertyObject().
+
+/// <summary>Result of reading or writing a single runtime variable/property in a live thread frame.</summary>
+public class RuntimeVariableInfo
+{
+    /// <summary>The property path evaluated, relative to ThisContext (e.g. "Locals.Counter", "RunState.NextStepIndex").</summary>
+    public string PropertyPath { get; set; } = "";
+    /// <summary>Number / Boolean / String / Container / Array / Empty / Unknown.</summary>
+    public string ValueType { get; set; } = "";
+    /// <summary>The scalar value (number/boolean/string); null for containers/arrays.</summary>
+    public object? Value { get; set; }
+    /// <summary>True when the property is an array.</summary>
+    public bool IsArray { get; set; }
+    /// <summary>Number of elements for arrays, else null.</summary>
+    public int? NumElements { get; set; }
+    /// <summary>True on a write that was applied and read back (false for a pure read).</summary>
+    public bool Written { get; set; }
+}
+
+/// <summary>Curated flat snapshot of the most-used RunState fields for a live thread frame —
+/// the "where am I / what is the state" one-shot a debugger view needs without walking the tree.</summary>
+public class RunStateSummary
+{
+    /// <summary>Name of the step the frame is on.</summary>
+    public string CurrentStepName { get; set; } = "";
+    /// <summary>Name of the sequence the frame is in.</summary>
+    public string CurrentSequenceName { get; set; } = "";
+    /// <summary>File the frame is executing.</summary>
+    public string CurrentFilePath { get; set; } = "";
+    /// <summary>Active step group: "Setup", "Main" or "Cleanup".</summary>
+    public string StepGroup { get; set; } = "";
+    /// <summary>Index of the current step within its group.</summary>
+    public int StepIndex { get; set; }
+    /// <summary>Index of the step to run next (-1 = end of group). Writable via set_runtime_variable ("Set Next Step").</summary>
+    public int NextStepIndex { get; set; }
+    /// <summary>Index of the previously executed step.</summary>
+    public int PreviousStepIndex { get; set; }
+    /// <summary>Depth of this frame in the call stack.</summary>
+    public int CallStackDepth { get; set; }
+    /// <summary>Current loop iteration index (0 when not looping).</summary>
+    public int LoopIndex { get; set; }
+    /// <summary>Number of steps executed so far in this sequence invocation.</summary>
+    public int NumStepsExecuted { get; set; }
+    /// <summary>True when the sequence has been marked failed.</summary>
+    public bool SequenceFailed { get; set; }
+    /// <summary>True when execution has been directed to the Cleanup group.</summary>
+    public bool GotoCleanup { get; set; }
+    /// <summary>True when an error has been reported in this sequence.</summary>
+    public bool ErrorReported { get; set; }
+    /// <summary>RunState.SequenceError.Code (0 = no error).</summary>
+    public int ErrorCode { get; set; }
+    /// <summary>RunState.SequenceError.Msg.</summary>
+    public string ErrorMessage { get; set; } = "";
+    /// <summary>RunState.SequenceError.Occurred.</summary>
+    public bool ErrorOccurred { get; set; }
 }
 
 // ── Sequence Properties Model ────────────────────────────────────────────────

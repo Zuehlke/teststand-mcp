@@ -415,11 +415,16 @@ public class T24_PureLogicCoverageTests
     }
 
     [Test]
-    public void Validator_UnknownStepType_IsError()
+    public void Validator_UnknownStepType_IsWarning()
     {
+        // Advisory since the authoring-completeness change: the validator is engine-free and
+        // cannot know every INSTALLED step type (e.g. NI_LV_RunVIAsynchronously), so unknown
+        // non-forbidden types warn instead of blocking the build.
         var r = SequencePlanValidator.Validate("Seq",
             new[] { Step("A", "TotallyMadeUpType") }, Array.Empty<string>());
-        Assert.That(r.Errors.Any(e => e.Code == "E_UNKNOWN_TYPE"), Is.True);
+        Assert.That(r.Errors.Any(e => e.Code == "E_UNKNOWN_TYPE"), Is.False);
+        Assert.That(r.Warnings.Any(w => w.Code == "W_UNKNOWN_TYPE"), Is.True);
+        Assert.That(r.Valid, Is.True);
     }
 
     [Test]
@@ -486,5 +491,116 @@ public class T24_PureLogicCoverageTests
         }, Array.Empty<string>());
         Assert.That(r.Valid, Is.True);
         Assert.That(r.Warnings.Any(w => w.Code == "W_NO_CONDITION"), Is.True);
+    }
+
+    // ── B7: validator also checks Parameters.X (only when a parameter list is supplied) ──
+
+    [Test]
+    public void Validator_UndeclaredParameter_IsError_WhenParamListSupplied()
+    {
+        var r = SequencePlanValidator.Validate("Seq", new[]
+        {
+            Step("If",  "NI_Flow_If", "Parameters.Missing == True"),
+            Step("End", "NI_Flow_End")
+        }, Array.Empty<string>(), Array.Empty<string>());
+        Assert.That(r.Errors.Any(e => e.Code == "E_UNDECLARED_PARAM"), Is.True);
+        Assert.That(r.Valid, Is.False);
+    }
+
+    [Test]
+    public void Validator_DeclaredParameter_IsAccepted()
+    {
+        var r = SequencePlanValidator.Validate("Seq", new[]
+        {
+            Step("If",  "NI_Flow_If", "Parameters.Enable == True"),
+            Step("End", "NI_Flow_End")
+        }, Array.Empty<string>(), new[] { "Enable" });
+        Assert.That(r.Errors.Any(e => e.Code == "E_UNDECLARED_PARAM"), Is.False);
+        Assert.That(r.Valid, Is.True, string.Join(";", r.Errors.Select(e => e.Code)));
+    }
+
+    [Test]
+    public void Validator_ParameterCheck_SkippedWhenParamListOmitted()
+    {
+        // Backward compatibility: without a parameter list the validator never flags Parameters.X
+        // (historical locals-only behaviour) so existing callers are unaffected.
+        var r = SequencePlanValidator.Validate("Seq", new[]
+        {
+            Step("If",  "NI_Flow_If", "Parameters.Missing == True"),
+            Step("End", "NI_Flow_End")
+        }, Array.Empty<string>());
+        Assert.That(r.Errors.Any(e => e.Code == "E_UNDECLARED_PARAM"), Is.False);
+        Assert.That(r.Valid, Is.True);
+    }
+
+    // ── A3: Latin-1 comment-encoding guard ───────────────────────────────────────
+
+    [Test]
+    public void Latin1Guard_FlagsCharactersAboveU00FF()
+    {
+        Assert.That(InputGuards.FindNonLatin1Characters("Product-ID → Flag"),
+            Does.Contain('→')); // the arrow that TestStand stores as '?'
+        Assert.That(InputGuards.DescribeLatin1Loss("A → B", "comment"), Is.Not.Null);
+    }
+
+    [Test]
+    public void Latin1Guard_AllowsAsciiAndUmlauts()
+    {
+        Assert.That(InputGuards.FindNonLatin1Characters("Messgroesse ok"), Is.Empty);
+        Assert.That(InputGuards.FindNonLatin1Characters("Größe äüÖ"), Is.Empty); // ö ß ä ü Ö
+        Assert.That(InputGuards.DescribeLatin1Loss("plain ASCII ->", "comment"), Is.Null);
+    }
+
+    // ── A2: file-level-only unload option ────────────────────────────────────────
+
+    [Test]
+    public void UnloadOptionGuard_OnlyValue5IsFileLevelOnly()
+    {
+        Assert.That(InputGuards.IsFileLevelOnlyUnloadOption(5), Is.True);
+        for (int v = 1; v <= 4; v++)
+            Assert.That(InputGuards.IsFileLevelOnlyUnloadOption(v), Is.False);
+    }
+
+    // ── A1: None-adapter LabVIEW utility step detection ──────────────────────────
+
+    [Test]
+    public void LvUtilityGuard_DetectsNoneAdapterUtilityStep()
+    {
+        Assert.That(InputGuards.IsNoneAdapterLabViewUtilityStep("NI_LV_RunVIAsynchronously", "None Adapter"), Is.True);
+        Assert.That(InputGuards.IsNoneAdapterLabViewUtilityStep("NI_LV_RunVIAsynchronously", ""), Is.True);
+        // A real LabVIEW-adapter step (proper adapter key) is NOT a utility step.
+        Assert.That(InputGuards.IsNoneAdapterLabViewUtilityStep("NI_LV_RunVIAsynchronously", "G Std Prototype Adapter"), Is.False);
+        // Non-LabVIEW step types are never flagged.
+        Assert.That(InputGuards.IsNoneAdapterLabViewUtilityStep("Statement", "None Adapter"), Is.False);
+    }
+
+    // ── A4 / A5: flow-condition target classification ────────────────────────────
+
+    [Test]
+    public void FlowConditionGuard_ClassifiesConditionTargets()
+    {
+        Assert.That(InputGuards.FlowConditionProperty("NI_Flow_If"),     Is.EqualTo("ConditionExpr"));
+        Assert.That(InputGuards.FlowConditionProperty("NI_Flow_DoWhile"),Is.EqualTo("ConditionExpr"));
+        Assert.That(InputGuards.FlowConditionProperty("NI_Flow_Select"), Is.EqualTo("ItemExpr"));
+        Assert.That(InputGuards.FlowConditionProperty("NI_Flow_Case"),   Is.EqualTo("ItemExpr"));
+        Assert.That(InputGuards.FlowConditionProperty("NI_Flow_End"),    Is.Null);
+        Assert.That(InputGuards.FlowConditionProperty("Statement"),      Is.Null);
+    }
+
+    [Test]
+    public void FlowConditionGuard_RejectsEndAndNonBranchSteps()
+    {
+        Assert.That(InputGuards.DescribeInvalidFlowConditionTarget("EndDoWhile", "NI_Flow_End"), Is.Not.Null);
+        Assert.That(InputGuards.DescribeInvalidFlowConditionTarget("S1", "Statement"), Is.Not.Null);
+        Assert.That(InputGuards.DescribeInvalidFlowConditionTarget("If1", "NI_Flow_If"), Is.Null);
+    }
+
+    // ── A6: NI_Wait detection ────────────────────────────────────────────────────
+
+    [Test]
+    public void WaitGuard_DetectsWaitStep()
+    {
+        Assert.That(InputGuards.IsWaitStep("NI_Wait"),   Is.True);
+        Assert.That(InputGuards.IsWaitStep("Statement"), Is.False);
     }
 }

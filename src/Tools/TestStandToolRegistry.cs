@@ -129,6 +129,8 @@ public class TestStandToolRegistry
             "Other step types: 'Statement', 'NumericLimitTest', 'StringValueTest', 'PassFailTest', " +
             "'MessagePopup', 'CallExecutable', 'SequenceCall', 'Action'. " +
             "FORBIDDEN unless exceptional: 'Goto', 'Label' — legacy only, not for if/else or loops. " +
+            "When a step's concrete type is unclear, default to 'SequenceCall' (may stay unlinked) " +
+            "rather than 'Statement'. " +
             "Adapters: 'LabVIEW', 'CVI', 'C++/DLL', 'DotNet', 'Python', 'ActiveX', 'None' (default).",
             s => s
                 .AddRequired("sequence_file_path", "string", "Path to the sequence file")
@@ -147,7 +149,16 @@ public class TestStandToolRegistry
             "Each step may optionally carry its own comment, expression and SequenceCall target, " +
             "collapsing what used to be ~4 calls per step into one. Use this to build a whole " +
             "sequence (or a complete If/Else/loop block) at once. Same step-type and adapter rules " +
-            "as insert_step: use 'NI_Flow_If'/'NI_Flow_Else'/'NI_Flow_End' for branching, never Goto/Label.",
+            "as insert_step: use 'NI_Flow_If'/'NI_Flow_Else'/'NI_Flow_End' for branching, never Goto/Label. " +
+            "For a flow BRANCH step (If/ElseIf/While/DoWhile/For/Select/Case) a plain 'expression' (default/" +
+            "'Statement' type) is written to the branch CONDITION (ConditionExpr/ItemExpr) so it actually " +
+            "branches — pass expression_type 'Pre'/'Post'/'Status' only to override that. A counted " +
+            "NI_Flow_For can be declared in ONE step: 'expression' is its loop-continue test, plus optional " +
+            "'init_expr' (InitializationExpr) and 'increment_expr' (IncrementExpr), e.g. init_expr 'Locals.i = 0', " +
+            "expression 'Locals.i < 10', increment_expr 'Locals.i += 1'. An NI_Flow_ForEach takes 'array_expr' " +
+            "(the collection) + 'element_expr' (the per-element variable). An NI_Flow_Case takes 'is_default' " +
+            "to mark the default branch. When a step's " +
+            "concrete type is unclear, default to 'SequenceCall' (may stay unlinked) rather than 'Statement'.",
             s => s
                 .AddRequired("sequence_file_path", "string", "Path to the sequence file")
                 .AddRequired("sequence_name", "string", "Name of the sequence to build")
@@ -164,9 +175,19 @@ public class TestStandToolRegistry
                             "Adapter: 'LabVIEW', 'CVI', 'C++/DLL', 'DotNet', 'Python', 'ActiveX', 'None' (default)")
                         .AddOptional("comment", "string", "Step comment/description (kept short)")
                         .AddOptional("expression", "string",
-                            "Step expression (e.g. an NI_Flow_If condition)")
+                            "Step expression (e.g. an NI_Flow_If condition). For NI_Flow_For it is the loop-continue test (ConditionExpr), e.g. 'Locals.i < 10'.")
                         .AddOptional("expression_type", "string",
                             "Where to store it: 'Statement' (default) -> Post Expression (primary for Statement steps); 'Pre' -> before the step; 'Post' -> after the step; 'Status' -> status expression.")
+                        .AddOptional("init_expr", "string",
+                            "NI_Flow_For only: loop initialization expression (InitializationExpr), e.g. 'Locals.i = 0'. Ignored for other step types.")
+                        .AddOptional("increment_expr", "string",
+                            "NI_Flow_For only: loop increment expression (IncrementExpr), e.g. 'Locals.i += 1'. Ignored for other step types.")
+                        .AddOptional("array_expr", "string",
+                            "NI_Flow_ForEach only: the collection to iterate (ArrayExpr), e.g. 'Locals.Items'. Ignored for other step types.")
+                        .AddOptional("element_expr", "string",
+                            "NI_Flow_ForEach only: the per-element variable (ArrayElementExpr), e.g. 'Locals.Item'. Ignored for other step types.")
+                        .AddOptional("is_default", "boolean",
+                            "NI_Flow_Case only: mark this case as the default branch (IsDefault=true). Ignored for other step types.")
                         .AddOptional("target_sequence_name", "string",
                             "For SequenceCall steps: name of the sequence to call")
                         .AddOptional("target_sequence_file", "string",
@@ -184,8 +205,11 @@ public class TestStandToolRegistry
             "advisory — e.g. unlinked SequenceCall placeholders). Checks: balanced NI_Flow_* " +
             "blocks (openers ↔ End), ElseIf/Else inside If, each Case closed by its OWN End " +
             "inside a Select (a single End for the whole Select nests the cases), Break/Continue " +
-            "inside a loop, no Goto/Label, unique step names, known step types, and that every " +
-            "Locals.X referenced in a condition is declared in 'locals'.",
+            "inside a loop, no Goto/Label, unique step names, known step types, that every " +
+            "Locals.X referenced in a condition is declared in 'locals', and — when 'parameters' " +
+            "is supplied — that every Parameters.X referenced is declared there too " +
+            "(E_UNDECLARED_PARAM). Tip: when a step's concrete type is unclear, default to " +
+            "'SequenceCall' (may stay unlinked) rather than 'Statement'.",
             s => s
                 .AddRequired("sequence_name", "string", "Name of the sequence the plan builds")
                 .AddArray("steps",
@@ -203,13 +227,40 @@ public class TestStandToolRegistry
                     "Planned local variables (names only are required for the reference check).",
                     item => item
                         .AddRequired("name", "string", "Local variable name"),
+                    required: false)
+                .AddArray("parameters",
+                    "Planned sequence parameters (names only). Supply this to also validate " +
+                    "Parameters.X references in conditions/expressions (E_UNDECLARED_PARAM). " +
+                    "Omit to skip the parameter check (locals-only, historical behaviour).",
+                    item => item
+                        .AddRequired("name", "string", "Parameter name"),
                     required: false),
             ValidateSequencePlanAsync);
 
+        Register("audit_sequence_references",
+            "POST-BUILD reference audit — reads the expressions ACTUALLY stored on a built " +
+            "sequence (ConditionExpr/ItemExpr/PreExpression/PostExpression/StatusExpression) and " +
+            "reports every Locals.X / Parameters.X / FileGlobals.X reference that is NOT declared " +
+            "in that sequence's locals/parameters (or the file globals). Unlike validate_sequence_plan " +
+            "— which only checks Locals refs present in the build PLAN and never sees conditions " +
+            "written afterwards via set_flow_condition — this reads the REAL sequence, so it catches " +
+            "dangling parameter/local refs introduced by EITHER path (e.g. an If condition referencing " +
+            "Parameters.X where X was never declared). Returns {valid, issueCount, issues[], stats{}}; " +
+            "each issue carries code E_UNDECLARED_LOCAL / E_UNDECLARED_PARAM / E_UNDECLARED_FILEGLOBAL " +
+            "plus the sequence, step, property and expression. Omit sequence_name to audit EVERY " +
+            "sequence in the file. Advisory and read-only — it reports, it never modifies. References " +
+            "under other scopes (StationGlobals, RunState.*, Step.*, etc.) are intentionally not audited.",
+            s => s
+                .AddRequired("file_path", "string", "Path to the sequence file")
+                .AddOptional("sequence_name", "string",
+                    "Sequence to audit. Omit to audit every sequence in the file."),
+            AuditSequenceReferencesAsync);
+
         Register("insert_local_variable",
             "Insert a new local variable into a sequence. data_type accepts the builtins " +
-            "'string'/'number'/'boolean' OR the name of a custom data type / enum defined in the " +
-            "file (e.g. 'MyEnum') — anything that isn't a builtin is treated as a named type. " +
+            "'string'/'number'/'boolean'/'container', 'reference' (an Object Reference, default " +
+            "Nothing) OR the name of a custom data type / enum defined in the file (e.g. " +
+            "'MyEnum') — anything that isn't a builtin is treated as a named type. " +
             "To create an ARRAY local (required before get_array_variable/set_array_element/" +
             "resize_array_variable can be used), append '[]' to the type (e.g. 'number[]') or " +
             "prefix 'array:' (e.g. 'array:string').",
@@ -218,19 +269,32 @@ public class TestStandToolRegistry
                 .AddRequired("sequence_name", "string", "Name of the sequence")
                 .AddRequired("variable_name", "string", "Name of the local variable")
                 .AddRequired("data_type", "string",
-                    "Data type: 'string', 'number', 'boolean', or the name of a custom/enum type " +
-                    "in the file. Append '[]' (or prefix 'array:') for an array, e.g. 'number[]'.")
+                    "Data type: 'string', 'number', 'boolean', 'container', 'reference', or the " +
+                    "name of a custom/enum type in the file. Append '[]' (or prefix 'array:') " +
+                    "for an array, e.g. 'number[]'.")
                 .AddOptional("default_value", "string", "Optional default value"),
             InsertLocalVariableAsync);
 
         Register("set_local_variable_comment",
-            "Set the comment/description of a local variable in a sequence.",
+            "Set the comment/description of a local variable in a sequence. variable_name may be a " +
+            "dotted path to a nested container member (e.g. 'MyCont.Field') to comment that member.",
             s => s
                 .AddRequired("file_path", "string", "Path to the sequence file")
                 .AddRequired("sequence_name", "string", "Name of the sequence")
-                .AddRequired("variable_name", "string", "Name of the local variable")
+                .AddRequired("variable_name", "string", "Local variable name, or a dotted path to a nested member")
                 .AddRequired("comment", "string", "Comment text to set"),
             SetLocalVariableCommentAsync);
+
+        Register("set_parameter_comment",
+            "Set the comment/description of a SEQUENCE PARAMETER (or a nested member via a dotted " +
+            "path, e.g. 'MyParam.Field'). This is the only tool that reaches a Parameter's comment — " +
+            "set_local_variable_comment only touches Locals.",
+            s => s
+                .AddRequired("file_path", "string", "Path to the sequence file")
+                .AddRequired("sequence_name", "string", "Name of the sequence")
+                .AddRequired("parameter_name", "string", "Parameter name, or a dotted path to a nested member")
+                .AddRequired("comment", "string", "Comment text to set"),
+            SetParameterCommentAsync);
 
         Register("get_local_variables",
             "Get all local variables of a sequence with their names, types and current values.",
@@ -282,10 +346,118 @@ public class TestStandToolRegistry
                 .AddRequired("module_path", "string", "Path to the module file (e.g. C:\\path\\to\\test.vi)"),
             SetStepModulePathAsync);
 
+        Register("set_step_property",
+            "Set ANY property on a step by a dotted path RELATIVE TO THE STEP, then read it back. " +
+            "This is the generic step-property writer — the only tool that reaches a step's own " +
+            "properties: set_property_value/set_property resolve against FileGlobals/StationGlobals/" +
+            "Locals (never a step), and the configure_*_module tools only touch the adapter module. " +
+            "Essential for custom / None-adapter step types whose config lives in step properties, " +
+            "e.g. NI_LV_RunVIAsynchronously ('Run VI Asynchronously'): set 'VIModule.ViCall.VIPath' " +
+            "(the VI), 'RemoteHost'/'PortNumber'/'Timeout', 'VIModule.ViCall.ShowFrnPnl'. " +
+            "Unlike configure_labview_module it does NOT change the step's adapter. For an " +
+            "Expression-typed property (e.g. RemoteHost) pass the expression TEXT (a quoted literal " +
+            "like '\"192.168.0.9\"', or an expression like 'Locals.Host'). value_type is " +
+            "auto-detected (number / true|false / string) when omitted. The property path must " +
+            "already exist on the step (this does not create new subproperties).",
+            s => s
+                .AddRequired("sequence_file_path", "string", "Path to the sequence file")
+                .AddRequired("sequence_name", "string", "Name of the sequence")
+                .AddRequired("step_group", "string", "Step group: 'Setup', 'Main', or 'Cleanup'")
+                .AddRequired("step_name", "string", "Name of the step")
+                .AddRequired("property_path", "string",
+                    "Property path relative to the step (e.g. 'VIModule.ViCall.VIPath', 'PortNumber').")
+                .AddRequired("value", "string", "The value to write, as text.")
+                .AddOptional("value_type", "string",
+                    "How to interpret 'value'. Omit to auto-detect (number / true|false / string).",
+                    null, new[] { "number", "boolean", "string" })
+                .AddOptional("unescape", "boolean",
+                    "Decode \\r \\n \\t \\\\ \\uXXXX escape sequences in 'value' before writing " +
+                    "(default false) — the only way to write bare control characters (e.g. CR in " +
+                    "a VIDescription) through an MCP string parameter.", false)
+                .AddOptional("save", "boolean", "Save the file after writing (default true).", true),
+            SetStepPropertyAsync);
+
+        Register("create_step_property",
+            "CREATE a new subproperty on a step by a dotted path — the creation counterpart to " +
+            "set_step_property, which requires the path to exist. Value types: 'number', " +
+            "'boolean', 'string', 'container', 'reference' (Object Reference), or 'named_type' " +
+            "with type_name for a typed container (e.g. 'SequenceArgument' for a SequenceCall " +
+            "actual-argument entry, 'ErrorDialogOptions', 'NI_CustomResult'). Special value_type " +
+            "'array_elements' resizes an EXISTING array property to num_elements — new elements " +
+            "are instantiated with the array's ELEMENT type, which is the only way to author " +
+            "typed array entries like a LabVIEW connector-pane prototype (TS.SData.ViCall.Parms) " +
+            "or TS.AdditionalResultsHints. Idempotent: an existing path is left in place and only " +
+            "the optional 'value' is applied. Examples: (1) Result.TimeoutOccurred as boolean; " +
+            "(2) TS.SData.ActualArgs.SetPoint as named_type/SequenceArgument, then set its Expr " +
+            "via set_step_property; (3) TS.SData.ViCall.Parms with array_elements/5, then fill " +
+            "each Parms[i].Label/ArgVal via set_step_property.",
+            s => s
+                .AddRequired("sequence_file_path", "string", "Path to the sequence file")
+                .AddRequired("sequence_name", "string", "Name of the sequence")
+                .AddRequired("step_group", "string", "Step group: 'Setup', 'Main', or 'Cleanup'")
+                .AddRequired("step_name", "string", "Name of the step")
+                .AddRequired("property_path", "string",
+                    "Property path relative to the step to create (e.g. 'Result.TimeoutOccurred', " +
+                    "'TS.ErrorDialogOptions'). For 'array_elements' this addresses the existing array.")
+                .AddRequired("value_type", "string",
+                    "Type to create: number/boolean/string/container/reference, 'named_type' " +
+                    "(+type_name), or 'array_elements' (+num_elements).",
+                    new[] { "number", "boolean", "string", "container", "reference",
+                            "named_type", "array_elements" })
+                .AddOptional("type_name", "string",
+                    "TestStand type name for value_type='named_type' (e.g. 'SequenceArgument', " +
+                    "'Error', 'ErrorDialogOptions', 'NI_CustomResult').")
+                .AddOptional("num_elements", "number",
+                    "Element count for value_type='array_elements' (SetNumElements).")
+                .AddOptional("value", "string",
+                    "Optional scalar value to assign after creation (number/boolean/string only).")
+                .AddOptional("unescape", "boolean",
+                    "Decode \\r \\n \\t \\\\ \\uXXXX escapes in 'value' (default false).", false)
+                .AddOptional("save", "boolean", "Save the file after writing (default true).", true),
+            CreateStepPropertyAsync);
+
+        Register("set_step_property_flags",
+            "Set the raw PropFlags bitfield of a step property (PropertyObject.SetFlags) — " +
+            "e.g. 0x4 PassByReference, 0x2000 NotSerializedIfDefault-style markers like the " +
+            "0x200000 flag TestStand puts on module containers. Returns the read-back flags. " +
+            "Use get_property_tree (node.flags) to inspect current values first.",
+            s => s
+                .AddRequired("sequence_file_path", "string", "Path to the sequence file")
+                .AddRequired("sequence_name", "string", "Name of the sequence")
+                .AddRequired("step_group", "string", "Step group: 'Setup', 'Main', or 'Cleanup'")
+                .AddRequired("step_name", "string", "Name of the step")
+                .AddRequired("property_path", "string",
+                    "Property path relative to the step (empty string = the step itself).")
+                .AddRequired("flags", "number", "The PropFlags bitfield value to set.")
+                .AddOptional("save", "boolean", "Save the file after writing (default true).", true),
+            SetStepPropertyFlagsAsync);
+
+        Register("rename_step_property",
+            "Set the NAME of a step property (PropertyObject.Name). Essential for named ARRAY " +
+            "ELEMENTS: the entries of a LabVIEW connector-pane prototype (TS.SData.ViCall.Parms) " +
+            "carry the parameter label as their ELEMENT NAME — the editor and FileDiffer display " +
+            "'[i] Name' and PAIR array elements by it. create_step_property(array_elements) " +
+            "creates elements UNNAMED, so set each element's name afterwards (e.g. path " +
+            "'TS.SData.ViCall.Parms[0]', new_name 'error in (no error)'). get_property_tree " +
+            "reports existing element names via the node's 'elementName' field.",
+            s => s
+                .AddRequired("sequence_file_path", "string", "Path to the sequence file")
+                .AddRequired("sequence_name", "string", "Name of the sequence")
+                .AddRequired("step_group", "string", "Step group: 'Setup', 'Main', or 'Cleanup'")
+                .AddRequired("step_name", "string", "Name of the step")
+                .AddRequired("property_path", "string",
+                    "Property path relative to the step (e.g. 'TS.SData.ViCall.Parms[0]').")
+                .AddRequired("new_name", "string", "The name to assign (PropertyObject.Name).")
+                .AddOptional("save", "boolean", "Save the file after writing (default true).", true),
+            RenameStepPropertyAsync);
+
         Register("run_sequence_analyzer",
-            "Run the NI TestStand Sequence Analyzer on a sequence file and return all messages, " +
+            "Run the NI TestStand Sequence Analyzer and return a HUMAN-READABLE TEXT summary, " +
             "grouped by severity by default (like the editor's Analysis Results 'Group By' pane). " +
-            "Use group_by='rule' to group by rule, or group_by='none' for a flat sorted list.",
+            "Use group_by='rule' to group by rule, or group_by='none' for a flat sorted list. " +
+            "This is the quick text variant with NO severity filter; for STRUCTURED JSON (typed " +
+            "messages, severity counts, optional groups) and a min_severity filter use " +
+            "analyze_sequence_file — the same underlying analyzer.",
             s => s
                 .AddRequired("file_path", "string", "Absolute path to the sequence file to analyze")
                 .AddOptional("group_by", "string",
@@ -348,16 +520,27 @@ public class TestStandToolRegistry
 
         // Variables & Properties
         Register("get_property",
-            "Get the value of a TestStand property using its lookup string " +
-            "(e.g. 'Locals.Counter', 'RunState.Root.UUT.SerialNumber').",
+            "Get a GLOBAL variable's value by lookup string. SCOPE IS LIMITED: only " +
+            "'StationGlobals.X' (engine globals) and 'FileGlobals.X' (the FIRST loaded sequence " +
+            "file) resolve; a bare name is treated as a StationGlobal. It does NOT reach a " +
+            "sequence's Locals or a live RunState — for Locals use get_local_variables, for a " +
+            "specific file's globals use get_file_globals (takes an explicit file_path, so it is " +
+            "unambiguous when several files are loaded), and for a running thread's scope use the " +
+            "thread-context tools (evaluate_in_thread_context / get_runtime_variable).",
             s => s.AddRequired("lookup_string", "string",
-                "TestStand property lookup string"),
+                "Global lookup string: 'StationGlobals.X', 'FileGlobals.X', or a bare StationGlobal name."),
             GetPropertyAsync);
 
         Register("set_property",
-            "Set the value of a TestStand property using its lookup string.",
+            "Set a GLOBAL variable's value by lookup string. SAME LIMITED SCOPE as get_property: " +
+            "only 'StationGlobals.X' and 'FileGlobals.X' (the FIRST loaded file) resolve; a bare " +
+            "name is a StationGlobal. It does NOT reach a sequence's Locals, a step, or RunState. " +
+            "To set a Local use set_local_variable; a specific file's global use set_file_global " +
+            "(explicit file_path); create-with-a-type use set_property_value; a step's own property " +
+            "use set_step_property.",
             s => s
-                .AddRequired("lookup_string", "string", "TestStand property lookup string")
+                .AddRequired("lookup_string", "string",
+                    "Global lookup string: 'StationGlobals.X', 'FileGlobals.X', or a bare StationGlobal name.")
                 .AddRequired("value", "string",
                     "Value to set (numbers, booleans, and strings all accepted as strings)"),
             SetPropertyAsync);
@@ -383,7 +566,8 @@ public class TestStandToolRegistry
             "AsPropertyObject — every sequence, step and parameter, the richest/largest tree). " +
             "'FileGlobals' and 'SequenceFile' require file_path. Use lookup_string to start at a " +
             "sub-path. Bounded by max_depth, max_array_elements and an internal node budget " +
-            "('truncated'=true marks cut-offs).",
+            "('truncated'=true marks cut-offs). For just ONE property's immediate value and direct " +
+            "subproperties (single level) use get_property_object instead.",
             s => s
                 .AddOptional("root", "string",
                     "Root property object to dump: 'StationGlobals' (default), 'FileGlobals' or " +
@@ -403,13 +587,17 @@ public class TestStandToolRegistry
             GetPropertyTreeAsync);
 
         Register("insert_file_global",
-            "Insert a new FileGlobal variable into a sequence file. To create an ARRAY file " +
+            "Insert a new FileGlobal variable into a sequence file. data_type accepts the " +
+            "builtins 'string'/'number'/'boolean'/'container', 'reference' (an Object " +
+            "Reference, default Nothing), OR the name of a custom data type / enum defined in " +
+            "the file — same contract as insert_local_variable. To create an ARRAY file " +
             "global (required before the array tools can operate on it), append '[]' to the " +
             "type (e.g. 'number[]') or prefix 'array:' (e.g. 'array:string').",
             s => s
                 .AddRequired("sequence_file_path", "string", "Path to the sequence file")
                 .AddRequired("variable_name", "string", "Name of the new FileGlobal variable")
-                .AddRequired("data_type", "string", "Data type: 'string', 'number', 'boolean'. " +
+                .AddRequired("data_type", "string", "Data type: 'string', 'number', 'boolean', " +
+                    "'container', 'reference' (Object Reference), or a named custom type. " +
                     "Append '[]' (or prefix 'array:') for an array, e.g. 'number[]', 'array:string'."),
             InsertFileGlobalAsync);
 
@@ -451,7 +639,11 @@ public class TestStandToolRegistry
             GetStepsAsync);
 
         Register("get_step",
-            "Get detailed information about a single step.",
+            "Get the structured OVERVIEW of a single step — the same shape as one entry from " +
+            "get_steps (name, type, group, enabled, module info, comment). For the flat key/value " +
+            "of the step's expressions and run/pass/fail/loop/comparison settings use " +
+            "get_step_properties; for arbitrary NESTED subproperty paths use " +
+            "get_property_tree(root='SequenceFile').",
             s => s
                 .AddRequired("sequence_file_path", "string", "Path to the sequence file")
                 .AddRequired("sequence_name", "string", "Name of the sequence")
@@ -468,7 +660,11 @@ public class TestStandToolRegistry
             EnableStepAsync);
 
         Register("get_step_properties",
-            "Get all properties of a specific step.",
+            "Get a flat key/value map of a step's configuration: Name, StepType, Enabled, " +
+            "Pre/Post/Status expressions, Description, Comment, ModuleExpression, RunMode, " +
+            "Pass/FailAction, LoopType and ComparisonType (keys absent when the step type lacks " +
+            "them). For the structured step overview use get_step; for arbitrary nested subproperty " +
+            "paths (the full property bag) use get_property_tree(root='SequenceFile').",
             s => s
                 .AddRequired("sequence_file_path", "string", "Path to the sequence file")
                 .AddRequired("sequence_name", "string", "Name of the sequence")
@@ -477,7 +673,9 @@ public class TestStandToolRegistry
 
         // Reports
         Register("generate_report",
-            "Generate a test report for a completed execution.",
+            "Return report METADATA for a completed execution (execution id, requested path, " +
+            "format). NOTE: it does NOT itself write the report file — to actually save a report " +
+            "to disk use save_report.",
             s => s
                 .AddRequired("execution_id", "string", "Execution ID to report on")
                 .AddRequired("output_path", "string", "File path where the report will be saved")
@@ -487,7 +685,10 @@ public class TestStandToolRegistry
             GenerateReportAsync);
 
         Register("get_report_text",
-            "Get the text content of the report for a (possibly still running) execution.",
+            "Get the report as TEXT for a (possibly still running) execution — returns the " +
+            "execution's ReportText property, so it works mid-run. For the COMPLETE report body " +
+            "of a finished execution use get_full_report (Report.All); to write a report file use " +
+            "save_report.",
             s => s.AddRequired("execution_id", "string", "Execution ID"),
             GetReportTextAsync);
 
@@ -601,10 +802,37 @@ public class TestStandToolRegistry
 
         Register("get_data_types",
             "List all custom data types. Optionally pass a sequence file path to get " +
-            "data types defined in that file; otherwise returns engine-level data types.",
+            "data types defined in that file; otherwise returns engine-level data types. " +
+            "NOTE: for a file this lists only file-ROOT subproperty data types — it does NOT see " +
+            "LabVIEW-cluster container typedefs (which live in the file's TypeUsageList). Use " +
+            "list_file_typedefs for those.",
             s => s.AddOptional("sequence_file_path", "string",
                 "Optional path to a sequence file to read data types from"),
             GetDataTypesAsync);
+
+        Register("list_file_typedefs",
+            "List every custom data TYPE embedded in a file's TypeUsageList — INCLUDING the " +
+            "LabVIEW-cluster container typedefs that get_data_types cannot see (those are stored in " +
+            "the TypeUsageList, not as file-root subproperties). Each entry has the type name, a " +
+            "coarse kind, and whether it is attached to the file. Use together with copy_typedefs to " +
+            "reproduce such types in a rebuilt file.",
+            s => s.AddRequired("file_path", "string", "Path to the sequence file"),
+            GetFileTypeDefsAsync);
+
+        Register("copy_typedefs",
+            "Copy custom data type definitions from one sequence file into another and attach them so " +
+            "they persist embedded. This is the ONLY way to reproduce LabVIEW-cluster typedefs in a " +
+            "rebuilt file: they carry GUIDs/structure that cannot be recreated field-by-field with " +
+            "create_data_type, so a tool-only rebuild must copy them from the original. Pass explicit " +
+            "'type_names' (reliable) or omit to copy EVERY embedded type. Types already present in the " +
+            "destination are left untouched. Returns the names actually copied. Removes the previous " +
+            "need to physically copy the whole .seq just to keep its data types.",
+            s => s
+                .AddRequired("source_file_path", "string", "File to copy type definitions FROM (e.g. the original)")
+                .AddRequired("dest_file_path", "string", "File to copy the type definitions INTO (the rebuild)")
+                .AddOptional("type_names", "array", "Specific type names to copy; omit to copy all embedded types.")
+                .AddOptional("save", "boolean", "Save the destination file after copying (default true).", true),
+            CopyTypeDefsAsync);
 
         // Sequence Editor
         Register("launch_sequence_editor",
@@ -656,7 +884,10 @@ public class TestStandToolRegistry
             "NOTE: the engine's CheckExprSyntax needs a LOADED sequence file as context — " +
             "in practice pass 'sequence_file_path' pointing at an already created/open file " +
             "(create_sequence_file first). Without a loaded file even a valid expression can " +
-            "fail to validate.",
+            "fail to validate. " +
+            "Expression-language gotchas: '==' is CASE-INSENSITIVE and does NOT trim ('\"A\"==\"a\"' " +
+            "is True); there is NO implicit string->bool cast (Val(\"True\")==0), so compare " +
+            "explicitly (e.g. Locals.S == \"True\"); StrComp is case-SENSITIVE.",
             s => s
                 .AddRequired("expression", "string", "TestStand expression to validate")
                 .AddOptional("sequence_file_path", "string",
@@ -965,17 +1196,23 @@ public class TestStandToolRegistry
             SetStepFailActionAsync);
 
         Register("set_step_loop",
-            "Configure the loop settings for a step.",
+            "Configure the loop settings for a step. loop_type: 'NoLoop', 'For'/'FixedNumLoops', " +
+            "'PassFailCount', or 'Custom' (a condition-driven loop). A CUSTOM loop is fully described " +
+            "by its four expressions — pass 'init_expr' (LoopInitialize, e.g. 'RunState.LoopIndex = 0'), " +
+            "'while_expr' (LoopWhile / loop-continue test), 'inc_expr' (LoopIncrement) and 'status_expr' " +
+            "(LoopStatus, e.g. 'RunState.LoopNumPassed / RunState.LoopNumIterations < 1 ? \"Failed\" : \"Passed\"'). " +
+            "'While'/'Condition' are accepted aliases for 'Custom'.",
             s => s
                 .AddRequired("file_path", "string", "Path to the sequence file")
                 .AddRequired("sequence_name", "string", "Name of the sequence")
                 .AddRequired("step_group", "string", "Step group: 'Setup', 'Main', or 'Cleanup'")
                 .AddRequired("step_name", "string", "Name of the step")
                 .AddRequired("loop_type", "string",
-                    "Loop type: 'NoLoop', 'While', 'For', 'Condition'")
-                .AddOptional("init_expr", "string", "Initialiser expression (For loop)")
-                .AddOptional("while_expr", "string", "While/condition expression")
-                .AddOptional("inc_expr", "string", "Increment expression (For loop)"),
+                    "Loop type: 'NoLoop', 'For'/'FixedNumLoops', 'PassFailCount', or 'Custom'")
+                .AddOptional("init_expr", "string", "Initialiser expression (For loop / Custom LoopInitialize)")
+                .AddOptional("while_expr", "string", "While/condition expression (Custom LoopWhile)")
+                .AddOptional("inc_expr", "string", "Increment expression (For loop / Custom LoopIncrement)")
+                .AddOptional("status_expr", "string", "Custom-loop status expression (LoopStatus)"),
             SetStepLoopAsync);
 
         Register("set_flow_condition",
@@ -987,7 +1224,9 @@ public class TestStandToolRegistry
             "is_default=true (condition may be empty). NOTE: the bulk-insert / set_step_expression " +
             "'expression' field does NOT set this — it writes the Post Expression, which would " +
             "evaluate-and-discard without branching; this tool also clears such a duplicate Post " +
-            "Expression automatically.",
+            "Expression automatically. REJECTS a non-branch step (e.g. NI_Flow_End): a condition " +
+            "there has no effect — a DoWhile's loop condition belongs on the NI_Flow_DoWhile opener, " +
+            "not its End. Note '==' is case-insensitive and there is no string->bool cast.",
             s => s
                 .AddRequired("file_path", "string", "Path to the sequence file")
                 .AddRequired("sequence_name", "string", "Name of the sequence")
@@ -999,6 +1238,51 @@ public class TestStandToolRegistry
                 .AddOptional("is_default", "boolean",
                     "NI_Flow_Case only: mark this as the default case (IsDefault=true)."),
             SetFlowConditionAsync);
+
+        Register("configure_for_loop",
+            "Configure a counted NI_Flow_For loop in ONE call — writes its three dedicated step " +
+            "properties InitializationExpr / ConditionExpr / IncrementExpr (the parts a For loop " +
+            "evaluates; NOT Pre/Post/Status, and NOT the generic step LoopType). Two ways to use it: " +
+            "(1) convenience — pass 'count' (and optional 'index_var', default 'Locals.i') to generate " +
+            "the standard loop 'index_var = 0' / 'index_var < count' / 'index_var += 1'; " +
+            "(2) explicit — pass any of 'init_expr' / 'condition_expr' / 'increment_expr' (these OVERRIDE " +
+            "the generated ones). REJECTS a non-For step. NOTE: it does NOT create the index variable — " +
+            "declare it with insert_local_variable (type number). Alternatively a For loop can be built " +
+            "inline via insert_steps_bulk (expression + init_expr + increment_expr).",
+            s => s
+                .AddRequired("file_path", "string", "Path to the sequence file")
+                .AddRequired("sequence_name", "string", "Name of the sequence")
+                .AddRequired("step_group", "string", "Step group: 'Setup', 'Main', or 'Cleanup'")
+                .AddRequired("step_name", "string", "Name of the NI_Flow_For step")
+                .AddOptional("count", "number",
+                    "Iteration count for the convenience form: generates 'index_var = 0' / 'index_var < count' / 'index_var += 1'.")
+                .AddOptional("index_var", "string",
+                    "Loop index variable for the convenience form (default 'Locals.i'). Must be declared separately (type number).")
+                .AddOptional("init_expr", "string", "Explicit InitializationExpr (overrides the generated one).")
+                .AddOptional("condition_expr", "string", "Explicit ConditionExpr / loop-continue test (overrides the generated one).")
+                .AddOptional("increment_expr", "string", "Explicit IncrementExpr (overrides the generated one).")
+                .AddOptional("save", "boolean", "Save the file after configuring (default true).", true),
+            ConfigureForLoopAsync);
+
+        Register("configure_foreach_loop",
+            "Configure an NI_Flow_ForEach loop in ONE call — writes its dedicated step properties " +
+            "ArrayExpr (the collection to iterate) and ArrayElementExpr (the per-element variable), " +
+            "plus optional OffsetExpr / SubscriptExpr. A ForEach with an empty ArrayExpr never iterates, " +
+            "so 'array_expr' is the essential field (like a For loop's condition). REJECTS a non-ForEach " +
+            "step. NOTE: it does NOT create the element variable — declare it with insert_local_variable " +
+            "(type matching the array element type). Alternatively a ForEach can be built inline via " +
+            "insert_steps_bulk (array_expr + element_expr).",
+            s => s
+                .AddRequired("file_path", "string", "Path to the sequence file")
+                .AddRequired("sequence_name", "string", "Name of the sequence")
+                .AddRequired("step_group", "string", "Step group: 'Setup', 'Main', or 'Cleanup'")
+                .AddRequired("step_name", "string", "Name of the NI_Flow_ForEach step")
+                .AddOptional("array_expr", "string", "The collection to iterate (ArrayExpr), e.g. 'Locals.Items'.")
+                .AddOptional("element_expr", "string", "The per-element variable (ArrayElementExpr), e.g. 'Locals.Item'. Must be declared separately.")
+                .AddOptional("offset_expr", "string", "Optional start offset into the collection (OffsetExpr).")
+                .AddOptional("subscript_expr", "string", "Optional subscript/index variable (SubscriptExpr).")
+                .AddOptional("save", "boolean", "Save the file after configuring (default true).", true),
+            ConfigureForEachLoopAsync);
 
         Register("set_step_record_result",
             "Set result recording mode for a step. " +
@@ -1040,7 +1324,8 @@ public class TestStandToolRegistry
             "Set the module unload option of a step. " +
             "Options: 'OnPreconditionFailure' (1), 'AfterStepExecution' (2), 'AfterSequenceExecution' (3), 'WithSequenceFile' (4), 'UseStepUnloadOption' (5). " +
             "CAVEAT: 'UseStepUnloadOption' (5) is only valid at the sequence-file / model level — " +
-            "TestStand REJECTS it on an individual step. Use one of (1)-(4) for a per-step setting.",
+            "TestStand REJECTS it on an individual step. Use one of (1)-(4) for a per-step setting. " +
+            "This tool now rejects value 5 up front with a clear error.",
             s => s
                 .AddRequired("file_path", "string", "Path to the sequence file")
                 .AddRequired("sequence_name", "string", "Name of the sequence")
@@ -1086,7 +1371,10 @@ public class TestStandToolRegistry
 
         // Report Operations
         Register("save_report",
-            "Save the report of a completed execution to a file.",
+            "Write the report of an execution to a FILE on disk (this is the tool that actually " +
+            "persists a report — it calls the execution's Report.Save in the given format). The " +
+            "execution must still be in memory (a stale/unknown id errors). Prefer this over " +
+            "generate_report, which only returns report metadata and does not write the file.",
             s => s
                 .AddRequired("execution_id", "string", "Execution ID")
                 .AddRequired("output_path", "string", "File path to save the report to")
@@ -1100,7 +1388,10 @@ public class TestStandToolRegistry
             LaunchReportViewerAsync);
 
         Register("get_full_report",
-            "Get the full text content of the report for a completed execution.",
+            "Get the COMPLETE report body for a completed execution (the execution's Report.All). " +
+            "Fuller than get_report_text (which returns the lighter ReportText and also works while " +
+            "the execution is still running). To write a report to a file use save_report. The " +
+            "execution must still be in memory.",
             s => s.AddRequired("execution_id", "string", "Execution ID"),
             GetFullReportAsync);
 
@@ -1129,7 +1420,9 @@ public class TestStandToolRegistry
 
         Register("redo",
             "Redo the last undone operation. " +
-            "Returns true if a redo was performed, false if nothing to redo.",
+            "Returns true if a redo was performed, false if nothing to redo. " +
+            "NOTE: like undo, edits made through the headless MCP tools are NOT auto-recorded onto " +
+            "the undo/redo stack, so this normally has nothing to redo after such edits.",
             s => s.AddOptional("file_path", "string",
                 "Optional sequence file path for a file-level redo"),
             RedoAsync);
@@ -1366,6 +1659,107 @@ public class TestStandToolRegistry
                 .AddRequired("thread_id", "string", "Thread ID or thread index"),
             GetThreadCallStackAsync);
 
+        // ── Live Thread-Context Inspection (runtime debugging) ─────────────────
+        // These read/write the LIVE SequenceContext (== ThisContext) and RunState of a running or
+        // paused thread at a chosen call-stack frame — the runtime values the Sequence Editor's
+        // Variables/Watch pane shows. This is the ONLY way to see them: get_property_tree and
+        // evaluate_expression resolve against engine Globals and never reach the thread scope.
+        // A thread must be executing inside a sequence (running or paused on a step).
+
+        Register("inspect_thread_context",
+            "Dump the LIVE variable/property tree of a running or paused thread's call-stack " +
+            "frame (the runtime values, NOT the static file defaults). 'scope' selects the " +
+            "sub-tree: 'runstate' (default — the execution cursor: StepIndex, NextStepIndex, " +
+            "StepGroup, LoopIndex, SequenceError, flags …), 'locals', 'parameters', 'step' " +
+            "(the current step's live properties incl. its Result), 'sequence', or 'full'/" +
+            "'thiscontext' (everything — large). Use 'lookup_string' to descend to a sub-path " +
+            "(e.g. 'SequenceError' or 'Result.Status'), 'call_stack_index' to inspect a caller " +
+            "frame (0 = current/innermost). Only works while the thread is executing inside a " +
+            "sequence. Complements get_property_tree, which cannot see the live thread scope.",
+            s => s
+                .AddRequired("execution_id", "string", "Execution ID (from start_execution)")
+                .AddOptional("thread_id", "string",
+                    "Thread ID or index (from get_execution_threads). Default: first thread.")
+                .AddOptional("call_stack_index", "integer",
+                    "Call-stack frame: 0 = current/innermost, higher = toward the entry point. Default 0.", 0)
+                .AddOptional("scope", "string",
+                    "Sub-tree to dump. Default 'runstate'.", "runstate",
+                    new[] { "runstate", "locals", "parameters", "step", "sequence", "full", "thiscontext" })
+                .AddOptional("lookup_string", "string",
+                    "Optional sub-path within the scope (e.g. 'SequenceError', 'Result.Status').")
+                .AddOptional("max_depth", "integer",
+                    "Max recursion depth. Default 3 (RunState nests recursively — raise cautiously).", 3)
+                .AddOptional("include_hidden", "boolean",
+                    "Include hidden (TS.*/internal) properties. Default false for a clean debug view.", false)
+                .AddOptional("max_array_elements", "integer",
+                    "Max array elements expanded per array; 0 = unlimited. Default 50.", 50),
+            InspectThreadContextAsync);
+
+        Register("evaluate_in_thread_context",
+            "Evaluate a TestStand expression in the LIVE context of a running/paused thread frame " +
+            "— the scope where 'Locals.X', 'Parameters.X', 'RunState.X', 'Step.X', 'FileGlobals.X' " +
+            "resolve to their RUNTIME values (e.g. 'Locals.Counter + 1', 'RunState.NextStepIndex', " +
+            "'Str(Locals.Message)'). This is exactly the scope evaluate_expression CANNOT reach " +
+            "(that one only sees Station/FileGlobals). Read-only evaluation; to change a value use " +
+            "set_runtime_variable. Requires the thread to be executing inside a sequence.",
+            s => s
+                .AddRequired("execution_id", "string", "Execution ID")
+                .AddRequired("expression", "string",
+                    "TestStand expression, evaluated with the frame's ThisContext as root.")
+                .AddOptional("thread_id", "string", "Thread ID or index. Default: first thread.")
+                .AddOptional("call_stack_index", "integer",
+                    "Call-stack frame (0 = current/innermost). Default 0.", 0),
+            EvaluateInThreadContextAsync);
+
+        Register("get_runtime_variable",
+            "Read ONE live variable/property by path from a running/paused thread frame, with its " +
+            "value and type. Path is relative to ThisContext, e.g. 'Locals.Counter', " +
+            "'Parameters.SerialNumber', 'RunState.NextStepIndex', 'RunState.SequenceError.Msg'. " +
+            "Returns the RUNTIME value (get_local_variables returns the static file default instead). " +
+            "For a whole sub-tree use inspect_thread_context; for a computed expression use " +
+            "evaluate_in_thread_context.",
+            s => s
+                .AddRequired("execution_id", "string", "Execution ID")
+                .AddRequired("property_path", "string",
+                    "Path relative to ThisContext (e.g. 'Locals.Counter', 'RunState.NextStepIndex').")
+                .AddOptional("thread_id", "string", "Thread ID or index. Default: first thread.")
+                .AddOptional("call_stack_index", "integer",
+                    "Call-stack frame (0 = current/innermost). Default 0.", 0),
+            GetRuntimeVariableAsync);
+
+        Register("set_runtime_variable",
+            "Write ONE live variable/property by path in a running/paused thread frame, then read " +
+            "it back. Path is relative to ThisContext. Powerful debug actions: set " +
+            "'RunState.NextStepIndex' to redirect execution (the 'Set Next Step' action), patch a " +
+            "'Locals.X'/'Parameters.X' value before resuming, or clear 'RunState.SequenceError'/" +
+            "'RunState.GotoCleanup'. Only meaningful while the thread is PAUSED (or parked); writing " +
+            "a freely-running thread races with it. 'value_type' is auto-detected when omitted.",
+            s => s
+                .AddRequired("execution_id", "string", "Execution ID")
+                .AddRequired("property_path", "string",
+                    "Path relative to ThisContext (e.g. 'Locals.Counter', 'RunState.NextStepIndex').")
+                .AddRequired("value", "string", "The value to write, as text.")
+                .AddOptional("thread_id", "string", "Thread ID or index. Default: first thread.")
+                .AddOptional("call_stack_index", "integer",
+                    "Call-stack frame (0 = current/innermost). Default 0.", 0)
+                .AddOptional("value_type", "string",
+                    "How to interpret 'value'. Omit to auto-detect (number / true|false / string).",
+                    null, new[] { "number", "boolean", "string" }),
+            SetRuntimeVariableAsync);
+
+        Register("get_runstate_summary",
+            "Get a curated FLAT snapshot of the most-used RunState fields for a running/paused " +
+            "thread frame — the 'where am I / what is the state' one-shot: current step/sequence/" +
+            "file, StepGroup, StepIndex, NextStepIndex, PreviousStepIndex, CallStackDepth, " +
+            "LoopIndex, NumStepsExecuted, the SequenceFailed/GotoCleanup/ErrorReported flags and " +
+            "SequenceError (code/msg/occurred). Convenience over inspect_thread_context(scope=runstate).",
+            s => s
+                .AddRequired("execution_id", "string", "Execution ID")
+                .AddOptional("thread_id", "string", "Thread ID or index. Default: first thread.")
+                .AddOptional("call_stack_index", "integer",
+                    "Call-stack frame (0 = current/innermost). Default 0.", 0),
+            GetRunStateSummaryAsync);
+
         // ── Workspace ─────────────────────────────────────────────────────────
 
         Register("open_workspace",
@@ -1490,9 +1884,10 @@ public class TestStandToolRegistry
             ResizeArrayVariableAsync);
 
         Register("get_property_object",
-            "Inspect a property (local variable or file global) in a structured way: its value " +
-            "type, scalar value, named type, and — for containers/structs — its immediate " +
-            "subproperties with their types and values.",
+            "Inspect ONE property (local variable or file global) at a SINGLE level: its value " +
+            "type, scalar value, named type, and — for containers/structs — its IMMEDIATE " +
+            "subproperties with their types and values. For a full RECURSIVE walk of a whole tree " +
+            "(StationGlobals / FileGlobals / the entire SequenceFile) use get_property_tree.",
             s => s
                 .AddRequired("file_path", "string", "Path to the sequence file")
                 .AddOptional("sequence_name", "string",
@@ -1504,7 +1899,11 @@ public class TestStandToolRegistry
         Register("set_property_value",
             "Set a property value with an explicit type, creating the property if it does not " +
             "exist yet. value_type 'container' creates an empty container/struct (no value). " +
-            "Targets a sequence's local variable (with sequence_name) or a file global (without).",
+            "Targets a sequence's local variable (with sequence_name) or a file global (without). " +
+            "It resolves against Locals / FileGlobals ONLY — it NEVER reaches a step's own property; " +
+            "use set_step_property (a dotted path relative to the step) for that. Use THIS tool when " +
+            "you need to CREATE the property and/or fix its type (incl. 'container'); to merely set " +
+            "the value of an EXISTING variable, set_local_variable / set_file_global are simpler.",
             s => s
                 .AddRequired("file_path", "string", "Path to the sequence file")
                 .AddOptional("sequence_name", "string",
@@ -1633,7 +2032,12 @@ public class TestStandToolRegistry
         // ── Module Parameter Operations ────────────────────────────────────────
 
         Register("get_module_parameters",
-            "Get all parameters/arguments configured for a step's module (VI, DLL, .NET, Python). " +
+            "Get all parameters/arguments configured for a step's module. Reads, in order: the " +
+            "LabVIEW connector-pane bindings (TS.SData.ViCall.Parms — cluster members flattened " +
+            "as 'parent.child', value = the ArgVal binding expression), the step-root VIModule " +
+            "of utility steps (NI_LV_RunVIAsynchronously), SequenceCall actual arguments " +
+            "(TS.SData.ActualArgs — value = the Expr binding; null when the default is used), " +
+            "and finally the legacy flat Module.Parameters container (DLL/.NET/Python). " +
             "Returns a list of {name, value, type, direction, dataType}.",
             s => s
                 .AddRequired("file_path", "string", "Path to the sequence file")
@@ -1643,13 +2047,24 @@ public class TestStandToolRegistry
             GetModuleParametersAsync);
 
         Register("set_module_parameter",
-            "Set a single module parameter value on a step.",
+            "Set a single module parameter/argument binding on a step. LabVIEW steps: matches a " +
+            "connector-pane parameter by its Label ('parent.child' descends into a cluster, e.g. " +
+            "'error out.status') and writes its ArgVal expression, clearing UseDefaultValues. " +
+            "SequenceCall steps: binds TS.SData.ActualArgs.<name>.Expr and clears that argument's " +
+            "UseDef. When the argument entry is missing, the callee prototype is loaded first (engine " +
+            "'Load Prototype') so EVERY parameter becomes a correctly-typed SequenceArgument (right " +
+            "ParamType/ParamRepresentation/Flags) with unbound args left at UseDef=True — only if the " +
+            "target cannot be resolved (headless/missing file) is a bare entry created on demand. Pass " +
+            "an empty value to revert to 'use default'. Falls back to the legacy flat Module.Parameters " +
+            "container for other adapters.",
             s => s
                 .AddRequired("file_path", "string", "Path to the sequence file")
                 .AddRequired("sequence_name", "string", "Name of the sequence")
                 .AddRequired("step_group", "string", "Step group: 'Setup', 'Main', or 'Cleanup'")
                 .AddRequired("step_name", "string", "Name of the step")
-                .AddRequired("parameter_name", "string", "Name of the parameter to set")
+                .AddRequired("parameter_name", "string",
+                    "Parameter name: VI connector-pane Label ('parent.child' for cluster members) " +
+                    "or SequenceCall argument name.")
                 .AddRequired("value", "string", "Value or expression to assign")
                 .AddOptional("use_expression", "boolean",
                     "If true (default), assigns as an expression. If false, sets as a literal value.",
@@ -1737,6 +2152,53 @@ public class TestStandToolRegistry
                     "Seconds to wait — a literal number ('2.5') or any expression evaluating to seconds."),
             SetWaitTimeAsync);
 
+        Register("configure_wait",
+            "Configure an NI_Wait step's wait TARGET beyond a plain time interval. wait_mode: " +
+            "'time' (expression = seconds), 'thread' (expression = a thread reference, e.g. " +
+            "'FileGlobals.ErrorHandlerThread' — wait until that thread ends) or 'execution'. Sets " +
+            "WaitForTarget + the matching expression, clears the 'specify by sequence call' flags a " +
+            "fresh NI_Wait carries, and optionally sets the timeout (timeout_expr / timeout_enabled / " +
+            "error_on_timeout). Use this for thread/execution waits; set_wait_time only does 'time'.",
+            s => s
+                .AddRequired("file_path", "string", "Path to the sequence file")
+                .AddRequired("sequence_name", "string", "Name of the sequence")
+                .AddRequired("step_group", "string", "Step group: 'Setup', 'Main', or 'Cleanup'")
+                .AddRequired("step_name", "string", "Name of the NI_Wait step")
+                .AddRequired("wait_mode", "string", "'time', 'thread', or 'execution'")
+                .AddOptional("expression", "string",
+                    "The target expression: seconds (time), thread reference (thread), or execution reference (execution).")
+                .AddOptional("timeout_expr", "string", "Timeout in seconds (TimeoutExpr).")
+                .AddOptional("timeout_enabled", "boolean", "Enable the timeout (TimeoutEnabled).")
+                .AddOptional("error_on_timeout", "boolean", "Raise an error if the timeout elapses (ErrorOnTimeout)."),
+            ConfigureWaitAsync);
+
+        Register("configure_run_vi_async",
+            "Configure an NI_LV_RunVIAsynchronously ('Run VI Asynchronously') step in ONE call. This " +
+            "step type needs a special layout that a plain insert does NOT produce and that a plain " +
+            "adapter switch CORRUPTS (it turns the step into an Action and drops the VIModule): the " +
+            "async launch is driven by a Sequence-adapter SeqCallStepAdditions module (calls " +
+            "'MainSequence' in a new thread) while the actual VI lives in the step-own VIModule.ViCall. " +
+            "This tool builds the SeqCallStepAdditions module by retyping the container, applies the " +
+            "async-launch defaults (SFPathExpr/SeqNameExpr/SpecifyByExpr/UsePrototype/ThreadOpt/" +
+            "AutoWaitAsync/CustomThreadAffinity), stores the VI (vi_path + optional namespace) and sets " +
+            "the module marker flag. Insert the step first (insert_steps_bulk/insert_step with step_type " +
+            "'NI_LV_RunVIAsynchronously'), then call this. The connector-pane prototype (ViCall.Parms/" +
+            "VIDescription) still won't materialise headless — that's an accepted LabVIEW residual.",
+            s => s
+                .AddRequired("file_path", "string", "Path to the sequence file")
+                .AddRequired("sequence_name", "string", "Name of the sequence")
+                .AddRequired("step_group", "string", "Step group: 'Setup', 'Main', or 'Cleanup'")
+                .AddRequired("step_name", "string", "Name of the NI_LV_RunVIAsynchronously step")
+                .AddRequired("vi_path", "string", "Path to the VI to launch (VIModule.ViCall.VIPath)")
+                .AddOptional("namespace", "string", "VI namespace/library (VIModule.ViCall.Namespace), e.g. 'MyLib.lvlibp'")
+                .AddOptional("thread_option", "number", "Multithreading option (SData.ThreadOpt): 1 = new thread (default), 3 = new execution.")
+                .AddOptional("thread_ref_expr", "string", "Expression to store the launched thread reference (SData.AsyncThreadExpr).")
+                .AddOptional("auto_wait", "boolean", "Wait for the async VI at the end of the current sequence (SData.AutoWaitAsync, default true).")
+                .AddOptional("sequence_name_expr", "string", "Async-launch sequence name expression (SData.SeqNameExpr, default '\"MainSequence\"').")
+                .AddOptional("sequence_file_expr", "string", "Async-launch file-path expression (SData.SFPathExpr, default 'Evaluate(Step.SequenceFileExpr)').")
+                .AddOptional("save", "boolean", "Save the file after configuring (default true).", true),
+            ConfigureRunViAsyncAsync);
+
         Register("configure_string_value_test",
             "Configure a StringValueTest step: set the expression, expected value, and comparison type.",
             s => s
@@ -1822,7 +2284,9 @@ public class TestStandToolRegistry
                     "User profile to seed privileges from (e.g. 'Administrator', 'Developer', "
                     + "'Technician', 'Operator'). Empty = minimal default privileges.", "")
                 .AddOptional("persist", "boolean",
-                    "Write the users file to disk (default true). Set false to only modify in memory.", true),
+                    "Write the users file to disk (default true). Set false to only modify in memory. " +
+                    "For test / experimental users pass persist:false — it edits only the in-memory " +
+                    "users file and never touches users.ini on disk.", true),
             CreateUserAsync);
 
         Register("delete_user",
@@ -1921,7 +2385,11 @@ public class TestStandToolRegistry
             ConfigureDllModuleAsync);
 
         Register("configure_labview_module",
-            "Configure a step's LabVIEW code module: the VI path (LabVIEW adapter).",
+            "Configure a step's LabVIEW code module: the VI path (LabVIEW adapter). " +
+            "Do NOT use on a None-adapter LabVIEW UTILITY step (e.g. NI_LV_RunVIAsynchronously, " +
+            "'Run VI Asynchronously') — its VI config lives in the step's own properties and " +
+            "switching to the LabVIEW adapter corrupts it; this tool now REFUSES such steps. Use " +
+            "set_step_property instead (e.g. property_path 'VIModule.ViCall.VIPath').",
             s => s
                 .AddRequired("file_path", "string", "Path to the sequence file")
                 .AddRequired("sequence_name", "string", "Name of the sequence")
@@ -1945,7 +2413,15 @@ public class TestStandToolRegistry
 
         Register("configure_sequence_call_module",
             "Configure a step's SequenceCall module: target sequence and (optional) target file. " +
-            "Prefer this typed tool over set_sequence_call_target for new code.",
+            "Prefer this typed tool over set_sequence_call_target for new code. After the target is set, " +
+            "the callee prototype is loaded (engine 'Load Prototype'): when the target resolves, " +
+            "TS.SData.ActualArgs is populated with one correctly-typed SequenceArgument per callee " +
+            "parameter (right ParamType/ParamRepresentation/Flags, unbound args at UseDef=True) and the " +
+            "cached Prototype container is filled. Unresolvable targets (placeholder/missing file) skip " +
+            "this silently. For an ASYNCHRONOUS call (run the subsequence in a new thread/execution and " +
+            "keep a handle), also pass execution_mode='NewThread' (or 'NewExecution'), thread_ref_expr " +
+            "(where to store the thread/execution reference, e.g. 'FileGlobals.ErrorHandlerThread') and " +
+            "auto_wait=false — these set SData.ThreadOpt / AsyncThreadExpr / AutoWaitAsync.",
             s => s
                 .AddRequired("file_path", "string", "Path to the sequence file")
                 .AddRequired("sequence_name", "string", "Name of the sequence")
@@ -1954,16 +2430,24 @@ public class TestStandToolRegistry
                 .AddRequired("target_sequence_name", "string", "Name of the target sequence")
                 .AddOptional("target_sequence_file", "string",
                     "Target sequence file (empty = current file). Stored as a relative path.", "")
-                .AddOptional("save", "boolean", "Save the file (default true)", true),
+                .AddOptional("save", "boolean", "Save the file (default true)", true)
+                .AddOptional("execution_mode", "string",
+                    "Threading: 'UseCurrentThread' (default), 'NewThread' (async, new thread) or 'NewExecution'.")
+                .AddOptional("thread_ref_expr", "string",
+                    "Expression to store the new thread/execution reference (SData.AsyncThreadExpr), e.g. 'FileGlobals.ErrorHandlerThread'.")
+                .AddOptional("auto_wait", "boolean",
+                    "Wait for the async subsequence at the end of the current sequence (SData.AutoWaitAsync)."),
             ConfigureSequenceCallModuleAsync);
 
         // ── Sequence Analyzer (detailed) ───────────────────────────────────────
 
         Register("analyze_sequence_file",
-            "Run the TestStand Sequence Analyzer on a file and return typed messages with " +
-            "severity counts. Filter by minimum severity, and optionally group the results " +
-            "(by severity or rule) like the editor's Analysis Results 'Group By' pane. The flat " +
-            "'messages' list and counts are always present; grouping adds a 'groups' array.",
+            "Run the TestStand Sequence Analyzer on a file and return STRUCTURED JSON: typed " +
+            "messages with severity counts. Filter by minimum severity, and optionally group the " +
+            "results (by severity or rule) like the editor's Analysis Results 'Group By' pane. The " +
+            "flat 'messages' list and counts are always present; grouping adds a 'groups' array. " +
+            "Prefer this for programmatic use; for a quick human-readable TEXT summary (no filter) " +
+            "use run_sequence_analyzer — the same underlying analyzer.",
             s => s
                 .AddRequired("file_path", "string", "Path to the sequence file to analyze")
                 .AddOptional("min_severity", "string",
@@ -1979,7 +2463,9 @@ public class TestStandToolRegistry
 
         Register("post_output_message",
             "Post a message to the TestStand engine output-message list (visible in the " +
-            "sequence editor's Output pane).",
+            "sequence editor's Output pane). Works HEADLESS (unlike post_ui_message / " +
+            "add_report_section, which need a live execution) — the message appears in the " +
+            "engine output list right away.",
             s => s
                 .AddRequired("message", "string", "Message text")
                 .AddOptional("category", "string", "Optional category/grouping label", "")
@@ -2223,7 +2709,10 @@ public class TestStandToolRegistry
         var index        = args!.Value.GetIntOrDefault("index", -1);
         var adapter      = args!.Value.GetStringOrDefault("adapter", "");
         await _ts.InsertStepAsync(filePath, sequenceName, stepGroup, stepType, stepName, index, adapter);
-        return Ok($"Step '{stepName}' ({stepType}) inserted into sequence '{sequenceName}' [{stepGroup}]");
+        var msg = $"Step '{stepName}' ({stepType}) inserted into sequence '{sequenceName}' [{stepGroup}]";
+        if (InputGuards.IsWaitStep(stepType))
+            msg += ". NOTE: an NI_Wait does not wait until a time is set — call set_wait_time for it.";
+        return Ok(msg);
     }
 
     private async Task<CallToolResult> InsertStepsBulkAsync(JsonElement? args)
@@ -2248,6 +2737,13 @@ public class TestStandToolRegistry
                 Comment            = el.GetStringOrNull("comment"),
                 Expression         = el.GetStringOrNull("expression"),
                 ExpressionType     = el.GetStringOrNull("expression_type"),
+                InitExpr           = el.GetStringOrNull("init_expr"),
+                IncrementExpr      = el.GetStringOrNull("increment_expr"),
+                ArrayExpr          = el.GetStringOrNull("array_expr"),
+                ElementExpr        = el.GetStringOrNull("element_expr"),
+                IsDefault          = el.TryGetProperty("is_default", out var isDef)
+                                     && isDef.ValueKind is JsonValueKind.True or JsonValueKind.False
+                                     ? isDef.GetBoolean() : (bool?)null,
                 TargetSequenceName = el.GetStringOrNull("target_sequence_name"),
                 TargetSequenceFile = el.GetStringOrNull("target_sequence_file")
             });
@@ -2294,8 +2790,32 @@ public class TestStandToolRegistry
             }
         }
 
-        var result = SequencePlanValidator.Validate(sequenceName, planSteps, localNames);
+        // Parameters are OPTIONAL: only when 'parameters' is present does the validator enforce
+        // Parameters.X references (E_UNDECLARED_PARAM). Omitting it keeps the historical locals-only
+        // behaviour so existing callers are unaffected.
+        List<string>? paramNames = null;
+        if (args!.Value.TryGetProperty("parameters", out var paramsEl) &&
+            paramsEl.ValueKind == JsonValueKind.Array)
+        {
+            paramNames = new List<string>();
+            foreach (var el in paramsEl.EnumerateArray())
+            {
+                var n = el.GetStringOrNull("name");
+                if (!string.IsNullOrWhiteSpace(n)) paramNames.Add(n!);
+            }
+        }
+
+        var result = SequencePlanValidator.Validate(sequenceName, planSteps, localNames, paramNames);
         return Task.FromResult(OkJson(result));
+    }
+
+    private async Task<CallToolResult> AuditSequenceReferencesAsync(JsonElement? args)
+    {
+        var filePath     = args!.Value.GetRequiredString("file_path");
+        var sequenceName = args!.Value.GetStringOrNull("sequence_name");
+        var data   = await _ts.ReadReferenceAuditDataAsync(filePath, sequenceName);
+        var result = ReferenceAuditor.Audit(data);
+        return OkJson(result);
     }
 
     private async Task<CallToolResult> InsertLocalVariableAsync(JsonElement? args)
@@ -2317,6 +2837,16 @@ public class TestStandToolRegistry
         var comment      = args!.Value.GetRequiredString("comment");
         await _ts.SetLocalVariableCommentAsync(filePath, sequenceName, varName, comment);
         return Ok($"Comment set on variable '{varName}' in sequence '{sequenceName}'");
+    }
+
+    private async Task<CallToolResult> SetParameterCommentAsync(JsonElement? args)
+    {
+        var filePath     = args!.Value.GetRequiredString("file_path");
+        var sequenceName = args!.Value.GetRequiredString("sequence_name");
+        var paramName    = args!.Value.GetRequiredString("parameter_name");
+        var comment      = args!.Value.GetRequiredString("comment");
+        await _ts.SetParameterCommentAsync(filePath, sequenceName, paramName, comment);
+        return Ok($"Comment set on parameter '{paramName}' in sequence '{sequenceName}'");
     }
 
     private async Task<CallToolResult> GetLocalVariablesAsync(JsonElement? args)
@@ -2378,6 +2908,71 @@ public class TestStandToolRegistry
         var modulePath = args!.Value.GetRequiredString("module_path");
         await _ts.SetStepModulePathAsync(filePath, seqName, stepGroup, stepName, modulePath);
         return Ok($"Module path for step '{stepName}' set to '{modulePath}'");
+    }
+
+    private async Task<CallToolResult> SetStepPropertyAsync(JsonElement? args)
+    {
+        var filePath  = args!.Value.GetRequiredString("sequence_file_path");
+        var seqName   = args!.Value.GetRequiredString("sequence_name");
+        var stepGroup = args!.Value.GetRequiredString("step_group");
+        var stepName  = args!.Value.GetRequiredString("step_name");
+        var path      = args!.Value.GetRequiredString("property_path");
+        var value     = args!.Value.GetRequiredString("value");
+        var valueType = args?.GetStringOrNull("value_type");
+        var unescape  = args?.GetBoolOrDefault("unescape", false) ?? false;
+        var save      = args?.GetBoolOrDefault("save", true) ?? true;
+        var info = await _ts.SetStepPropertyAsync(filePath, seqName, stepGroup, stepName,
+            path, value, valueType, save, unescape);
+        return OkJson(info);
+    }
+
+    private async Task<CallToolResult> CreateStepPropertyAsync(JsonElement? args)
+    {
+        var filePath  = args!.Value.GetRequiredString("sequence_file_path");
+        var seqName   = args!.Value.GetRequiredString("sequence_name");
+        var stepGroup = args!.Value.GetRequiredString("step_group");
+        var stepName  = args!.Value.GetRequiredString("step_name");
+        var path      = args!.Value.GetRequiredString("property_path");
+        var valueType = args!.Value.GetRequiredString("value_type");
+        var typeName  = args?.GetStringOrNull("type_name");
+        int? numEl    = null;
+        if (args!.Value.TryGetProperty("num_elements", out var ne) &&
+            ne.ValueKind == JsonValueKind.Number)
+            numEl = ne.GetInt32();
+        var value     = args?.GetStringOrNull("value");
+        var unescape  = args?.GetBoolOrDefault("unescape", false) ?? false;
+        var save      = args?.GetBoolOrDefault("save", true) ?? true;
+        var info = await _ts.CreateStepPropertyAsync(filePath, seqName, stepGroup, stepName,
+            path, valueType, typeName, numEl, value, unescape, save);
+        return OkJson(info);
+    }
+
+    private async Task<CallToolResult> SetStepPropertyFlagsAsync(JsonElement? args)
+    {
+        var filePath  = args!.Value.GetRequiredString("sequence_file_path");
+        var seqName   = args!.Value.GetRequiredString("sequence_name");
+        var stepGroup = args!.Value.GetRequiredString("step_group");
+        var stepName  = args!.Value.GetRequiredString("step_name");
+        var path      = args!.Value.GetStringOrDefault("property_path", "");
+        var flags     = args!.Value.GetIntOrDefault("flags", 0);
+        var save      = args?.GetBoolOrDefault("save", true) ?? true;
+        var info = await _ts.SetStepPropertyFlagsAsync(filePath, seqName, stepGroup, stepName,
+            path, flags, save);
+        return OkJson(info);
+    }
+
+    private async Task<CallToolResult> RenameStepPropertyAsync(JsonElement? args)
+    {
+        var filePath  = args!.Value.GetRequiredString("sequence_file_path");
+        var seqName   = args!.Value.GetRequiredString("sequence_name");
+        var stepGroup = args!.Value.GetRequiredString("step_group");
+        var stepName  = args!.Value.GetRequiredString("step_name");
+        var path      = args!.Value.GetRequiredString("property_path");
+        var newName   = args!.Value.GetRequiredString("new_name");
+        var save      = args?.GetBoolOrDefault("save", true) ?? true;
+        var info = await _ts.RenameStepPropertyAsync(filePath, seqName, stepGroup, stepName,
+            path, newName, save);
+        return OkJson(info);
     }
 
     private async Task<CallToolResult> SetSequenceCallTargetAsync(JsonElement? args)
@@ -2704,6 +3299,28 @@ public class TestStandToolRegistry
         var seqFile = args?.GetStringOrNull("sequence_file_path");
         var types = await _ts.GetDataTypesAsync(seqFile);
         return OkJson(types);
+    }
+
+    private async Task<CallToolResult> GetFileTypeDefsAsync(JsonElement? args)
+    {
+        var filePath = args!.Value.GetRequiredString("file_path");
+        var types = await _ts.GetFileTypeDefsAsync(filePath);
+        return OkJson(types);
+    }
+
+    private async Task<CallToolResult> CopyTypeDefsAsync(JsonElement? args)
+    {
+        var sourceFile = args!.Value.GetRequiredString("source_file_path");
+        var destFile   = args!.Value.GetRequiredString("dest_file_path");
+        List<string>? names = null;
+        if (args!.Value.TryGetProperty("type_names", out var tn) && tn.ValueKind == JsonValueKind.Array)
+            names = tn.EnumerateArray()
+                      .Where(e => e.ValueKind == JsonValueKind.String)
+                      .Select(e => e.GetString()!)
+                      .ToList();
+        var save    = args!.Value.GetBoolOrDefault("save", true);
+        var copied  = await _ts.CopyTypeDefsAsync(sourceFile, destFile, names, save);
+        return OkJson(new { copiedCount = copied.Count, copied });
     }
 
     // ── Sequence Editor Handlers ──────────────────────────────────────────────
@@ -3068,7 +3685,9 @@ public class TestStandToolRegistry
                 current.FailureAction = f.GetString() ?? current.FailureAction;
         }
         await _ts.SetSequencePropertiesAsync(filePath, sequenceName, current);
-        return Ok($"Properties updated for sequence '{sequenceName}'.");
+        var msg = $"Properties updated for sequence '{sequenceName}'.";
+        var warn = InputGuards.DescribeLatin1Loss(current.Description, "description");
+        return Ok(warn == null ? msg : msg + " " + warn);
     }
 
     // ── Step Property Operation Handlers ─────────────────────────────────────
@@ -3092,7 +3711,9 @@ public class TestStandToolRegistry
         var stepName     = args!.Value.GetRequiredString("step_name");
         var comment      = args!.Value.GetRequiredString("comment");
         var method = await _ts.SetStepCommentAsync(filePath, sequenceName, stepGroup, stepName, comment);
-        return Ok($"Comment set on step '{stepName}' via [{method}].");
+        var msg = $"Comment set on step '{stepName}' via [{method}].";
+        var warn = InputGuards.DescribeLatin1Loss(comment, "comment");
+        return Ok(warn == null ? msg : msg + " " + warn);
     }
 
     private async Task<CallToolResult> SetStepRunModeAsync(JsonElement? args)
@@ -3151,8 +3772,9 @@ public class TestStandToolRegistry
         var initExpr     = args!.Value.GetStringOrNull("init_expr");
         var whileExpr    = args!.Value.GetStringOrNull("while_expr");
         var incExpr      = args!.Value.GetStringOrNull("inc_expr");
+        var statusExpr   = args!.Value.GetStringOrNull("status_expr");
         await _ts.SetStepLoopAsync(filePath, sequenceName, stepGroup, stepName,
-            loopType, initExpr, whileExpr, incExpr);
+            loopType, initExpr, whileExpr, incExpr, statusExpr);
         return Ok($"Loop settings of step '{stepName}' updated to '{loopType}'.");
     }
 
@@ -3169,6 +3791,41 @@ public class TestStandToolRegistry
             : (bool?)null;
         await _ts.SetFlowConditionAsync(filePath, sequenceName, stepGroup, stepName, condition, isDefault);
         return Ok($"Flow condition set on step '{stepName}'.");
+    }
+
+    private async Task<CallToolResult> ConfigureForLoopAsync(JsonElement? args)
+    {
+        var filePath     = args!.Value.GetRequiredString("file_path");
+        var sequenceName = args!.Value.GetRequiredString("sequence_name");
+        var stepGroup    = args!.Value.GetRequiredString("step_group");
+        var stepName     = args!.Value.GetRequiredString("step_name");
+        int? count = args!.Value.TryGetProperty("count", out var c)
+                     && c.ValueKind == JsonValueKind.Number && c.TryGetInt32(out var cv)
+            ? cv : (int?)null;
+        var indexVar     = args!.Value.GetStringOrNull("index_var");
+        var initExpr     = args!.Value.GetStringOrNull("init_expr");
+        var condExpr     = args!.Value.GetStringOrNull("condition_expr");
+        var incExpr      = args!.Value.GetStringOrNull("increment_expr");
+        var save         = args!.Value.GetBoolOrDefault("save", true);
+        var result = await _ts.ConfigureForLoopAsync(filePath, sequenceName, stepGroup, stepName,
+            count, indexVar, initExpr, condExpr, incExpr, save);
+        return OkJson(result);
+    }
+
+    private async Task<CallToolResult> ConfigureForEachLoopAsync(JsonElement? args)
+    {
+        var filePath     = args!.Value.GetRequiredString("file_path");
+        var sequenceName = args!.Value.GetRequiredString("sequence_name");
+        var stepGroup    = args!.Value.GetRequiredString("step_group");
+        var stepName     = args!.Value.GetRequiredString("step_name");
+        var arrayExpr    = args!.Value.GetStringOrNull("array_expr");
+        var elementExpr  = args!.Value.GetStringOrNull("element_expr");
+        var offsetExpr   = args!.Value.GetStringOrNull("offset_expr");
+        var subExpr      = args!.Value.GetStringOrNull("subscript_expr");
+        var save         = args!.Value.GetBoolOrDefault("save", true);
+        var result = await _ts.ConfigureForEachLoopAsync(filePath, sequenceName, stepGroup, stepName,
+            arrayExpr, elementExpr, offsetExpr, subExpr, save);
+        return OkJson(result);
     }
 
     private async Task<CallToolResult> SetStepRecordResultAsync(JsonElement? args)
@@ -3636,6 +4293,8 @@ public class TestStandToolRegistry
 
     private async Task<CallToolResult> ConfigureSequenceCallModuleAsync(JsonElement? args)
     {
+        bool? autoWait = args!.Value.TryGetProperty("auto_wait", out var aw) && aw.ValueKind is JsonValueKind.True or JsonValueKind.False
+            ? aw.GetBoolean() : (bool?)null;
         var result = await _ts.ConfigureSequenceCallModuleAsync(
             args!.Value.GetRequiredString("file_path"),
             args!.Value.GetRequiredString("sequence_name"),
@@ -3643,7 +4302,10 @@ public class TestStandToolRegistry
             args!.Value.GetRequiredString("step_name"),
             args!.Value.GetRequiredString("target_sequence_name"),
             args!.Value.GetStringOrDefault("target_sequence_file", ""),
-            args!.Value.GetBoolOrDefault("save", true));
+            args!.Value.GetBoolOrDefault("save", true),
+            args!.Value.GetStringOrNull("execution_mode"),
+            args!.Value.GetStringOrNull("thread_ref_expr"),
+            autoWait);
         return OkJson(result);
     }
 
@@ -3875,6 +4537,64 @@ public class TestStandToolRegistry
         return OkJson(frames);
     }
 
+    // ── Live Thread-Context Inspection Handlers ───────────────────────────────
+
+    private async Task<CallToolResult> InspectThreadContextAsync(JsonElement? args)
+    {
+        var id        = args!.Value.GetRequiredString("execution_id");
+        var threadId  = args?.GetStringOrNull("thread_id");
+        var frame     = args?.GetIntOrDefault("call_stack_index", 0) ?? 0;
+        var scope     = args?.GetStringOrDefault("scope", "runstate") ?? "runstate";
+        var lookup    = args?.GetStringOrNull("lookup_string");
+        var maxDepth  = args?.GetIntOrDefault("max_depth", 3) ?? 3;
+        var hidden    = args?.GetBoolOrDefault("include_hidden", false) ?? false;
+        var maxArrEl  = args?.GetIntOrDefault("max_array_elements", 50) ?? 50;
+        var tree      = await _ts.InspectThreadContextAsync(id, threadId, frame, scope, lookup,
+            maxDepth, hidden, maxArrEl);
+        return OkJson(tree);
+    }
+
+    private async Task<CallToolResult> EvaluateInThreadContextAsync(JsonElement? args)
+    {
+        var id         = args!.Value.GetRequiredString("execution_id");
+        var expression = args!.Value.GetRequiredString("expression");
+        var threadId   = args?.GetStringOrNull("thread_id");
+        var frame      = args?.GetIntOrDefault("call_stack_index", 0) ?? 0;
+        var result     = await _ts.EvaluateInThreadContextAsync(id, threadId, frame, expression);
+        return OkJson(result);
+    }
+
+    private async Task<CallToolResult> GetRuntimeVariableAsync(JsonElement? args)
+    {
+        var id       = args!.Value.GetRequiredString("execution_id");
+        var path     = args!.Value.GetRequiredString("property_path");
+        var threadId = args?.GetStringOrNull("thread_id");
+        var frame    = args?.GetIntOrDefault("call_stack_index", 0) ?? 0;
+        var info     = await _ts.GetRuntimeVariableAsync(id, threadId, frame, path);
+        return OkJson(info);
+    }
+
+    private async Task<CallToolResult> SetRuntimeVariableAsync(JsonElement? args)
+    {
+        var id        = args!.Value.GetRequiredString("execution_id");
+        var path      = args!.Value.GetRequiredString("property_path");
+        var value     = args!.Value.GetRequiredString("value");
+        var threadId  = args?.GetStringOrNull("thread_id");
+        var frame     = args?.GetIntOrDefault("call_stack_index", 0) ?? 0;
+        var valueType = args?.GetStringOrNull("value_type");
+        var info      = await _ts.SetRuntimeVariableAsync(id, threadId, frame, path, value, valueType);
+        return OkJson(info);
+    }
+
+    private async Task<CallToolResult> GetRunStateSummaryAsync(JsonElement? args)
+    {
+        var id       = args!.Value.GetRequiredString("execution_id");
+        var threadId = args?.GetStringOrNull("thread_id");
+        var frame    = args?.GetIntOrDefault("call_stack_index", 0) ?? 0;
+        var summary  = await _ts.GetRunStateSummaryAsync(id, threadId, frame);
+        return OkJson(summary);
+    }
+
     // ── Workspace Handlers ────────────────────────────────────────────────────
 
     private async Task<CallToolResult> OpenWorkspaceAsync(JsonElement? args)
@@ -3951,7 +4671,9 @@ public class TestStandToolRegistry
         if (comment == null && version == null)
             return Error("At least one of 'comment' or 'version' must be provided.");
         await _ts.SetFilePropertiesAsync(filePath, comment, version);
-        return Ok($"File properties updated for: {filePath}");
+        var msg = $"File properties updated for: {filePath}";
+        var warn = InputGuards.DescribeLatin1Loss(comment, "comment");
+        return Ok(warn == null ? msg : msg + " " + warn);
     }
 
     // ── Duplicate Sequence Handler ────────────────────────────────────────────
@@ -4232,6 +4954,44 @@ public class TestStandToolRegistry
         var timeExpression = args!.Value.GetRequiredString("time_expression");
         await _ts.SetWaitTimeAsync(filePath, sequenceName, stepGroup, stepName, timeExpression);
         return Ok($"NI_Wait step '{stepName}' set to wait {timeExpression} s.");
+    }
+
+    private async Task<CallToolResult> ConfigureWaitAsync(JsonElement? args)
+    {
+        var filePath     = args!.Value.GetRequiredString("file_path");
+        var sequenceName = args!.Value.GetRequiredString("sequence_name");
+        var stepGroup    = args!.Value.GetRequiredString("step_group");
+        var stepName     = args!.Value.GetRequiredString("step_name");
+        var waitMode     = args!.Value.GetRequiredString("wait_mode");
+        var expression   = args!.Value.GetStringOrNull("expression");
+        var timeoutExpr  = args!.Value.GetStringOrNull("timeout_expr");
+        bool? timeoutEnabled = args!.Value.TryGetProperty("timeout_enabled", out var te) && te.ValueKind is JsonValueKind.True or JsonValueKind.False
+            ? te.GetBoolean() : (bool?)null;
+        bool? errorOnTimeout = args!.Value.TryGetProperty("error_on_timeout", out var eo) && eo.ValueKind is JsonValueKind.True or JsonValueKind.False
+            ? eo.GetBoolean() : (bool?)null;
+        await _ts.ConfigureWaitAsync(filePath, sequenceName, stepGroup, stepName, waitMode,
+            expression, timeoutExpr, timeoutEnabled, errorOnTimeout);
+        return Ok($"NI_Wait step '{stepName}' configured (mode: {waitMode}).");
+    }
+
+    private async Task<CallToolResult> ConfigureRunViAsyncAsync(JsonElement? args)
+    {
+        var filePath     = args!.Value.GetRequiredString("file_path");
+        var sequenceName = args!.Value.GetRequiredString("sequence_name");
+        var stepGroup    = args!.Value.GetRequiredString("step_group");
+        var stepName     = args!.Value.GetRequiredString("step_name");
+        var viPath       = args!.Value.GetRequiredString("vi_path");
+        var viNamespace  = args!.Value.GetStringOrNull("namespace");
+        int threadOption = args!.Value.TryGetProperty("thread_option", out var to)
+                           && to.ValueKind == JsonValueKind.Number && to.TryGetInt32(out var tov) ? tov : 1;
+        var threadRefExpr = args!.Value.GetStringOrNull("thread_ref_expr");
+        var autoWait      = args!.Value.GetBoolOrDefault("auto_wait", true);
+        var seqNameExpr   = args!.Value.GetStringOrDefault("sequence_name_expr", "\"MainSequence\"");
+        var seqFileExpr   = args!.Value.GetStringOrDefault("sequence_file_expr", "Evaluate(Step.SequenceFileExpr)");
+        var save          = args!.Value.GetBoolOrDefault("save", true);
+        var result = await _ts.ConfigureRunViAsyncAsync(filePath, sequenceName, stepGroup, stepName,
+            viPath, viNamespace, threadOption, threadRefExpr, autoWait, seqNameExpr, seqFileExpr, save);
+        return OkJson(result);
     }
 
     private async Task<CallToolResult> ConfigureStringValueTestAsync(JsonElement? args)

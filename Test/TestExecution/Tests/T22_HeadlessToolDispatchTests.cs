@@ -388,14 +388,13 @@ public class T22_HeadlessToolDispatchTests : TestBase
     // ── set_module_parameter (insert-if-missing on a SequenceCall) ────────────────
 
     [Test]
-    public async Task SetModuleParameter_HappyOrClearError()
+    public async Task SetModuleParameter_CreatesSequenceCallArgOnDemand()
     {
-        // A SequenceCall whose target declares a parameter is the closest a headless engine
-        // gets to a step with a real, named module parameter (DLL/.NET parameters need an
-        // actual prototype). If the binding materialises, set its value; otherwise the tool
-        // must surface a clear, structured error — either way the full dispatch path of
-        // set_module_parameter (registration → schema → arg extraction → handler → service)
-        // is exercised.
+        // Since the authoring-completeness change, set_module_parameter CREATES a SequenceCall
+        // actual-argument entry (typed SequenceArgument) when it does not exist yet — a headless
+        // engine never materialises the prototype, so creation-on-demand is the only way to bind
+        // arguments. The full dispatch path (registration → schema → arg extraction → handler →
+        // service) is exercised end-to-end.
         await Ts.CreateSequenceFileAsync(TempSeqFile);
         await Ts.InsertSequenceAsync(TempSeqFile, "Tgt");
         await Ts.InsertSequenceParameterAsync(TempSeqFile, "Tgt", "MyArg", "number");
@@ -404,37 +403,26 @@ public class T22_HeadlessToolDispatchTests : TestBase
         await Ts.ConfigureSequenceCallModuleAsync(TempSeqFile, "CSeq", "Main",
             "Call1", "Tgt", targetSequenceFile: "", save: true);
 
+        var ok = await Call("set_module_parameter",
+            $"{{\"file_path\":{J(TempSeqFile)},\"sequence_name\":\"CSeq\"," +
+            "\"step_group\":\"Main\",\"step_name\":\"Call1\"," +
+            "\"parameter_name\":\"MyArg\",\"value\":\"123\",\"use_expression\":true}");
+        Assert.That(ok.IsError, Is.False, TextOf(ok));
+
+        // The created binding must read back through get_module_parameters.
         var paramsRes = await Call("get_module_parameters",
             $"{{\"file_path\":{J(TempSeqFile)},\"sequence_name\":\"CSeq\"," +
             "\"step_group\":\"Main\",\"step_name\":\"Call1\"}");
         Assert.That(paramsRes.IsError, Is.False, TextOf(paramsRes));
         var listed = Doc(paramsRes);
-
-        var paramName = listed.ValueKind == JsonValueKind.Array && listed.GetArrayLength() > 0
-            ? listed[0].GetProperty("name").GetString()
-            : null;
-
-        if (!string.IsNullOrEmpty(paramName))
-        {
-            var ok = await Call("set_module_parameter",
-                $"{{\"file_path\":{J(TempSeqFile)},\"sequence_name\":\"CSeq\"," +
-                $"\"step_group\":\"Main\",\"step_name\":\"Call1\"," +
-                $"\"parameter_name\":{J(paramName!)},\"value\":\"123\",\"use_expression\":true}}");
-            Assert.That(ok.IsError, Is.False, TextOf(ok));
-        }
-        else
-        {
-            // No materialised parameter binding headless — verify the clear error path.
-            var err = await Call("set_module_parameter",
-                $"{{\"file_path\":{J(TempSeqFile)},\"sequence_name\":\"CSeq\"," +
-                "\"step_group\":\"Main\",\"step_name\":\"Call1\"," +
-                "\"parameter_name\":\"__nope__\",\"value\":\"1\",\"use_expression\":true}");
-            Assert.That(err.IsError, Is.True,
-                "Setting a non-existent module parameter should report a clear error");
-            Assert.That(TextOf(err), Does.Contain("Could not set module parameter"));
-            TestContext.WriteLine(
-                "No materialised SequenceCall parameter binding headless — verified error path.");
-        }
+        Assert.That(listed.ValueKind, Is.EqualTo(JsonValueKind.Array));
+        bool found = false;
+        foreach (var p in listed.EnumerateArray())
+            if (p.GetProperty("name").GetString() == "MyArg" &&
+                p.GetProperty("value").GetString() == "123")
+                found = true;
+        Assert.That(found, Is.True,
+            "the on-demand created ActualArgs entry must list with its bound expression");
     }
 
     // ── get_step_templates ─────────────────────────────────────────────────────────

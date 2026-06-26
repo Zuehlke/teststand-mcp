@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Text.RegularExpressions;
 using TestStandMCP.Models;
+using TestStandMCP.Tools;
 using Microsoft.Extensions.Logging;
 using Microsoft.Win32;
 using NiSequenceFile      = NationalInstruments.TestStand.Interop.API.SequenceFile;
@@ -85,9 +86,14 @@ public interface ITestStandService : IDisposable
     /// <summary>Inserts a new local variable into the specified sequence.</summary>
     Task InsertLocalVariableAsync(string filePath, string sequenceName,
         string variableName, string dataType, string? defaultValue = null);
-    /// <summary>Sets the comment (description) on a local variable in the specified sequence.</summary>
+    /// <summary>Sets the comment (description) on a local variable in the specified sequence. The
+    /// name may be a dotted path to a nested container member (e.g. "MyCont.Field").</summary>
     Task SetLocalVariableCommentAsync(string filePath, string sequenceName,
         string variableName, string comment);
+    /// <summary>Sets the comment (description) on a sequence parameter (or a nested member via a
+    /// dotted path). There is no other tool that reaches a Parameter's comment.</summary>
+    Task SetParameterCommentAsync(string filePath, string sequenceName,
+        string parameterName, string comment);
     /// <summary>Sets the value of a local variable in the specified sequence.</summary>
     Task SetLocalVariableValueAsync(string filePath, string sequenceName,
         string variableName, string value);
@@ -104,6 +110,38 @@ public interface ITestStandService : IDisposable
     /// <summary>Sets the code-module path for the specified step.</summary>
     Task SetStepModulePathAsync(string filePath, string sequenceName, string stepGroup,
         string stepName, string modulePath);
+
+    /// <summary>Sets ANY property on a step by a dotted path relative to the step's PropertyObject
+    /// (e.g. "VIModule.ViCall.VIPath", "RemoteHost", "PortNumber", "Timeout"), then reads it back.
+    /// This is the generic step-property writer — set_property_value/set_property only reach
+    /// Globals/Locals, and configure_*_module only reach the adapter module. value_type is
+    /// auto-detected (number / true|false / string) when null. The path must already exist.</summary>
+    Task<StepPropertyValue> SetStepPropertyAsync(string filePath, string sequenceName,
+        string stepGroup, string stepName, string propertyPath, string value, string? valueType,
+        bool save = true, bool unescape = false);
+
+    /// <summary>Creates a NEW subproperty (or resizes an array) on a step by a dotted path —
+    /// the creation counterpart to <see cref="SetStepPropertyAsync"/>, which requires the path
+    /// to exist. value_type: number/boolean/string/container/reference, a NAMED type via
+    /// type_name (e.g. "SequenceArgument", "ErrorDialogOptions"), or "array_elements" to
+    /// SetNumElements on an existing array property (elements are created with the array's
+    /// element type — the only way to author e.g. ViCall.Parms entries).</summary>
+    Task<StepPropertyValue> CreateStepPropertyAsync(string filePath, string sequenceName,
+        string stepGroup, string stepName, string propertyPath, string valueType,
+        string? typeName = null, int? numElements = null, string? value = null,
+        bool unescape = false, bool save = true);
+
+    /// <summary>Sets the raw PropFlags bitfield on a step property (SetFlags) — e.g. the
+    /// 0x200000 default-skip marker on module containers. Returns the read-back flags.</summary>
+    Task<StepPropertyValue> SetStepPropertyFlagsAsync(string filePath, string sequenceName,
+        string stepGroup, string stepName, string propertyPath, int flags, bool save = true);
+
+    /// <summary>Sets the NAME of a step property (PropertyObject.Name) — required for named
+    /// ARRAY ELEMENTS such as ViCall.Parms entries, which carry the connector-pane label as
+    /// their element name ("[0] error in (no error)"); SetNumElements creates them unnamed,
+    /// and FileDiffer/the editor pair and display elements by this name.</summary>
+    Task<StepPropertyValue> RenameStepPropertyAsync(string filePath, string sequenceName,
+        string stepGroup, string stepName, string propertyPath, string newName, bool save = true);
 
     // Executions
     /// <summary>Starts execution of an entry point in the given sequence file and returns execution info.</summary>
@@ -227,6 +265,18 @@ public interface ITestStandService : IDisposable
     Task<StepTypeInfo> GetStepTypeAsync(string stepTypeName);
     /// <summary>Returns all data types defined, optionally scoped to a sequence file.</summary>
     Task<List<DataTypeInfo>> GetDataTypesAsync(string? sequenceFilePath = null);
+    /// <summary>Lists every custom data TYPE embedded in a file's TypeUsageList — including the
+    /// LabVIEW-cluster container typedefs that <see cref="GetDataTypesAsync"/> cannot see (those live
+    /// in the TypeUsageList, not as file-root subproperties). Each entry carries the type name,
+    /// whether it is attached to the file, and a coarse kind.</summary>
+    Task<List<DataTypeInfo>> GetFileTypeDefsAsync(string filePath);
+    /// <summary>Copies custom data type definitions from one sequence file into another (attaching
+    /// them so they persist embedded). This is the ONLY way to reproduce LabVIEW-cluster typedefs in
+    /// a rebuilt file — they carry GUIDs/structure that cannot be recreated field-by-field. Pass
+    /// explicit <paramref name="typeNames"/> (reliable) or null to copy every embedded type. Types
+    /// already present in the destination are left untouched. Returns the names actually copied.</summary>
+    Task<List<string>> CopyTypeDefsAsync(string sourceFilePath, string destFilePath,
+        IReadOnlyList<string>? typeNames = null, bool save = true);
 
     // Engine Info & Control
     /// <summary>Returns the filesystem paths used by the TestStand engine.</summary>
@@ -289,6 +339,11 @@ public interface ITestStandService : IDisposable
         bool? passByReference = null);
     /// <summary>Deletes the specified local variable from the given sequence.</summary>
     Task DeleteLocalVariableAsync(string filePath, string sequenceName, string variableName);
+    /// <summary>Reads the expressions and declared scopes needed to audit Locals./Parameters./
+    /// FileGlobals. references in a built sequence. When <paramref name="sequenceName"/> is null
+    /// or empty, every sequence in the file is read. Pure COM read — the auditing itself is done
+    /// by the engine-free <c>TestStandMCP.Tools.ReferenceAuditor</c>.</summary>
+    Task<ReferenceAuditData> ReadReferenceAuditDataAsync(string filePath, string? sequenceName = null);
     /// <summary>Returns all step templates available in the specified sequence file.</summary>
     Task<List<StepTemplateInfo>> GetStepTemplatesAsync(string filePath);
     /// <summary>Inserts a step based on the named template into the specified sequence.</summary>
@@ -318,16 +373,32 @@ public interface ITestStandService : IDisposable
     /// <summary>Sets the fail action (e.g. Continue, Goto) for the specified step.</summary>
     Task SetStepFailActionAsync(string filePath, string sequenceName, string stepGroup,
         string stepName, string failAction, string? target = null);
-    /// <summary>Configures the loop settings for the specified step.</summary>
+    /// <summary>Configures the loop settings for the specified step. For a 'Custom' loop pass any of
+    /// <paramref name="initExpr"/> / <paramref name="whileExpr"/> / <paramref name="incExpr"/> /
+    /// <paramref name="statusExpr"/>.</summary>
     Task SetStepLoopAsync(string filePath, string sequenceName, string stepGroup,
         string stepName, string loopType, string? initExpr = null,
-        string? whileExpr = null, string? incExpr = null);
+        string? whileExpr = null, string? incExpr = null, string? statusExpr = null);
     /// <summary>Sets the flow-control CONDITION on a branch step — the dedicated property the
     /// engine evaluates to branch (NOT Pre/Post/Status). Writes <c>ConditionExpr</c> for
     /// NI_Flow_If/ElseIf/While/DoWhile and <c>ItemExpr</c> for NI_Flow_Select (switch) /
     /// NI_Flow_Case (case value(s)). Optionally marks a Case as the default branch.</summary>
     Task SetFlowConditionAsync(string filePath, string sequenceName, string stepGroup,
         string stepName, string condition, bool? isDefault = null);
+    /// <summary>Configures a counted NI_Flow_For loop by writing its InitializationExpr /
+    /// ConditionExpr / IncrementExpr. Either supply <paramref name="count"/> (+ optional
+    /// <paramref name="indexVar"/>) to generate the standard 0..count-1 counted loop, or pass any of
+    /// the explicit expressions (which take precedence). Returns the three effective expressions.</summary>
+    Task<ForLoopConfigResult> ConfigureForLoopAsync(string filePath, string sequenceName,
+        string stepGroup, string stepName, int? count = null, string? indexVar = null,
+        string? initExpr = null, string? conditionExpr = null, string? incrementExpr = null,
+        bool save = true);
+    /// <summary>Configures an NI_Flow_ForEach loop by writing its ArrayExpr (the collection to
+    /// iterate) and ArrayElementExpr (the per-element variable), plus optional Offset/Subscript.
+    /// Rejects a non-ForEach step. Returns the effective expressions.</summary>
+    Task<ForEachLoopConfigResult> ConfigureForEachLoopAsync(string filePath, string sequenceName,
+        string stepGroup, string stepName, string? arrayExpr = null, string? elementExpr = null,
+        string? offsetExpr = null, string? subscriptExpr = null, bool save = true);
     /// <summary>Sets the result-recording option for the specified step.</summary>
     Task SetStepRecordResultAsync(string filePath, string sequenceName, string stepGroup,
         string stepName, string recordingOption);
@@ -437,6 +508,29 @@ public interface ITestStandService : IDisposable
     /// <summary>Returns the call stack for the specified thread within an execution.</summary>
     Task<List<CallStackFrame>> GetThreadCallStackAsync(string executionId, string threadId);
 
+    // Live Thread-Context Inspection (runtime debugging)
+    /// <summary>Dumps the live SequenceContext/RunState tree of a thread's call-stack frame as a
+    /// nested <see cref="PropertyNode"/>. <paramref name="scope"/> picks the sub-tree
+    /// (full/ThisContext/RunState/Locals/Parameters/Step/Sequence); <paramref name="lookupString"/>
+    /// descends further.</summary>
+    Task<PropertyNode> InspectThreadContextAsync(string executionId, string? threadId,
+        int callStackIndex, string scope, string? lookupString, int maxDepth,
+        bool includeHidden, int maxArrayElements);
+    /// <summary>Evaluates an expression in a live thread frame's context — the scope where
+    /// <c>Locals.</c>/<c>Parameters.</c>/<c>RunState.</c> resolve (which evaluate_expression cannot reach).</summary>
+    Task<ExpressionResult> EvaluateInThreadContextAsync(string executionId, string? threadId,
+        int callStackIndex, string expression);
+    /// <summary>Reads a single variable/property by path (relative to ThisContext) in a live thread frame.</summary>
+    Task<RuntimeVariableInfo> GetRuntimeVariableAsync(string executionId, string? threadId,
+        int callStackIndex, string propertyPath);
+    /// <summary>Writes a single variable/property by path in a live thread frame (e.g. set
+    /// <c>RunState.NextStepIndex</c> — the "Set Next Step" debugger action). Reads the value back.</summary>
+    Task<RuntimeVariableInfo> SetRuntimeVariableAsync(string executionId, string? threadId,
+        int callStackIndex, string propertyPath, string value, string? valueType);
+    /// <summary>Returns a curated flat snapshot of the most-used RunState fields for a live thread frame.</summary>
+    Task<RunStateSummary> GetRunStateSummaryAsync(string executionId, string? threadId,
+        int callStackIndex);
+
     // Numeric/String Limit Configuration
     /// <summary>Sets the numeric limits (low, high, units, comparison) for a NumericLimitTest step.</summary>
     Task SetNumericLimitsAsync(string filePath, string sequenceName, string stepGroup,
@@ -453,6 +547,24 @@ public interface ITestStandService : IDisposable
     /// number ("2.5") or any TestStand expression that evaluates to seconds.</summary>
     Task SetWaitTimeAsync(string filePath, string sequenceName, string stepGroup,
         string stepName, string timeExpression);
+    /// <summary>Configures an NI_Wait step's wait TARGET: 'time' (seconds), 'thread' (a thread
+    /// reference expression, e.g. FileGlobals.X) or 'execution'. Sets WaitForTarget + the matching
+    /// expression, optional timeout, and clears the "specify by sequence call" flags a fresh NI_Wait
+    /// otherwise carries. Broader than SetWaitTimeAsync (which only does the time mode).</summary>
+    Task ConfigureWaitAsync(string filePath, string sequenceName, string stepGroup,
+        string stepName, string waitMode, string? expression = null,
+        string? timeoutExpr = null, bool? timeoutEnabled = null, bool? errorOnTimeout = null);
+    /// <summary>Configures an <c>NI_LV_RunVIAsynchronously</c> ("Run VI Asynchronously") step in one
+    /// call: builds the Sequence-adapter <c>SeqCallStepAdditions</c> launch module (which the step does
+    /// NOT get from a plain insert — it comes up as <c>NoneStepAdditions</c>, and a plain adapter switch
+    /// corrupts the step), sets the async-launch defaults (SFPathExpr/SeqNameExpr/SpecifyByExpr/
+    /// UsePrototype/ThreadOpt/AutoWaitAsync/CustomThreadAffinity), stores the VI in the step-own
+    /// <c>VIModule.ViCall</c> (VIPath/Namespace) and sets the module marker flag. Returns the applied settings.</summary>
+    Task<Dictionary<string, object>> ConfigureRunViAsyncAsync(string filePath, string sequenceName,
+        string stepGroup, string stepName, string viPath, string? viNamespace = null,
+        int threadOption = 1, string? threadRefExpr = null, bool autoWait = true,
+        string sequenceNameExpr = "\"MainSequence\"",
+        string sequenceFileExpr = "Evaluate(Step.SequenceFileExpr)", bool save = true);
     /// <summary>Configures a StringValueTest step with the expression, expected value, and comparison type.</summary>
     Task ConfigureStringValueTestAsync(string filePath, string sequenceName, string stepGroup,
         string stepName, string expression, string expectedValue,
@@ -613,10 +725,16 @@ public interface ITestStandService : IDisposable
     Task<ModuleConfigResult> ConfigurePythonModuleAsync(string filePath,
         string sequenceName, string stepGroup, string stepName, string modulePath,
         string functionName, bool save = true);
-    /// <summary>Configures a SequenceCall step to call the specified target sequence.</summary>
+    /// <summary>Configures a SequenceCall step to call the specified target sequence. Optionally sets
+    /// the threading/async options: <paramref name="executionMode"/> ('UseCurrentThread' / 'NewThread' /
+    /// 'NewExecution' → SData.ThreadOpt), <paramref name="threadRefExpr"/> (SData.AsyncThreadExpr — an
+    /// expression to store the new thread/execution reference, e.g. FileGlobals.X) and
+    /// <paramref name="autoWait"/> (SData.AutoWaitAsync — wait for the async subsequence at end of the
+    /// current sequence).</summary>
     Task<ModuleConfigResult> ConfigureSequenceCallModuleAsync(string filePath,
         string sequenceName, string stepGroup, string stepName,
-        string targetSequenceName, string targetSequenceFile = "", bool save = true);
+        string targetSequenceName, string targetSequenceFile = "", bool save = true,
+        string? executionMode = null, string? threadRefExpr = null, bool? autoWait = null);
 
     // ── Sequence Analyzer (detailed) ─────────────────────────────────────────
     /// <summary>Runs the Sequence Analyzer and returns a detailed result filtered by minimum
@@ -686,7 +804,6 @@ public sealed class TestStandService : ITestStandService
 {
     private readonly ILogger<TestStandService> _logger;
     private NiEngine? _engine;        // NationalInstruments.TestStand.Interop.API.Engine (coclass)
-    private dynamic? _engineMgr;      // EngineManager
     private bool _disposed;
 
     // Number of live TestStand engine instances across the whole process. Engine.ShutDown
@@ -715,6 +832,9 @@ public sealed class TestStandService : ITestStandService
     private readonly ManualResetEventSlim _engineReady = new(false);
     private volatile bool _engineConnected;
     private Exception? _engineConnectError;
+    // Serializes lazy reconnects from EnsureConnected so two concurrent tool calls never start two
+    // engine threads (a second live engine hangs teardown — see teststand-testhost-teardown-hang).
+    private readonly object _connectLock = new();
 
     // Wait efficiently (no busy-spin) until a window message arrives or the timeout elapses; the
     // PeekMessage/TranslateMessage/DispatchMessage P/Invokes + the PumpMessages() helper already
@@ -1256,6 +1376,8 @@ public sealed class TestStandService : ITestStandService
                     if (!ok) try { ((NiStep)(object)step).AsPropertyObject().Comment = spec.Comment; ok = true; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to set step comment via AsPropertyObject().Comment."); }
                     if (ok) result.CommentsSet++;
                     else    result.Warnings.Add($"Comment not set on '{spec.Name}'.");
+                    var encWarn = InputGuards.DescribeLatin1Loss(spec.Comment, $"comment on '{spec.Name}'");
+                    if (encWarn != null) result.Warnings.Add(encWarn);
                 }
 
                 // Optional expression
@@ -1263,15 +1385,35 @@ public sealed class TestStandService : ITestStandService
                 {
                     try
                     {
-                        switch ((spec.ExpressionType ?? "Statement").ToLowerInvariant())
+                        var exprType     = (spec.ExpressionType ?? "Statement").ToLowerInvariant();
+                        bool explicitSlot = exprType is "pre" or "post" or "status";
+                        string? flowCondProp = InputGuards.FlowConditionProperty(spec.StepType);
+
+                        if (flowCondProp != null && !explicitSlot)
                         {
-                            case "pre":    step.PreExpression    = spec.Expression; break;
-                            case "post":   step.PostExpression   = spec.Expression; break;
-                            case "status": step.StatusExpression = spec.Expression; break;
-                            default:
-                                // Statement steps: the primary expression home is the Post Expression.
-                                step.PostExpression = spec.Expression;
-                                break;
+                            // For a flow BRANCH step the default 'expression' IS the branch condition.
+                            // Writing it to the Post Expression (the historical default) would
+                            // evaluate-and-discard it WITHOUT branching. Route it to the dedicated
+                            // condition property (ConditionExpr / ItemExpr) so it actually branches,
+                            // mirroring set_flow_condition. An explicit Pre/Post/Status is respected.
+                            ((NiStep)(object)step).AsPropertyObject()
+                                .SetValString(flowCondProp, 0, spec.Expression);
+                            result.Warnings.Add(
+                                $"'{spec.Name}' ({spec.StepType}): expression routed to {flowCondProp} " +
+                                "(the branch condition), not the Post Expression, so it actually branches.");
+                        }
+                        else
+                        {
+                            switch (exprType)
+                            {
+                                case "pre":    step.PreExpression    = spec.Expression; break;
+                                case "post":   step.PostExpression   = spec.Expression; break;
+                                case "status": step.StatusExpression = spec.Expression; break;
+                                default:
+                                    // Statement steps: the primary expression home is the Post Expression.
+                                    step.PostExpression = spec.Expression;
+                                    break;
+                            }
                         }
                         result.ExpressionsSet++;
                     }
@@ -1280,6 +1422,99 @@ public sealed class TestStandService : ITestStandService
                         result.Warnings.Add($"Expression not set on '{spec.Name}': {ex.Message}");
                     }
                 }
+
+                // Optional For-loop init / increment expressions. A counted NI_Flow_For keeps its
+                // three parts in dedicated step properties (InitializationExpr / ConditionExpr /
+                // IncrementExpr). 'expression' above already routed the loop-continue test to
+                // ConditionExpr (For is in InputGuards.ConditionExprSteps); here we fill the other two
+                // so a whole For loop can be declared in ONE bulk step, e.g.
+                //   { step_type:"NI_Flow_For", init_expr:"Locals.i = 0",
+                //     expression:"Locals.i < 10", increment_expr:"Locals.i += 1" }
+                if (InputGuards.IsCountedForLoop(spec.StepType) &&
+                    (!string.IsNullOrEmpty(spec.InitExpr) || !string.IsNullOrEmpty(spec.IncrementExpr)))
+                {
+                    try
+                    {
+                        var forPo = ((NiStep)(object)step).AsPropertyObject();
+                        if (!string.IsNullOrEmpty(spec.InitExpr))
+                        {
+                            forPo.SetValString("InitializationExpr", 0, spec.InitExpr);
+                            result.ExpressionsSet++;
+                        }
+                        if (!string.IsNullOrEmpty(spec.IncrementExpr))
+                        {
+                            forPo.SetValString("IncrementExpr", 0, spec.IncrementExpr);
+                            result.ExpressionsSet++;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        result.Warnings.Add($"For-loop init/increment not set on '{spec.Name}': {ex.Message}");
+                    }
+                }
+                else if ((!string.IsNullOrEmpty(spec.InitExpr) || !string.IsNullOrEmpty(spec.IncrementExpr)))
+                {
+                    result.Warnings.Add(
+                        $"'{spec.Name}' ({spec.StepType}): init_expr/increment_expr are only applied to " +
+                        "an NI_Flow_For step and were ignored.");
+                }
+
+                // Optional NI_Flow_ForEach config: the collection lives in ArrayExpr, the per-element
+                // variable in ArrayElementExpr. A ForEach with an empty ArrayExpr never iterates, so
+                // this is the ForEach equivalent of a For loop's condition.
+                if (InputGuards.IsForEachLoop(spec.StepType) &&
+                    (!string.IsNullOrEmpty(spec.ArrayExpr) || !string.IsNullOrEmpty(spec.ElementExpr)))
+                {
+                    try
+                    {
+                        var fePo = ((NiStep)(object)step).AsPropertyObject();
+                        if (!string.IsNullOrEmpty(spec.ArrayExpr))
+                        {
+                            fePo.SetValString("ArrayExpr", 0, spec.ArrayExpr);
+                            result.ExpressionsSet++;
+                        }
+                        if (!string.IsNullOrEmpty(spec.ElementExpr))
+                        {
+                            fePo.SetValString("ArrayElementExpr", 0, spec.ElementExpr);
+                            result.ExpressionsSet++;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        result.Warnings.Add($"ForEach array/element not set on '{spec.Name}': {ex.Message}");
+                    }
+                }
+                else if ((!string.IsNullOrEmpty(spec.ArrayExpr) || !string.IsNullOrEmpty(spec.ElementExpr)))
+                {
+                    result.Warnings.Add(
+                        $"'{spec.Name}' ({spec.StepType}): array_expr/element_expr are only applied to " +
+                        "an NI_Flow_ForEach step and were ignored.");
+                }
+
+                // Optional NI_Flow_Case default flag: mark this case as the default branch. The case
+                // value(s) are set through the 'expression' routing above (ItemExpr); a default case
+                // typically has no value expression.
+                if (spec.IsDefault == true)
+                {
+                    if (InputGuards.IsCaseStep(spec.StepType))
+                    {
+                        try { ((NiStep)(object)step).AsPropertyObject().SetValBoolean("IsDefault", 0, true); }
+                        catch (Exception ex) { result.Warnings.Add($"IsDefault not set on '{spec.Name}': {ex.Message}"); }
+                    }
+                    else
+                    {
+                        result.Warnings.Add(
+                            $"'{spec.Name}' ({spec.StepType}): is_default is only applied to an NI_Flow_Case step and was ignored.");
+                    }
+                }
+
+                // A freshly inserted NI_Wait has an EMPTY TimeExpr and never actually waits until a
+                // wait time is configured — and bulk has no time field. Flag it so it is not silently
+                // a no-op.
+                if (InputGuards.IsWaitStep(spec.StepType))
+                    result.Warnings.Add(
+                        $"NI_Wait step '{spec.Name}' has no wait time yet — it will not wait until " +
+                        "you call set_wait_time for it.");
 
                 // Optional SequenceCall target
                 if (!string.IsNullOrEmpty(spec.TargetSequenceName))
@@ -1302,6 +1537,9 @@ public sealed class TestStandService : ITestStandService
                                 catch (Exception ex) { _logger.LogDebug(ex, "Failed to clear absolute path flag '{PropName}' on SequenceCall module.", propName); }
                             }
                         }
+                        // Load the callee prototype so ActualArgs/Prototype are populated
+                        // exactly as the editor would (correct arg types + UseDef defaults).
+                        TryLoadModulePrototype(seqCallModule, spec.Name);
                         result.TargetsSet++;
                     }
                     catch (Exception ex)
@@ -1459,7 +1697,8 @@ public sealed class TestStandService : ITestStandService
                 while (exec != null && DateTime.UtcNow < deadline)
                 {
                     // ExecRunState: 1=Running, 2=Paused, 3=Stopped
-                    int runState = GetExecutionRunState((object)exec);
+                    // exec is guaranteed non-null by the enclosing `while (exec != null ...)`.
+                    int runState = GetExecutionRunState((object)exec!);
                     if (runState == 3) break; // Stopped = done
                     await Task.Delay(200);
                     exec = FindExecution(executionId);
@@ -1754,6 +1993,8 @@ public sealed class TestStandService : ITestStandService
             switch (valueType.ToLowerInvariant())
             {
                 case "container":
+                case "reference": case "object reference":
+                case "objectreference": case "objref":
                     break; // structural only — no scalar value to assign
                 case "boolean":
                 case "bool":
@@ -1766,12 +2007,20 @@ public sealed class TestStandService : ITestStandService
                 case "float":
                 case "int":
                 case "integer":
-                    root.SetValNumber(propertyName, 0, double.Parse(value ?? "0",
+                    var numVal = double.Parse(value ?? "0",
                         System.Globalization.NumberStyles.Any,
-                        System.Globalization.CultureInfo.InvariantCulture));
+                        System.Globalization.CultureInfo.InvariantCulture);
+                    // Plain set fails on an Enumeration-typed target ("Expected type X. Found
+                    // type Number"); retry coercing for-this-operation (preserves the enum type,
+                    // mirrors the enum READ path which uses PropOption_CoerceToNumber).
+                    try { root.SetValNumber(propertyName, 0, numVal); }
+                    catch { root.SetValNumber(propertyName,
+                        (int)NiPropOptions.PropOption_CoerceToEnum, numVal); }
                     break;
-                default: // string
-                    root.SetValString(propertyName, 0, value ?? "");
+                default: // string (or enum-by-label)
+                    try { root.SetValString(propertyName, 0, value ?? ""); }
+                    catch { root.SetValString(propertyName,
+                        (int)NiPropOptions.PropOption_CoerceToEnum, value ?? ""); }
                     break;
             }
 
@@ -1812,6 +2061,8 @@ public sealed class TestStandService : ITestStandService
         "boolean" or "bool"                                   => (int)NiPropValueTypes.PropValType_Boolean,
         "number" or "double" or "float" or "int" or "integer" => (int)NiPropValueTypes.PropValType_Number,
         "container"                                           => (int)NiPropValueTypes.PropValType_Container,
+        "reference" or "object reference" or
+        "objectreference" or "objref"                         => (int)NiPropValueTypes.PropValType_Reference,
         _                                                     => (int)NiPropValueTypes.PropValType_String,
     };
 
@@ -1980,8 +2231,19 @@ public sealed class TestStandService : ITestStandService
                     NiPropertyObject elem = po.GetPropertyObjectByOffset(i, 0);
                     if (elem == null) break;
                     budget--;
-                    children.Add(BuildPropertyNode(elem, $"[{i}]", depth + 1, maxDepth,
-                        includeHidden, maxArrayElements, ref budget));
+                    var childNode = BuildPropertyNode(elem, $"[{i}]", depth + 1, maxDepth,
+                        includeHidden, maxArrayElements, ref budget);
+                    // Array elements may carry their OWN PropertyObject.Name (ViCall.Parms
+                    // entries are named after the connector-pane label; the editor and
+                    // FileDiffer display "[i] Name" and pair elements by it). Surface it.
+                    try
+                    {
+                        string en = elem.Name;
+                        if (!string.IsNullOrEmpty(en) && en != $"[{i}]")
+                            childNode.ElementName = en;
+                    }
+                    catch (Exception ex) { _logger.LogDebug(ex, "Element name read failed at {Index} of '{Name}'.", i, name); }
+                    children.Add(childNode);
                 }
                 catch (Exception ex) { _logger.LogDebug(ex, "Array element {Index} of '{Name}' failed.", i, name); }
             }
@@ -2107,20 +2369,33 @@ public sealed class TestStandService : ITestStandService
             // Detect an array suffix ("number[]", "array:string", …) — same convention as
             // InsertLocalVariableAsync — so array file globals can be created for the
             // get/set/resize_array_variable tools to operate on.
-            string rawType = dataType.ToLowerInvariant().Trim();
-            bool   isArray = rawType.EndsWith("[]") || rawType.StartsWith("array:");
-            string baseDataType = isArray
-                ? rawType.Replace("[]", "").Replace("array:", "").Trim()
-                : rawType;
-            // PropValType: String=1, Boolean=2, Number=3
-            int propType = baseDataType switch
+            // Keep the ORIGINAL casing for named types; lower-case only for builtin matching.
+            string rawType = dataType.Trim();
+            bool   isArray = rawType.EndsWith("[]") ||
+                             rawType.StartsWith("array:", StringComparison.OrdinalIgnoreCase);
+            string baseDataType = rawType;
+            if (baseDataType.EndsWith("[]")) baseDataType = baseDataType[..^2].Trim();
+            if (baseDataType.StartsWith("array:", StringComparison.OrdinalIgnoreCase))
+                baseDataType = baseDataType.Substring("array:".Length).Trim();
+            // Builtins map to their PropValType; anything else is a NAMED type (same contract
+            // as insert_local_variable). No silent string fallback — an unknown name that is
+            // not a defined type surfaces as an engine error instead of a wrong-typed global.
+            int propType; string typeNameParam = "";
+            switch (baseDataType.ToLowerInvariant())
             {
-                "number" or "double" or "float" or "int" or "integer" => 3,
-                "boolean" or "bool"                                   => 2,
-                _                                                     => 1
-            };
+                case "string":                                          propType = 1; break;
+                case "boolean": case "bool":                            propType = 2; break;
+                case "number": case "double": case "float":
+                case "int":    case "integer":                          propType = 3; break;
+                case "reference": case "object reference":
+                case "objectreference": case "objref":
+                    propType = (int)NiPropValueTypes.PropValType_Reference; break;
+                case "container":
+                    propType = (int)NiPropValueTypes.PropValType_Container; break;
+                default:        propType = 4; typeNameParam = baseDataType; break;
+            }
             var fg2 = GetFileGlobals(sf);
-            fg2.NewSubProperty(variableName, (NiPropValueTypes)propType, isArray, "", 0);
+            fg2.NewSubProperty(variableName, (NiPropValueTypes)propType, isArray, typeNameParam, 0);
             SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, sequenceFilePath);
         });
     }
@@ -2538,6 +2813,11 @@ public sealed class TestStandService : ITestStandService
                 case "boolean": case "bool":                            propType = 2; break;
                 case "number": case "double": case "float":
                 case "int":    case "integer":                          propType = 3; break;
+                case "reference": case "object reference":
+                case "objectreference": case "objref":
+                    propType = (int)NiPropValueTypes.PropValType_Reference; break;
+                case "container":
+                    propType = (int)NiPropValueTypes.PropValType_Container; break;
                 default:        propType = 4; typeNameParam = baseDataType; break;
             }
 
@@ -2575,7 +2855,32 @@ public sealed class TestStandService : ITestStandService
                 : _engine!.GetSequenceFileEx(filePath, 0, (NiConflictHandler)4);
 
             var seq = sf.GetSequenceByName(sequenceName);
+            // GetPropertyObject resolves a dotted lookup path, so nested container members
+            // (e.g. "MyCont.Field") get their comment set too.
             var prop = seq.Locals.GetPropertyObject(variableName, 0);
+            prop.Comment = comment;
+
+            SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
+            _loadedSequenceFiles[filePath] = sf;
+        });
+    }
+
+    /// <inheritdoc/>
+    public async Task SetParameterCommentAsync(string filePath, string sequenceName,
+        string parameterName, string comment)
+    {
+        EnsureConnected();
+        await Task.Run(() =>
+        {
+            var sf  = _loadedSequenceFiles.TryGetValue(filePath, out var cached)
+                ? cached
+                : _engine!.GetSequenceFileEx(filePath, 0, (NiConflictHandler)4);
+
+            var seq = sf.GetSequenceByName(sequenceName);
+            // A sequence's parameters live on Parameters (a PropertyObject); GetPropertyObject
+            // resolves a dotted path so nested members work too. This is the only tool that
+            // reaches a Parameter's comment (set_local_variable_comment only touches Locals).
+            var prop = seq.Parameters.GetPropertyObject(parameterName, 0);
             prop.Comment = comment;
 
             SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
@@ -2630,7 +2935,7 @@ public sealed class TestStandService : ITestStandService
                 _         => 1
             };
 
-            dynamic step = seq.GetStepByName(stepName, (NiStepGroups)sgValue);
+            dynamic step = ResolveStepInGroup(seq, sgValue, stepName);
 
             switch (expressionType.ToLowerInvariant())
             {
@@ -2676,7 +2981,7 @@ public sealed class TestStandService : ITestStandService
                 _         => 1
             };
 
-            dynamic step    = seq.GetStepByName(stepName, (NiStepGroups)sgValue);
+            dynamic step    = ResolveStepInGroup(seq, sgValue, stepName);
 
             // Use SequenceCallModule properties via dynamic COM dispatch:
             // SequenceCallModule.SequenceName, .UseCurrentFile, .SequenceFilePath
@@ -2711,6 +3016,10 @@ public sealed class TestStandService : ITestStandService
                 }
             }
 
+            // Materialise the callee prototype into ActualArgs/Prototype (editor "Load
+            // Prototype") so every parameter becomes a correctly-typed SequenceArgument.
+            TryLoadModulePrototype(seqCallModule, stepName);
+
             SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
             _loadedSequenceFiles[filePath] = sf;
         });
@@ -2736,7 +3045,7 @@ public sealed class TestStandService : ITestStandService
                 _         => 1
             };
 
-            dynamic step = seq.GetStepByName(stepName, (NiStepGroups)sgValue);
+            dynamic step = ResolveStepInGroup(seq, sgValue, stepName);
 
             // Access Module via dynamic COM dispatch so VIPath persists.
             dynamic lvModule = step.Module;
@@ -2744,6 +3053,326 @@ public sealed class TestStandService : ITestStandService
 
             SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
             _loadedSequenceFiles[filePath] = sf;
+        });
+    }
+
+    /// <inheritdoc/>
+    public async Task<StepPropertyValue> SetStepPropertyAsync(string filePath, string sequenceName,
+        string stepGroup, string stepName, string propertyPath, string value, string? valueType,
+        bool save = true, bool unescape = false)
+    {
+        EnsureConnected();
+        return await Task.Run(() =>
+        {
+            var sf   = GetOrLoadSeqFile(filePath);
+            var seq  = sf.GetSequenceByName(sequenceName);
+            dynamic step = (NiStep)(object)ResolveStepInGroup(seq, ParseStepGroup(stepGroup), stepName);
+            // Resolve the step's PropertyObject via the typed (vtable) call — the parameterless
+            // dynamic AsPropertyObject() is the DLR call most prone to TargetParameterCountException
+            // under load. This is the ThisContext-less design-time twin of set_runtime_variable:
+            // SetVal* takes a dotted lookup path relative to the step, reaching nested props like
+            // VIModule.ViCall.VIPath that no other writer can address.
+            NiPropertyObject stepPo = ((NiStep)(object)step).AsPropertyObject();
+
+            // MCP string parameters cannot carry bare control characters (a client cannot type a
+            // lone CR); unescape=true turns \r \n \t \\ \uXXXX sequences into their characters so
+            // values like VI descriptions with embedded CRs are reproducible byte-exact.
+            if (unescape) value = UnescapeValue(value);
+
+            // Explicit value_type wins; otherwise auto-detect from the literal (number / true|false
+            // / string) — same coercion as SetRuntimeVariableAsync / SetPropertyAsync.
+            string kind    = (valueType ?? "").Trim().ToLowerInvariant();
+            bool asNumber  = kind is "number" or "double" or "float" or "int" or "integer";
+            bool asBoolean = kind is "boolean" or "bool";
+            bool asString  = kind is "string";
+            if (!asNumber && !asBoolean && !asString)
+            {
+                if (double.TryParse(value, System.Globalization.NumberStyles.Any,
+                        System.Globalization.CultureInfo.InvariantCulture, out _)) asNumber = true;
+                else if (value.Equals("true", StringComparison.OrdinalIgnoreCase)
+                      || value.Equals("false", StringComparison.OrdinalIgnoreCase)) asBoolean = true;
+                else asString = true;
+            }
+
+            if (asNumber)
+                stepPo.SetValNumber(propertyPath, 0, double.Parse(value,
+                    System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture));
+            else if (asBoolean)
+                stepPo.SetValBoolean(propertyPath, 0,
+                    value.Equals("true", StringComparison.OrdinalIgnoreCase) || value == "1");
+            else
+                stepPo.SetValString(propertyPath, 0, value);
+
+            if (save) SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
+            _loadedSequenceFiles[filePath] = sf;
+
+            // Read the value back so the caller sees the applied result + resolved type.
+            NiPropertyObject prop = (NiPropertyObject)(object)stepPo.GetPropertyObject(propertyPath, 0);
+            var info = new StepPropertyValue { StepName = stepName, PropertyPath = propertyPath };
+            info.ValueType = InferValueKind(prop, out bool isArray, out int numElem);
+            info.IsArray   = isArray;
+            if (isArray) info.NumElements = numElem;
+            if (info.ValueType is "Number" or "Boolean" or "String")
+                info.Value = TryGetValue(prop);
+            return info;
+        });
+    }
+
+    /// <summary>
+    /// Decodes the escape sequences \r \n \t \" \\ and \uXXXX in a tool-supplied value.
+    /// Only used when the caller opts in (unescape=true) — a literal backslash the caller
+    /// wants preserved must then be doubled.
+    /// </summary>
+    internal static string UnescapeValue(string value)
+    {
+        if (string.IsNullOrEmpty(value) || value.IndexOf('\\') < 0) return value;
+        var sb = new System.Text.StringBuilder(value.Length);
+        for (int i = 0; i < value.Length; i++)
+        {
+            char c = value[i];
+            if (c != '\\' || i + 1 >= value.Length) { sb.Append(c); continue; }
+            char n = value[++i];
+            switch (n)
+            {
+                case 'r':  sb.Append('\r'); break;
+                case 'n':  sb.Append('\n'); break;
+                case 't':  sb.Append('\t'); break;
+                case '\\': sb.Append('\\'); break;
+                case '"':  sb.Append('"');  break;
+                case 'u' when i + 4 < value.Length &&
+                              int.TryParse(value.Substring(i + 1, 4),
+                                  System.Globalization.NumberStyles.HexNumber,
+                                  System.Globalization.CultureInfo.InvariantCulture, out int cp):
+                    sb.Append((char)cp); i += 4; break;
+                default:   sb.Append('\\').Append(n); break; // unknown escape → keep verbatim
+            }
+        }
+        return sb.ToString();
+    }
+
+    /// <inheritdoc/>
+    public async Task<StepPropertyValue> CreateStepPropertyAsync(string filePath, string sequenceName,
+        string stepGroup, string stepName, string propertyPath, string valueType,
+        string? typeName = null, int? numElements = null, string? value = null,
+        bool unescape = false, bool save = true)
+    {
+        EnsureConnected();
+        return await Task.Run(() =>
+        {
+            var sf   = GetOrLoadSeqFile(filePath);
+            var seq  = sf.GetSequenceByName(sequenceName);
+            dynamic step = (NiStep)(object)ResolveStepInGroup(seq, ParseStepGroup(stepGroup), stepName);
+            NiPropertyObject stepPo = ((NiStep)(object)step).AsPropertyObject();
+
+            string vt = (valueType ?? "").Trim().ToLowerInvariant();
+
+            if (vt is "array_elements" or "arrayelements")
+            {
+                // Resize an array property (e.g. TS.SData.ViCall.Parms,
+                // TS.AdditionalResultsHints). New elements are instantiated with the array's
+                // ELEMENT TYPE — the only way to author typed entries like VIParameter.
+                // A MISSING array is created first; type_name selects its element type
+                // ('' / 'container' → containers, a builtin scalar name, or a named type
+                // like 'VIParameter' — e.g. the per-parameter ArrayClusterEls cluster array).
+                if (numElements is null or < 0)
+                    throw new ArgumentException(
+                        "value_type='array_elements' requires num_elements >= 0.");
+                NiPropertyObject arr;
+                try
+                {
+                    arr = (NiPropertyObject)(object)stepPo.GetPropertyObject(propertyPath, 0);
+                }
+                catch
+                {
+                    int    last       = propertyPath.LastIndexOf('.');
+                    string parentPath = last >= 0 ? propertyPath[..last] : "";
+                    string leaf       = last >= 0 ? propertyPath[(last + 1)..] : propertyPath;
+                    NiPropertyObject parent = string.IsNullOrEmpty(parentPath)
+                        ? stepPo
+                        : (NiPropertyObject)(object)stepPo.GetPropertyObject(parentPath, 0);
+                    (int elemPvt, string elemTn) = (typeName ?? "").Trim().ToLowerInvariant() switch
+                    {
+                        "" or "container"
+                            => ((int)NiPropValueTypes.PropValType_Container, ""),
+                        "number" or "double" or "float" or "int" or "integer"
+                            => ((int)NiPropValueTypes.PropValType_Number, ""),
+                        "boolean" or "bool"
+                            => ((int)NiPropValueTypes.PropValType_Boolean, ""),
+                        "string" or "expression"
+                            => ((int)NiPropValueTypes.PropValType_String, ""),
+                        "reference" or "object reference" or "objectreference" or "objref"
+                            => ((int)NiPropValueTypes.PropValType_Reference, ""),
+                        _   => ((int)NiPropValueTypes.PropValType_NamedType, typeName!.Trim()),
+                    };
+                    try
+                    {
+                        parent.NewSubProperty(leaf, (NiPropValueTypes)elemPvt, true, elemTn, 0);
+                    }
+                    catch when (elemPvt == (int)NiPropValueTypes.PropValType_NamedType)
+                    {
+                        // Same engine-level type search fallback as the scalar named-type path.
+                        NiPropertyObject typedArr = (NiPropertyObject)(object)
+                            _engine!.NewPropertyObject((NiPropValueTypes)elemPvt, true, elemTn, 0);
+                        parent.SetPropertyObject(leaf, 0x1 /* PropOption_InsertIfMissing */, typedArr);
+                    }
+                    arr = (NiPropertyObject)(object)stepPo.GetPropertyObject(propertyPath, 0);
+                }
+                arr.SetNumElements(numElements.Value, 0);
+            }
+            else
+            {
+                // Create the subproperty when missing (idempotent when it already exists —
+                // the optional value below is applied either way). A named_type request on an
+                // EXISTING node of a DIFFERENT type replaces it with a fresh typed instance
+                // (needed to retype e.g. a plain-container array element to VIParameterElement).
+                bool exists = true;
+                string existingTypeDisp = "";
+                try
+                {
+                    NiPropertyObject existing =
+                        (NiPropertyObject)(object)stepPo.GetPropertyObject(propertyPath, 0);
+                    try { existingTypeDisp = existing.GetTypeDisplayString("", 0); } catch { }
+                }
+                catch { exists = false; }
+
+                bool retype = exists && vt is "namedtype" or "named_type" or "type"
+                    && !string.IsNullOrWhiteSpace(typeName)
+                    && existingTypeDisp != typeName
+                    && !existingTypeDisp.StartsWith(typeName + " ", StringComparison.Ordinal);
+                if (retype)
+                {
+                    NiPropertyObject typedNew = (NiPropertyObject)(object)_engine!.NewPropertyObject(
+                        NiPropValueTypes.PropValType_NamedType, false, typeName!.Trim(), 0);
+                    stepPo.SetPropertyObject(propertyPath, 0, typedNew);
+                }
+                else if (!exists)
+                {
+                    int    last       = propertyPath.LastIndexOf('.');
+                    string parentPath = last >= 0 ? propertyPath[..last] : "";
+                    string leaf       = last >= 0 ? propertyPath[(last + 1)..] : propertyPath;
+                    NiPropertyObject parent = string.IsNullOrEmpty(parentPath)
+                        ? stepPo
+                        : (NiPropertyObject)(object)stepPo.GetPropertyObject(parentPath, 0);
+
+                    (int pvt, string tn) = vt switch
+                    {
+                        "number" or "double" or "float" or "int" or "integer"
+                            => ((int)NiPropValueTypes.PropValType_Number, ""),
+                        "boolean" or "bool"
+                            => ((int)NiPropValueTypes.PropValType_Boolean, ""),
+                        "string" or "expression"
+                            => ((int)NiPropValueTypes.PropValType_String, ""),
+                        "container"
+                            => ((int)NiPropValueTypes.PropValType_Container, ""),
+                        "reference" or "object reference" or "objectreference" or "objref"
+                            => ((int)NiPropValueTypes.PropValType_Reference, ""),
+                        "namedtype" or "named_type" or "type" or ""
+                            when !string.IsNullOrWhiteSpace(typeName)
+                            => ((int)NiPropValueTypes.PropValType_NamedType, typeName!),
+                        _ => throw new ArgumentException(
+                            $"Unsupported value_type '{valueType}'. Use number/boolean/string/" +
+                            "container/reference, 'named_type' with type_name, or 'array_elements'.")
+                    };
+                    try
+                    {
+                        parent.NewSubProperty(leaf, (NiPropValueTypes)pvt, false, tn, 0);
+                    }
+                    catch when (pvt == (int)NiPropValueTypes.PropValType_NamedType)
+                    {
+                        // NewSubProperty resolves named types only against the FILE's type
+                        // usage list. Step-type-owned types (e.g. 'ErrorDialogOptions') need
+                        // the ENGINE-level search — same as the canonical edit-time expression
+                        // Engine.NewPropertyObject(PropValType_NamedType,...) + SetPropertyObject
+                        // with PropOption_InsertIfMissing (0x1).
+                        NiPropertyObject typed = (NiPropertyObject)(object)_engine!.NewPropertyObject(
+                            (NiPropValueTypes)pvt, false, tn, 0);
+                        parent.SetPropertyObject(leaf, 0x1 /* PropOption_InsertIfMissing */, typed);
+                    }
+                }
+
+                if (value != null)
+                {
+                    string v = unescape ? UnescapeValue(value) : value;
+                    switch (vt)
+                    {
+                        case "number" or "double" or "float" or "int" or "integer":
+                            stepPo.SetValNumber(propertyPath, 0, double.Parse(v,
+                                System.Globalization.NumberStyles.Any,
+                                System.Globalization.CultureInfo.InvariantCulture));
+                            break;
+                        case "boolean" or "bool":
+                            stepPo.SetValBoolean(propertyPath, 0,
+                                v.Equals("true", StringComparison.OrdinalIgnoreCase) || v == "1");
+                            break;
+                        case "string" or "expression":
+                            stepPo.SetValString(propertyPath, 0, v);
+                            break;
+                        // container/reference/named types have no scalar value to assign here.
+                    }
+                }
+            }
+
+            if (save) SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
+            _loadedSequenceFiles[filePath] = sf;
+
+            NiPropertyObject prop = (NiPropertyObject)(object)stepPo.GetPropertyObject(propertyPath, 0);
+            var info = new StepPropertyValue { StepName = stepName, PropertyPath = propertyPath };
+            info.ValueType = InferValueKind(prop, out bool isArray, out int numElem);
+            info.IsArray   = isArray;
+            if (isArray) info.NumElements = numElem;
+            if (info.ValueType is "Number" or "Boolean" or "String")
+                info.Value = TryGetValue(prop);
+            return info;
+        });
+    }
+
+    /// <inheritdoc/>
+    public async Task<StepPropertyValue> SetStepPropertyFlagsAsync(string filePath, string sequenceName,
+        string stepGroup, string stepName, string propertyPath, int flags, bool save = true)
+    {
+        EnsureConnected();
+        return await Task.Run(() =>
+        {
+            var sf   = GetOrLoadSeqFile(filePath);
+            var seq  = sf.GetSequenceByName(sequenceName);
+            dynamic step = (NiStep)(object)ResolveStepInGroup(seq, ParseStepGroup(stepGroup), stepName);
+            NiPropertyObject stepPo = ((NiStep)(object)step).AsPropertyObject();
+
+            stepPo.SetFlags(propertyPath, 0, flags);
+
+            if (save) SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
+            _loadedSequenceFiles[filePath] = sf;
+
+            var info = new StepPropertyValue { StepName = stepName, PropertyPath = propertyPath };
+            try { info.Value = stepPo.GetFlags(propertyPath, 0); info.ValueType = "Flags"; }
+            catch (Exception ex) { _logger.LogDebug(ex, "GetFlags read-back failed for '{Path}'.", propertyPath); }
+            return info;
+        });
+    }
+
+    /// <inheritdoc/>
+    public async Task<StepPropertyValue> RenameStepPropertyAsync(string filePath, string sequenceName,
+        string stepGroup, string stepName, string propertyPath, string newName, bool save = true)
+    {
+        EnsureConnected();
+        return await Task.Run(() =>
+        {
+            var sf   = GetOrLoadSeqFile(filePath);
+            var seq  = sf.GetSequenceByName(sequenceName);
+            dynamic step = (NiStep)(object)ResolveStepInGroup(seq, ParseStepGroup(stepGroup), stepName);
+            NiPropertyObject stepPo = ((NiStep)(object)step).AsPropertyObject();
+
+            NiPropertyObject prop =
+                (NiPropertyObject)(object)stepPo.GetPropertyObject(propertyPath, 0);
+            prop.Name = newName;
+
+            if (save) SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
+            _loadedSequenceFiles[filePath] = sf;
+
+            var info = new StepPropertyValue { StepName = stepName, PropertyPath = propertyPath };
+            try { info.Value = prop.Name; info.ValueType = "Name"; }
+            catch (Exception ex) { _logger.LogDebug(ex, "Name read-back failed for '{Path}'.", propertyPath); }
+            return info;
         });
     }
 
@@ -3581,9 +4210,29 @@ public sealed class TestStandService : ITestStandService
 
     private void EnsureConnected()
     {
-        if (_engine == null)
-            throw new InvalidOperationException(
-                "Not connected to TestStand engine. Call connect_engine first.");
+        if (_engine != null) return;
+
+        // The MCP host can restart this server process mid-session (or the engine can be torn
+        // down), leaving _engine null and every tool failing with "Not connected". Attempt a
+        // one-shot lazy reconnect with the default engine path instead of forcing the caller to
+        // re-run connect_engine. Serialized so two concurrent calls never spin up two engines.
+        lock (_connectLock)
+        {
+            if (_engine != null) return;
+            try
+            {
+                _logger.LogWarning("Engine not connected — attempting one-shot lazy reconnect.");
+                if (ConnectAsync().GetAwaiter().GetResult() && _engine != null)
+                {
+                    _logger.LogInformation("Lazy reconnect succeeded.");
+                    return;
+                }
+            }
+            catch (Exception ex) { _logger.LogError(ex, "Lazy reconnect failed."); }
+        }
+
+        throw new InvalidOperationException(
+            "Not connected to TestStand engine. Call connect_engine first.");
     }
 
     private dynamic? FindExecution(string executionId)
@@ -3804,6 +4453,7 @@ public sealed class TestStandService : ITestStandService
             catch (Exception ex) { _logger.LogDebug(ex, "Failed to enumerate steps for group {Group} in MapSequenceInfo.", g); }
         }
         try { info.Locals.AddRange((List<VariableInfo>)MapVariables(seq.Locals)); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to map local variables for sequence info."); }
+        try { info.Parameters.AddRange((List<ParameterInfo>)MapParameters(seq.Parameters)); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to map parameters for sequence info."); }
         return info;
     }
 
@@ -3866,7 +4516,7 @@ public sealed class TestStandService : ITestStandService
                 try
                 {
                     dynamic prop = propType.InvokeMember("GetNthSubProperty",
-                        _comFlags, null, propObj, new object[] { "", i, 0 });
+                        _comFlags, null, propObj, new object[] { "", i, 0 })!;
 
                     // PropertyObject has no `TypeName` property — the human-readable type
                     // name comes from GetTypeDisplayString(lookupString, options).
@@ -3891,12 +4541,23 @@ public sealed class TestStandService : ITestStandService
 
     private void SetPropertyValue(dynamic propBlock, string name, object value)
     {
+        // A plain set (option 0) throws on an Enumeration-typed target ("Expected type X. Found
+        // type Number/String"); retry coercing TO the enum type. The coerce is for-this-operation
+        // only — it sets the value and preserves the target's enum type (does not retype to Number).
+        // Mirrors the enum READ path (PropOption_CoerceToNumber) and set_property_value.
+        int toEnum = (int)NiPropOptions.PropOption_CoerceToEnum;
         if (value is double d)
-            propBlock.SetValNumber(name, 0, d);
+        {
+            try { propBlock.SetValNumber(name, 0, d); }
+            catch { propBlock.SetValNumber(name, toEnum, d); }
+        }
         else if (value is bool b)
             propBlock.SetValBoolean(name, 0, b);
         else
-            propBlock.SetValString(name, 0, value?.ToString() ?? "");
+        {
+            try { propBlock.SetValString(name, 0, value?.ToString() ?? ""); }
+            catch { propBlock.SetValString(name, toEnum, value?.ToString() ?? ""); }
+        }
     }
 
     private object? TryGetValue(dynamic prop)
@@ -3915,7 +4576,7 @@ public sealed class TestStandService : ITestStandService
         try
         {
             return (T)((object)_engine!).GetType().InvokeMember(
-                propName, _comFlags, null, _engine, null);
+                propName, _comFlags, null, _engine, null)!;
         }
         catch (Exception ex) { _logger.LogDebug(ex, "Failed to read engine property '{PropName}'.", propName); }
         return default;
@@ -3991,6 +4652,33 @@ public sealed class TestStandService : ITestStandService
             catch (Exception) { /* best-effort: search step group — intentionally ignored */ }
         }
         throw new KeyNotFoundException($"Step '{stepName}' not found in any step group.");
+    }
+
+    /// <summary>
+    /// Resolves a step within a single step group by name — the shared entry point for every
+    /// by-name step tool. Supports a "<c>Name#N</c>" suffix to target the N-th (1-based) occurrence
+    /// when a group holds several steps with the SAME name (e.g. repeated "Call Log" / "End" /
+    /// "If"): the native <c>GetStepByName</c> always returns the FIRST match, so without this the
+    /// 2nd+ duplicate could only be reached via the rename-configure-rename-back workaround. A plain
+    /// name (no '#') delegates to <c>GetStepByName</c>, preserving existing behaviour exactly.
+    /// </summary>
+    private static dynamic ResolveStepInGroup(dynamic seq, int group, string stepName)
+    {
+        int hash = stepName.LastIndexOf('#');
+        if (hash > 0 && int.TryParse(stepName.Substring(hash + 1), out int occurrence) && occurrence >= 1)
+        {
+            string baseName = stepName.Substring(0, hash);
+            int count = (int)seq.GetNumSteps((object)group);
+            int seen = 0;
+            for (int i = 0; i < count; i++)
+            {
+                var s = seq.GetStep(i, (object)group);
+                if ((string)s.Name == baseName && ++seen == occurrence) return s;
+            }
+            throw new KeyNotFoundException(
+                $"Step '{baseName}' occurrence #{occurrence} not found in the group (found {seen} with that name).");
+        }
+        return seq.GetStepByName(stepName, (object)group);
     }
 
     // ── Type Palettes ─────────────────────────────────────────────────────────
@@ -4332,6 +5020,133 @@ public sealed class TestStandService : ITestStandService
                 _logger.LogWarning(ex, "Could not enumerate data types");
             }
             return result;
+        });
+    }
+
+    /// <summary>
+    /// Walks a file's TypeUsageList and returns every embedded type's name. The index space is not
+    /// reliably bounded by GetNumTypes(category) via late-bound COM, so it walks GetTypeDefinition(i)
+    /// (proven to work) until it runs off the end, reading each definition's Name. Robust for both
+    /// listing and copy-all.
+    /// </summary>
+    private List<(string Name, bool Attached, string Kind)> EnumerateFileTypeDefs(NiTypeUsageList tul)
+    {
+        var outp = new List<(string, bool, string)>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        // MUST use TYPED interop here — the C# dynamic-COM binder throws TargetParameterCountException
+        // on TypeUsageList.GetTypeDefinition (the earlier dynamic version silently caught that and
+        // returned nothing → empty list). Walk indices with the typed 1-arg GetTypeDefinition(i)
+        // (the same call CreateEnumAsync uses successfully) until it runs off the end.
+        for (int i = 0; i < 4000; i++)
+        {
+            NiPropertyObject def;
+            try { def = tul.GetTypeDefinition(i); }
+            catch { break; }                       // out-of-range index → end of list
+            if (def == null) break;
+
+            string name;
+            try { name = def.Name; } catch { continue; }
+            if (string.IsNullOrEmpty(name) || !seen.Add(name)) continue;
+
+            bool attached = false;
+            try { attached = tul.GetIsTypeAttachedToFile(i); }
+            catch (Exception ex) { _logger.LogDebug(ex, "GetIsTypeAttachedToFile failed for type '{Type}'.", name); }
+
+            string kind = "Container";
+            try { kind = InferValueKind(def, out _, out _); }
+            catch (Exception ex) { _logger.LogDebug(ex, "InferValueKind failed for type '{Type}'.", name); }
+
+            outp.Add((name, attached, kind));
+        }
+        return outp;
+    }
+
+    /// <inheritdoc/>
+    public async Task<List<DataTypeInfo>> GetFileTypeDefsAsync(string filePath)
+    {
+        EnsureConnected();
+        return await Task.Run(() =>
+        {
+            var sf  = GetOrLoadSeqFile(filePath);
+            NiTypeUsageList tul = GetTypeUsageList(sf);
+            var result = new List<DataTypeInfo>();
+            foreach (var (name, attached, kind) in EnumerateFileTypeDefs(tul))
+                result.Add(new DataTypeInfo
+                {
+                    Name        = name,
+                    BaseType    = kind,
+                    IsArray     = false,
+                    Description = attached ? "attached-to-file" : "not-attached",
+                });
+            return result;
+        });
+    }
+
+    /// <inheritdoc/>
+    public async Task<List<string>> CopyTypeDefsAsync(string sourceFilePath, string destFilePath,
+        IReadOnlyList<string>? typeNames = null, bool save = true)
+    {
+        EnsureConnected();
+        return await Task.Run(() =>
+        {
+            var src = GetOrLoadSeqFile(sourceFilePath);
+            var dst = GetOrLoadSeqFile(destFilePath);
+            NiTypeUsageList srcTul = GetTypeUsageList(src);
+            NiTypeUsageList dstTul = GetTypeUsageList(dst);
+
+            // Explicit names are the reliable path (GetTypeIndex(name) resolves directly). With no
+            // names, copy every embedded type in the source.
+            List<string> names = (typeNames != null && typeNames.Count > 0)
+                ? typeNames.ToList()
+                : EnumerateFileTypeDefs(srcTul).Select(t => t.Name).ToList();
+
+            var copied = new List<string>();
+            foreach (var name in names)
+            {
+                int sidx = -1;
+                try { sidx = srcTul.GetTypeIndex(name); }
+                catch (Exception ex) { _logger.LogDebug(ex, "Source GetTypeIndex failed for '{Type}'.", name); }
+                if (sidx < 0) continue;                       // not in source — skip
+
+                NiPropertyObject def;
+                try { def = srcTul.GetTypeDefinition(sidx); }
+                catch (Exception ex) { _logger.LogDebug(ex, "Source GetTypeDefinition failed for '{Type}'.", name); continue; }
+
+                // Skip if the destination already has a type with this name (don't clobber, e.g.
+                // standard Error/Result already present in a fresh file).
+                int didx = -1;
+                try { didx = dstTul.GetTypeIndex(name); } catch { didx = -1; }
+                if (didx < 0)
+                {
+                    try
+                    {
+                        dstTul.InsertType(def, 0, NiTypeCategories.TypeCategory_CustomDataTypes);
+                        didx = dstTul.GetTypeIndex(name);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Failed to copy type '{Type}' into '{Dest}'.", name, Path.GetFileName(destFilePath));
+                        continue;
+                    }
+                }
+                if (didx >= 0)
+                {
+                    try { dstTul.SetIsTypeAttachedToFile(didx, true); }
+                    catch (Exception ex) { _logger.LogDebug(ex, "SetIsTypeAttachedToFile failed for '{Type}'.", name); }
+                }
+                copied.Add(name);
+            }
+
+            try { ((PropertyObjectFile)(object)dst.AsPropertyObjectFile()).IncChangeCount(); }
+            catch (Exception ex) { _logger.LogDebug(ex, "IncChangeCount failed on destination file."); }
+
+            if (save)
+            {
+                SaveSequenceFileWithRetry((NiSequenceFile)(object)dst, destFilePath);
+                _loadedSequenceFiles[destFilePath] = dst;
+            }
+            return copied;
         });
     }
 
@@ -4778,7 +5593,7 @@ public sealed class TestStandService : ITestStandService
             var sf    = GetOrLoadSeqFile(filePath);
             var seq = sf.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
-            var step  = seq.GetStepByName(stepName, (object)sgVal);
+            var step  = ResolveStepInGroup(seq, sgVal, stepName);
             // RemoveStep takes a numeric index (not a Step object). Resolve the current
             // index by name, detach the step, then re-insert it at the target position.
             int curIdx = (int)seq.GetStepIndex(stepName, (object)sgVal);
@@ -4830,8 +5645,35 @@ public sealed class TestStandService : ITestStandService
             var sf  = GetOrLoadSeqFile(filePath);
             var seq = sf.GetSequenceByName(sequenceName);
 
-            int propType = MapDataType(dataType);
-            seq.Parameters.NewSubProperty(paramName, (object)propType, false, "", 0);
+            // Builtins map to their PropertyValueType; anything else is treated as a NAMED type
+            // (PropValType_NamedType=4) — e.g. an enum or custom data type defined in the file.
+            // Mirror InsertLocalVariableAsync so enum / reference / container / array parameters
+            // are created with their REAL type instead of silently falling back to String.
+            string rawType = dataType.Trim();
+            bool   isArray = rawType.EndsWith("[]") ||
+                             rawType.StartsWith("array:", StringComparison.OrdinalIgnoreCase);
+            string baseDataType = rawType;
+            if (baseDataType.EndsWith("[]")) baseDataType = baseDataType[..^2].Trim();
+            if (baseDataType.StartsWith("array:", StringComparison.OrdinalIgnoreCase))
+                baseDataType = baseDataType.Substring("array:".Length).Trim();
+
+            int propType; string typeNameParam = "";
+            switch (baseDataType.ToLowerInvariant())
+            {
+                case "string":                                          propType = 1; break;
+                case "boolean": case "bool":                            propType = 2; break;
+                case "number": case "double": case "float":
+                case "int":    case "integer":                          propType = 3; break;
+                case "reference": case "object reference":
+                case "objectreference": case "objref":
+                    propType = (int)NiPropValueTypes.PropValType_Reference; break;
+                case "container":
+                    propType = (int)NiPropValueTypes.PropValType_Container; break;
+                default:        propType = 4; typeNameParam = baseDataType; break;
+            }
+
+            // NewSubProperty(lookupString, valueType, asArray, typeName, options)
+            seq.Parameters.NewSubProperty(paramName, (NiPropValueTypes)propType, isArray, typeNameParam, 0);
 
             // Pass-by-reference toggles PropFlags_PassByReference (4). The explicit
             // passByReference flag wins; when it is null, fall back to the legacy 'direction'
@@ -4922,7 +5764,7 @@ public sealed class TestStandService : ITestStandService
                     string stepType = "";
                     string desc = "";
 
-                    try { name = (string)iType.InvokeMember("Name", _comFlags, null, item, null); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read template Name at index {Index}.", i); }
+                    try { name = iType.InvokeMember("Name", _comFlags, null, item, null)?.ToString() ?? ""; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read template Name at index {Index}.", i); }
 
                     // StepType: step.StepType is an object; get its Name property
                     try
@@ -4933,7 +5775,7 @@ public sealed class TestStandService : ITestStandService
                     }
                     catch (Exception ex) { _logger.LogDebug(ex, "Failed to read StepType for template '{Name}'.", name); }
 
-                    try { desc = (string)iType.InvokeMember("Description", _comFlags, null, item, null); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read Description for template '{Name}'.", name); }
+                    try { desc = iType.InvokeMember("Description", _comFlags, null, item, null)?.ToString() ?? ""; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read Description for template '{Name}'.", name); }
                     if (string.IsNullOrEmpty(desc))
                     {
                         try { desc = Convert.ToString(iType.InvokeMember("GetValString",
@@ -5124,6 +5966,93 @@ public sealed class TestStandService : ITestStandService
         });
     }
 
+    /// <inheritdoc/>
+    public async Task<ReferenceAuditData> ReadReferenceAuditDataAsync(string filePath, string? sequenceName = null)
+    {
+        EnsureConnected();
+        return await Task.Run(() =>
+        {
+            var sf   = GetOrLoadSeqFile(filePath);
+            var data = new ReferenceAuditData();
+
+            // File globals are file-level (shared by every sequence).
+            try { foreach (var v in MapVariables(GetFileGlobals(sf))) data.FileGlobals.Add(v.Name); }
+            catch (Exception ex) { _logger.LogDebug(ex, "Failed to read file globals for reference audit."); }
+
+            // Which sequences to audit: the named one, or every sequence in the file.
+            var seqNames = new List<string>();
+            if (!string.IsNullOrWhiteSpace(sequenceName))
+                seqNames.Add(sequenceName!);
+            else
+            {
+                int n = 0;
+                try { n = Convert.ToInt32((object)sf.NumSequences); }
+                catch (Exception ex) { _logger.LogDebug(ex, "Failed to read NumSequences for reference audit."); }
+                for (int i = 0; i < n; i++)
+                {
+                    try { seqNames.Add((string)sf.GetSequence(i).Name); }
+                    catch (Exception ex) { _logger.LogDebug(ex, "Failed to read sequence name at index {Index}.", i); }
+                }
+            }
+
+            string[] groupNames = { "Setup", "Main", "Cleanup" };
+            foreach (var sn in seqNames)
+            {
+                var seq = sf.GetSequenceByName(sn);
+
+                var scope = new DeclaredScope { SequenceName = sn };
+                try { foreach (var v in MapVariables(seq.Locals))     scope.Locals.Add(v.Name); }
+                catch (Exception ex) { _logger.LogDebug(ex, "Failed to read locals of '{Seq}'.", sn); }
+                try { foreach (var p in MapParameters(seq.Parameters)) scope.Parameters.Add(p.Name); }
+                catch (Exception ex) { _logger.LogDebug(ex, "Failed to read parameters of '{Seq}'.", sn); }
+                data.Scopes.Add(scope);
+
+                for (int g = 0; g <= 2; g++)
+                {
+                    int count;
+                    try { count = Convert.ToInt32((object)seq.GetNumSteps((NiStepGroups)g)); }
+                    catch (Exception ex) { _logger.LogDebug(ex, "Failed GetNumSteps group {Group} of '{Seq}'.", g, sn); continue; }
+
+                    for (int i = 0; i < count; i++)
+                    {
+                        object step;
+                        try { step = seq.GetStep(i, (NiStepGroups)g); }
+                        catch (Exception ex) { _logger.LogDebug(ex, "Failed GetStep {Index} group {Group} of '{Seq}'.", i, g, sn); continue; }
+
+                        string stepName = "";
+                        try { stepName = (string)((NiStep)step).Name; } catch { /* best-effort */ }
+
+                        NiPropertyObject po = ((NiStep)step).AsPropertyObject();
+                        string grpName = groupNames[g];
+
+                        void Collect(string prop, string? value)
+                        {
+                            if (!string.IsNullOrWhiteSpace(value))
+                                data.Expressions.Add(new ExpressionEntry
+                                {
+                                    SequenceName = sn,
+                                    StepGroup    = grpName,
+                                    StepName     = stepName,
+                                    Property     = prop,
+                                    Expression   = value!
+                                });
+                        }
+
+                        // Statement actions + Pre/Post/Status conditions live on these step properties;
+                        // branch conditions live in ConditionExpr (If/ElseIf/While/DoWhile) / ItemExpr
+                        // (Select/Case) — present only on flow steps, hence the per-read try/catch.
+                        try { Collect("PreExpression",    (string)((NiStep)step).PreExpression); }    catch { }
+                        try { Collect("PostExpression",   (string)((NiStep)step).PostExpression); }   catch { }
+                        try { Collect("StatusExpression", (string)((NiStep)step).StatusExpression); } catch { }
+                        try { Collect("ConditionExpr",    (string)po.GetValString("ConditionExpr", 0)); } catch { }
+                        try { Collect("ItemExpr",         (string)po.GetValString("ItemExpr", 0)); }      catch { }
+                    }
+                }
+            }
+            return data;
+        });
+    }
+
     // ── Step Property Operations ──────────────────────────────────────────────
 
     /// <inheritdoc/>
@@ -5136,7 +6065,7 @@ public sealed class TestStandService : ITestStandService
             var sf    = GetOrLoadSeqFile(filePath);
             var seq = sf.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
-            var step  = seq.GetStepByName(stepName, (object)sgVal);
+            var step  = ResolveStepInGroup(seq, sgVal, stepName);
             step.Name = newName;
             SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
         });
@@ -5152,7 +6081,7 @@ public sealed class TestStandService : ITestStandService
             var sf    = GetOrLoadSeqFile(filePath);
             var seq = sf.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
-            var step  = seq.GetStepByName(stepName, (object)sgVal);
+            var step  = ResolveStepInGroup(seq, sgVal, stepName);
             var errors = new System.Text.StringBuilder();
             string method = "";
             // 1. step.Comment — the native COM Comment property on Step objects.
@@ -5181,7 +6110,7 @@ public sealed class TestStandService : ITestStandService
             var sf    = GetOrLoadSeqFile(filePath);
             var seq = sf.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
-            var step  = seq.GetStepByName(stepName, (object)sgVal);
+            var step  = ResolveStepInGroup(seq, sgVal, stepName);
             // RunModes constants: Normal="Normal", Skip="Skip", ForcePass="Pass", ForceFail="Fail"
             string modeStr = runMode.ToLowerInvariant() switch
             {
@@ -5211,7 +6140,7 @@ public sealed class TestStandService : ITestStandService
             var sf    = GetOrLoadSeqFile(filePath);
             var seq = sf.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
-            var step  = seq.GetStepByName(stepName, (object)sgVal);
+            var step  = ResolveStepInGroup(seq, sgVal, stepName);
             step.Precondition = precondition;
             SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
         });
@@ -5227,7 +6156,7 @@ public sealed class TestStandService : ITestStandService
             var sf    = GetOrLoadSeqFile(filePath);
             var seq = sf.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
-            var step  = seq.GetStepByName(stepName, (object)sgVal);
+            var step  = ResolveStepInGroup(seq, sgVal, stepName);
             // PostActionValues: Next, Break, Terminate, Goto, Cback
             string actionVal = MapPostAction(passAction);
             step.PassAction = actionVal;
@@ -5247,7 +6176,7 @@ public sealed class TestStandService : ITestStandService
             var sf    = GetOrLoadSeqFile(filePath);
             var seq = sf.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
-            var step  = seq.GetStepByName(stepName, (object)sgVal);
+            var step  = ResolveStepInGroup(seq, sgVal, stepName);
             string actionVal = MapPostAction(failAction);
             step.FailAction = actionVal;
             if (!string.IsNullOrEmpty(target) && actionVal == "Goto")
@@ -5259,7 +6188,8 @@ public sealed class TestStandService : ITestStandService
     /// <inheritdoc/>
     public async Task SetStepLoopAsync(string filePath, string sequenceName,
         string stepGroup, string stepName, string loopType,
-        string? initExpr = null, string? whileExpr = null, string? incExpr = null)
+        string? initExpr = null, string? whileExpr = null, string? incExpr = null,
+        string? statusExpr = null)
     {
         EnsureConnected();
         await Task.Run(() =>
@@ -5267,7 +6197,7 @@ public sealed class TestStandService : ITestStandService
             var sf    = GetOrLoadSeqFile(filePath);
             var seq = sf.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
-            var step  = seq.GetStepByName(stepName, (object)sgVal);
+            var step  = ResolveStepInGroup(seq, sgVal, stepName);
             // StepLoopTypes: NoLooping, FixedNumLoops, PassFailCount, Custom.
             // Accepts the strings advertised by the set_step_loop schema
             // ('NoLoop','While','For','Condition') plus their natural aliases.
@@ -5297,6 +6227,19 @@ public sealed class TestStandService : ITestStandService
                 try { step.LoopWhileExpression = whileExpr; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to set LoopWhileExpression on step '{Step}'.", stepName); }
             if (!string.IsNullOrEmpty(incExpr))
                 try { step.LoopIncExpression   = incExpr;   } catch (Exception ex) { _logger.LogDebug(ex, "Failed to set LoopIncExpression on step '{Step}'.", stepName); }
+            // A 'Custom' step loop also has a status expression (TS.LoopStatus, e.g.
+            // 'RunState.LoopNumPassed / RunState.LoopNumIterations < 1 ? "Failed" : "Passed"').
+            // The .NET Step wrapper exposes it as LoopStatusExpression on most versions; fall back
+            // to the raw property path so a Custom loop can be reproduced 1:1.
+            if (!string.IsNullOrEmpty(statusExpr))
+            {
+                try { step.LoopStatusExpression = statusExpr; }
+                catch
+                {
+                    try { ((NiStep)(object)step).AsPropertyObject().SetValString("TS.LoopStatus", 0, statusExpr); }
+                    catch (Exception ex) { _logger.LogDebug(ex, "Failed to set LoopStatus on step '{Step}'.", stepName); }
+                }
+            }
             SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
         });
     }
@@ -5311,11 +6254,21 @@ public sealed class TestStandService : ITestStandService
             var sf    = GetOrLoadSeqFile(filePath);
             var seq   = sf.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
-            var step  = seq.GetStepByName(stepName, (object)sgVal);
+            var step  = ResolveStepInGroup(seq, sgVal, stepName);
 
             string stepType = "";
             try { stepType = (string)step.StepType.Name; }
             catch (Exception ex) { _logger.LogDebug(ex, "Failed to read StepType.Name for flow condition on '{Step}'.", stepName); }
+
+            // Guard: a flow condition only has an effect on a branch step (If/ElseIf/While/DoWhile/
+            // Select/Case). Writing it to an NI_Flow_End — a common DoWhile mistake — is silently
+            // dropped: the loop condition belongs on the NI_Flow_DoWhile opener, not its End. Only
+            // enforce when we could actually read the step type (empty ⇒ fall through as before).
+            if (!string.IsNullOrEmpty(stepType))
+            {
+                var reject = InputGuards.DescribeInvalidFlowConditionTarget(stepName, stepType);
+                if (reject != null) throw new ArgumentException(reject);
+            }
 
             // The branch condition's home is a DEDICATED step property — NOT Pre/Post/Status:
             //   NI_Flow_If / ElseIf / While / DoWhile -> ConditionExpr (the boolean condition)
@@ -5351,6 +6304,125 @@ public sealed class TestStandService : ITestStandService
     }
 
     /// <inheritdoc/>
+    public async Task<ForLoopConfigResult> ConfigureForLoopAsync(string filePath,
+        string sequenceName, string stepGroup, string stepName, int? count = null,
+        string? indexVar = null, string? initExpr = null, string? conditionExpr = null,
+        string? incrementExpr = null, bool save = true)
+    {
+        EnsureConnected();
+        return await Task.Run(() =>
+        {
+            var sf    = GetOrLoadSeqFile(filePath);
+            var seq   = sf.GetSequenceByName(sequenceName);
+            int sgVal = ParseStepGroup(stepGroup);
+            var step  = ResolveStepInGroup(seq, sgVal, stepName);
+
+            // Guard: only a counted NI_Flow_For carries InitializationExpr/ConditionExpr/IncrementExpr.
+            string stepType = "";
+            try { stepType = (string)step.StepType.Name; }
+            catch (Exception ex) { _logger.LogDebug(ex, "Failed to read StepType.Name for for-loop config on '{Step}'.", stepName); }
+            if (!string.IsNullOrEmpty(stepType) && !InputGuards.IsCountedForLoop(stepType))
+                throw new ArgumentException(
+                    $"Step '{stepName}' is '{stepType}' — configure_for_loop only applies to an NI_Flow_For step.");
+
+            var result = new ForLoopConfigResult { StepName = stepName };
+
+            // Counted-loop convenience: derive the standard 0..count-1 loop from count + index var.
+            // Explicit expressions always take precedence over the generated ones.
+            string iv = string.IsNullOrWhiteSpace(indexVar) ? "Locals.i" : indexVar!.Trim();
+            if (count.HasValue)
+            {
+                initExpr      ??= $"{iv} = 0";
+                conditionExpr ??= $"{iv} < {count.Value}";
+                incrementExpr ??= $"{iv} += 1";
+            }
+
+            if (string.IsNullOrEmpty(initExpr) && string.IsNullOrEmpty(conditionExpr) &&
+                string.IsNullOrEmpty(incrementExpr))
+                throw new ArgumentException(
+                    "configure_for_loop needs either 'count' (with optional 'index_var') or at least one " +
+                    "of 'init_expr' / 'condition_expr' / 'increment_expr'.");
+
+            var po = ((NiStep)(object)step).AsPropertyObject();
+            if (initExpr      != null) po.SetValString("InitializationExpr", 0, initExpr);
+            if (conditionExpr != null) po.SetValString("ConditionExpr",      0, conditionExpr);
+            if (incrementExpr != null) po.SetValString("IncrementExpr",      0, incrementExpr);
+
+            // Report the effective values by reading them back.
+            try { result.InitializationExpr = (string)po.GetValString("InitializationExpr", 0); } catch { result.InitializationExpr = initExpr ?? ""; }
+            try { result.ConditionExpr      = (string)po.GetValString("ConditionExpr",      0); } catch { result.ConditionExpr      = conditionExpr ?? ""; }
+            try { result.IncrementExpr      = (string)po.GetValString("IncrementExpr",      0); } catch { result.IncrementExpr      = incrementExpr ?? ""; }
+
+            // The loop index variable is NOT created here — remind the caller to declare it.
+            if (count.HasValue && iv.StartsWith("Locals.", StringComparison.OrdinalIgnoreCase))
+                result.Notes.Add(
+                    $"Ensure the index variable '{iv}' is declared (insert_local_variable, type number) — " +
+                    "configure_for_loop does not create it.");
+
+            if (save)
+            {
+                SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
+                _loadedSequenceFiles[filePath] = sf;
+            }
+            return result;
+        });
+    }
+
+    /// <inheritdoc/>
+    public async Task<ForEachLoopConfigResult> ConfigureForEachLoopAsync(string filePath,
+        string sequenceName, string stepGroup, string stepName, string? arrayExpr = null,
+        string? elementExpr = null, string? offsetExpr = null, string? subscriptExpr = null,
+        bool save = true)
+    {
+        EnsureConnected();
+        return await Task.Run(() =>
+        {
+            var sf    = GetOrLoadSeqFile(filePath);
+            var seq   = sf.GetSequenceByName(sequenceName);
+            int sgVal = ParseStepGroup(stepGroup);
+            var step  = ResolveStepInGroup(seq, sgVal, stepName);
+
+            string stepType = "";
+            try { stepType = (string)step.StepType.Name; }
+            catch (Exception ex) { _logger.LogDebug(ex, "Failed to read StepType.Name for foreach config on '{Step}'.", stepName); }
+            if (!string.IsNullOrEmpty(stepType) && !InputGuards.IsForEachLoop(stepType))
+                throw new ArgumentException(
+                    $"Step '{stepName}' is '{stepType}' — configure_foreach_loop only applies to an NI_Flow_ForEach step.");
+
+            if (string.IsNullOrEmpty(arrayExpr) && string.IsNullOrEmpty(elementExpr) &&
+                string.IsNullOrEmpty(offsetExpr) && string.IsNullOrEmpty(subscriptExpr))
+                throw new ArgumentException(
+                    "configure_foreach_loop needs at least 'array_expr' (the collection to iterate). " +
+                    "'element_expr' (the per-element variable) is recommended.");
+
+            var po = ((NiStep)(object)step).AsPropertyObject();
+            if (arrayExpr     != null) po.SetValString("ArrayExpr",        0, arrayExpr);
+            if (elementExpr   != null) po.SetValString("ArrayElementExpr", 0, elementExpr);
+            if (offsetExpr    != null) po.SetValString("OffsetExpr",       0, offsetExpr);
+            if (subscriptExpr != null) po.SetValString("SubscriptExpr",    0, subscriptExpr);
+
+            var result = new ForEachLoopConfigResult { StepName = stepName };
+            try { result.ArrayExpr     = (string)po.GetValString("ArrayExpr",        0); } catch { result.ArrayExpr     = arrayExpr ?? ""; }
+            try { result.ElementExpr   = (string)po.GetValString("ArrayElementExpr", 0); } catch { result.ElementExpr   = elementExpr ?? ""; }
+            try { result.OffsetExpr    = (string)po.GetValString("OffsetExpr",       0); } catch { result.OffsetExpr    = offsetExpr ?? ""; }
+            try { result.SubscriptExpr = (string)po.GetValString("SubscriptExpr",    0); } catch { result.SubscriptExpr = subscriptExpr ?? ""; }
+
+            if (!string.IsNullOrEmpty(elementExpr) &&
+                elementExpr.StartsWith("Locals.", StringComparison.OrdinalIgnoreCase))
+                result.Notes.Add(
+                    $"Ensure the element variable '{elementExpr}' is declared (insert_local_variable) with a type " +
+                    "matching the array's element type — configure_foreach_loop does not create it.");
+
+            if (save)
+            {
+                SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
+                _loadedSequenceFiles[filePath] = sf;
+            }
+            return result;
+        });
+    }
+
+    /// <inheritdoc/>
     public async Task SetStepRecordResultAsync(string filePath, string sequenceName,
         string stepGroup, string stepName, string recordingOption)
     {
@@ -5373,7 +6445,7 @@ public sealed class TestStandService : ITestStandService
             var sf    = GetOrLoadSeqFile(filePath);
             var seq = sf.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
-            var step  = seq.GetStepByName(stepName, (object)sgVal);
+            var step  = ResolveStepInGroup(seq, sgVal, stepName);
             // Use the typed Step interface to set the enum property correctly
             var typedStep = (NationalInstruments.TestStand.Interop.API.Step)(object)step;
             typedStep.ResultRecordingOption =
@@ -5403,7 +6475,7 @@ public sealed class TestStandService : ITestStandService
             var sf    = GetOrLoadSeqFile(filePath);
             var seq = sf.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
-            var step  = seq.GetStepByName(stepName, (object)sgVal);
+            var step  = ResolveStepInGroup(seq, sgVal, stepName);
             var typedStep = (NationalInstruments.TestStand.Interop.API.Step)(object)step;
             typedStep.EvalPrecondForInteractiveExecution =
                 (NationalInstruments.TestStand.Interop.API.EvalPrecondOptions)optVal;
@@ -5435,7 +6507,7 @@ public sealed class TestStandService : ITestStandService
             var sf    = GetOrLoadSeqFile(filePath);
             var seq = sf.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
-            var step  = seq.GetStepByName(stepName, (object)sgVal);
+            var step  = ResolveStepInGroup(seq, sgVal, stepName);
             var typedStep = (NationalInstruments.TestStand.Interop.API.Step)(object)step;
             typedStep.ModuleLoadOption =
                 (NationalInstruments.TestStand.Interop.API.ModuleLoadOptions)optVal;
@@ -5467,10 +6539,19 @@ public sealed class TestStandService : ITestStandService
                 "use_step_unload_option"   => 5,
                 _                         => 5   // default: UseStepUnloadOption
             };
+            // Guard: UseStepUnloadOption (5) is only valid at the sequence-file / model level.
+            // TestStand rejects it on an individual step with an opaque COM error — turn that into
+            // a clear, actionable message instead of letting the raw rejection surface.
+            if (InputGuards.IsFileLevelOnlyUnloadOption(optVal))
+                throw new ArgumentException(
+                    "'UseStepUnloadOption' (5) is only valid at the sequence-file / model level — " +
+                    "TestStand rejects it on an individual step. Use one of 'OnPreconditionFailure', " +
+                    "'AfterStepExecution', 'AfterSequenceExecution' or 'WithSequenceFile' (1-4) for a " +
+                    "per-step unload option.");
             var sf    = GetOrLoadSeqFile(filePath);
             var seq = sf.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
-            var step  = seq.GetStepByName(stepName, (object)sgVal);
+            var step  = ResolveStepInGroup(seq, sgVal, stepName);
             var typedStep = (NationalInstruments.TestStand.Interop.API.Step)(object)step;
             typedStep.ModuleUnloadOption =
                 (NationalInstruments.TestStand.Interop.API.ModuleUnloadOptions)optVal;
@@ -5504,7 +6585,7 @@ public sealed class TestStandService : ITestStandService
             var sf    = GetOrLoadSeqFile(filePath);
             var seq = sf.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
-            var step  = seq.GetStepByName(stepName, (object)sgVal);
+            var step  = ResolveStepInGroup(seq, sgVal, stepName);
             var typedStep = (NationalInstruments.TestStand.Interop.API.Step)(object)step;
             typedStep.BatchSyncOption =
                 (NationalInstruments.TestStand.Interop.API.BatchSynchronizationOptions)optVal;
@@ -5566,7 +6647,7 @@ public sealed class TestStandService : ITestStandService
             var sf    = GetOrLoadSeqFile(filePath);
             var seq = sf.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
-            var step  = seq.GetStepByName(stepName, (object)sgVal);
+            var step  = ResolveStepInGroup(seq, sgVal, stepName);
             // Step.ChangeAdapter takes the adapter KEY NAME string, not an Adapter object.
             step.ChangeAdapter((object)ResolveAdapterKeyName(newAdapter));
             SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
@@ -5583,7 +6664,7 @@ public sealed class TestStandService : ITestStandService
             var sf    = GetOrLoadSeqFile(filePath);
             var seq = sf.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
-            var step  = seq.GetStepByName(stepName, (object)sgVal);
+            var step  = ResolveStepInGroup(seq, sgVal, stepName);
             try { return (string)step.UniqueStepId; } catch { return ""; }
         });
     }
@@ -6163,6 +7244,22 @@ public sealed class TestStandService : ITestStandService
                     TrySetModuleProp(mod, "ModulePath", viPath))
                     applied["viPath"] = viPath;
                 return applied;
+            },
+            // Guard: refuse None-adapter LabVIEW UTILITY steps (e.g. NI_LV_RunVIAsynchronously,
+            // "Run VI Asynchronously"). Their VI config lives in the step's own properties
+            // (VIModule.ViCall.VIPath, …); switching to the LabVIEW adapter here would corrupt it.
+            step =>
+            {
+                string stepType = "";
+                try { stepType = (string)step.StepType.Name; }
+                catch (Exception ex) { _logger.LogDebug(ex, "Failed to read StepType.Name for LabVIEW-module guard on '{Step}'.", stepName); }
+                string adapterKey = TryGetString(step, "AdapterKeyName");
+                if (InputGuards.IsNoneAdapterLabViewUtilityStep(stepType, adapterKey))
+                    throw new InvalidOperationException(
+                        $"Step '{stepName}' is a None-adapter LabVIEW utility step ('{stepType}'); " +
+                        "configure_labview_module would switch its adapter to LabVIEW and corrupt its " +
+                        "configuration. Use set_step_property instead (e.g. property_path " +
+                        "'VIModule.ViCall.VIPath' for the VI, 'RemoteHost'/'PortNumber'/'Timeout').");
             });
 
     /// <inheritdoc/>
@@ -6184,7 +7281,8 @@ public sealed class TestStandService : ITestStandService
     /// <inheritdoc/>
     public Task<ModuleConfigResult> ConfigureSequenceCallModuleAsync(string filePath,
         string sequenceName, string stepGroup, string stepName,
-        string targetSequenceName, string targetSequenceFile = "", bool save = true)
+        string targetSequenceName, string targetSequenceFile = "", bool save = true,
+        string? executionMode = null, string? threadRefExpr = null, bool? autoWait = null)
         => ConfigureModuleAsync(filePath, sequenceName, stepGroup, stepName, "SequenceCall", save,
             mod =>
             {
@@ -6199,6 +7297,46 @@ public sealed class TestStandService : ITestStandService
                     mod.SequenceFilePath = rel;
                     applied["targetSequenceFile"] = rel;
                 }
+                // Populate ActualArgs/Prototype from the callee (editor "Load Prototype").
+                TryLoadModulePrototype(mod, stepName);
+
+                // Optional threading / async options. These live on the SequenceCall module's own
+                // PropertyObject (TS.SData): ThreadOpt (0 = run in the calling thread, 1 = new thread,
+                // 2 = new execution), AsyncThreadExpr (expression to store the new thread/execution
+                // reference) and AutoWaitAsync (wait for the async subsequence at the end of the
+                // current sequence). Previously only settable via raw set_step_property.
+                if (executionMode != null || threadRefExpr != null || autoWait.HasValue)
+                {
+                    try
+                    {
+                        NiPropertyObject sdata = ((dynamic)mod).AsPropertyObject();
+                        if (executionMode != null)
+                        {
+                            int opt = executionMode.Trim().ToLowerInvariant() switch
+                            {
+                                "newthread" or "thread" or "new thread"            => 1,
+                                "newexecution" or "execution" or "new execution"   => 2,
+                                _                                                  => 0, // use current thread
+                            };
+                            sdata.SetValNumber("ThreadOpt", 0, opt);
+                            applied["executionOption"] = opt;
+                        }
+                        if (threadRefExpr != null)
+                        {
+                            sdata.SetValString("AsyncThreadExpr", 0, threadRefExpr);
+                            applied["threadRefExpr"] = threadRefExpr;
+                        }
+                        if (autoWait.HasValue)
+                        {
+                            sdata.SetValBoolean("AutoWaitAsync", 0, autoWait.Value);
+                            applied["autoWait"] = autoWait.Value;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogDebug(ex, "Failed to set async/threading options on SequenceCall step '{Step}'.", stepName);
+                    }
+                }
                 return applied;
             });
 
@@ -6209,7 +7347,8 @@ public sealed class TestStandService : ITestStandService
     /// </summary>
     private async Task<ModuleConfigResult> ConfigureModuleAsync(string filePath,
         string sequenceName, string stepGroup, string stepName, string adapterKey,
-        bool save, Func<dynamic, Dictionary<string, object>> apply)
+        bool save, Func<dynamic, Dictionary<string, object>> apply,
+        Action<dynamic>? preAdapterGuard = null)
     {
         EnsureConnected();
         return await Task.Run(() =>
@@ -6217,7 +7356,11 @@ public sealed class TestStandService : ITestStandService
             var sf    = GetOrLoadSeqFile(filePath);
             var seq = sf.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
-            var step  = seq.GetStepByName(stepName, (object)sgVal);
+            var step  = ResolveStepInGroup(seq, sgVal, stepName);
+
+            // Optional guard: inspect the step BEFORE the adapter is switched (the switch itself is
+            // what can corrupt a None-adapter utility step). May throw to abort the operation.
+            preAdapterGuard?.Invoke(step);
 
             // Ensure the step uses the requested adapter before configuring its module.
             string resolvedKey = ResolveAdapterKeyName(adapterKey);
@@ -6236,10 +7379,14 @@ public sealed class TestStandService : ITestStandService
                 _loadedSequenceFiles[filePath] = sf;
             }
 
+            // Report the step's ACTUAL adapter, not the requested key: ChangeAdapter may have
+            // normalised to the loaded adapter (e.g. 'G Std Prototype Adapter' request → the
+            // step keeps/gets 'G Flexible VI Adapter') or failed silently for a missing one.
+            string actualKey = TryGetString(step, "AdapterKeyName");
             return new ModuleConfigResult
             {
                 StepName       = stepName,
-                Adapter        = resolvedKey,
+                Adapter        = string.IsNullOrEmpty(actualKey) ? resolvedKey : actualKey,
                 AppliedSettings = applied
             };
         });
@@ -6255,6 +7402,59 @@ public sealed class TestStandService : ITestStandService
             return true;
         }
         catch { return false; }
+    }
+
+    /// <summary>
+    /// Best-effort programmatic equivalent of the Sequence Editor's <c>Load Prototype</c>
+    /// button (<see cref="NationalInstruments.TestStand.Interop.API.Module.LoadPrototype"/>).
+    /// When the step's target module is resolvable, TestStand reconciles the module's argument
+    /// list against the callee prototype: for a SequenceCall it materialises one typed
+    /// <c>SequenceArgument</c> per callee parameter in <c>TS.SData.ActualArgs</c> — each with the
+    /// correct <c>ParamType</c>/<c>ParamRepresentation</c>/<c>Flags</c> and <c>UseDef=True</c> —
+    /// and refreshes the cached <c>Prototype</c> container. Existing bindings are matched by name
+    /// and preserved. Without this, arguments created bare via <c>NewSubProperty</c> carry wrong
+    /// default flags (e.g. PassByReference 0x4 on a by-value arg) and the unbound parameters are
+    /// missing entirely — both of which the native FileDiffer flags against a genuine call.
+    /// The call is a no-op (logged and swallowed) when the target cannot be resolved — an
+    /// unlinked placeholder, an unresolved external file, or a not-yet-loaded target — so target
+    /// assignment always succeeds.
+    /// </summary>
+    private void TryLoadModulePrototype(dynamic moduleObj, string stepName)
+    {
+        try
+        {
+            moduleObj.LoadPrototype(0);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex,
+                "LoadPrototype skipped for step '{Step}' (target/module not resolvable).", stepName);
+            return;
+        }
+
+        // After a prototype load every actual argument is freshly created with UseDef=False and
+        // an empty Expr. A genuine call keeps UNBOUND arguments at UseDef=True ("use default") and
+        // clears it only for bound ones. Enforce that invariant (UseDef ⇔ empty Expr) so the
+        // native FileDiffer sees exactly the defaults the editor's Load Prototype would leave.
+        // No-op for adapters without a SequenceCall ActualArgs list (e.g. LabVIEW).
+        try
+        {
+            NiPropertyObject modPo = (NiPropertyObject)(object)moduleObj.AsPropertyObject();
+            NiPropertyObject args  = (NiPropertyObject)(object)modPo.GetPropertyObject("ActualArgs", 0);
+            int n = args.GetNumSubProperties("");
+            for (int i = 0; i < n; i++)
+            {
+                try
+                {
+                    NiPropertyObject a = args.GetNthSubProperty("", i, 0);
+                    string expr = "";
+                    try { expr = a.GetValString("Expr", 0); } catch { /* no Expr on this entry */ }
+                    a.SetValBoolean("UseDef", 0, string.IsNullOrEmpty(expr));
+                }
+                catch (Exception ex) { _logger.LogDebug(ex, "UseDef normalization skipped for an ActualArgs entry on '{Step}'.", stepName); }
+            }
+        }
+        catch (Exception ex) { _logger.LogDebug(ex, "No ActualArgs to normalize on step '{Step}'.", stepName); }
     }
 
     // ── Sequence Analyzer (detailed) ──────────────────────────────────────────
@@ -6501,11 +7701,15 @@ public sealed class TestStandService : ITestStandService
             {
                 try
                 {
-                    string fname = (string)tObj.GetType().InvokeMember(
-                        "GetNthSubPropertyName", _comFlags, null, tObj, new object[] { "", i, 0 });
+                    string fname = tObj.GetType().InvokeMember(
+                        "GetNthSubPropertyName", _comFlags, null, tObj, new object[] { "", i, 0 })?.ToString() ?? "";
                     dynamic fp = tObj.GetType().InvokeMember(
-                        "GetNthSubProperty", _comFlags, null, tObj, new object[] { "", i, 0 });
-                    result.Add(new TypeFieldInfo { Name = fname, DataType = TryGetString(fp, "TypeName") });
+                        "GetNthSubProperty", _comFlags, null, tObj, new object[] { "", i, 0 })!;
+                    // Type name via GetTypeDisplayString — PropertyObject has no `TypeName`.
+                    string fieldType = "";
+                    try { fieldType = (string)fp.GetTypeDisplayString("", (object)0); }
+                    catch (Exception ex) { _logger.LogDebug(ex, "Failed to get type display string for field '{Field}'.", fname); }
+                    result.Add(new TypeFieldInfo { Name = fname, DataType = fieldType });
                 }
                 catch (Exception ex) { _logger.LogDebug(ex, "Failed to read data type field at index {Index}.", i); }
             }
@@ -6694,7 +7898,7 @@ public sealed class TestStandService : ITestStandService
     {
         var seqFile = (NiSequenceFile)(object)GetOrLoadSeqFile(filePath);
         NiSequence seq  = seqFile.GetSequenceByName(sequenceName);
-        NiStep     step = seq.GetStepByName(stepName, (NiStepGroups)ParseStepGroup(stepGroup));
+        NiStep     step = (NiStep)(object)ResolveStepInGroup(seq, ParseStepGroup(stepGroup), stepName);
         try { return step.AsPropertyObject().GetValString(lookupPath, 0); }
         catch { return null; }
     }
@@ -6708,7 +7912,7 @@ public sealed class TestStandService : ITestStandService
     {
         var seqFile = (NiSequenceFile)(object)GetOrLoadSeqFile(filePath);
         NiSequence seq  = seqFile.GetSequenceByName(sequenceName);
-        NiStep     step = seq.GetStepByName(stepName, (NiStepGroups)ParseStepGroup(stepGroup));
+        NiStep     step = (NiStep)(object)ResolveStepInGroup(seq, ParseStepGroup(stepGroup), stepName);
         try { return step.AsPropertyObject().GetValNumber(lookupPath, 0); }
         catch { return null; }
     }
@@ -6758,19 +7962,6 @@ public sealed class TestStandService : ITestStandService
         _         => 1
     };
 
-    private static int MapDataType(string dataType) => dataType.ToLowerInvariant() switch
-    {
-        "string"  => 1,
-        "boolean" => 2,
-        "bool"    => 2,
-        "number"  => 3,
-        "double"  => 3,
-        "float"   => 3,
-        "int"     => 3,
-        "integer" => 3,
-        _         => 1
-    };
-
     private static string MapPostAction(string action) => action.ToLowerInvariant() switch
     {
         "break"      => "Break",
@@ -6793,7 +7984,13 @@ public sealed class TestStandService : ITestStandService
             else if (propType == 2 && bool.TryParse(value, out var b))
                 propBlock.SetValBoolean(name, 0, b);
             else
-                propBlock.SetValString(name, 0, value);
+            {
+                // A named/enum-typed target (propType 4) rejects a plain string set; retry
+                // coercing for-this-operation so an enum default can be set by its label.
+                try { propBlock.SetValString(name, 0, value); }
+                catch { propBlock.SetValString(name,
+                    (int)NiPropOptions.PropOption_CoerceToEnum, value); }
+            }
         }
         catch (Exception ex) { _logger.LogDebug(ex, "Failed to set property '{Name}' value by type.", name); }
     }
@@ -6813,11 +8010,16 @@ public sealed class TestStandService : ITestStandService
                 try
                 {
                     dynamic prop = propType.InvokeMember("GetNthSubProperty",
-                        _comFlags, null, propObj, new object[] { "", i, 0 });
+                        _comFlags, null, propObj, new object[] { "", i, 0 })!;
+                    // PropertyObject has no `TypeName` property — the human-readable type
+                    // name comes from GetTypeDisplayString (same as MapVariables).
+                    string paramDataType = "";
+                    try { paramDataType = (string)prop.GetTypeDisplayString("", (object)0); }
+                    catch (Exception ex) { _logger.LogDebug(ex, "Failed to get type display string for parameter."); }
                     var pi = new ParameterInfo
                     {
                         Name     = (string)prop.Name,
-                        DataType = TryGetString(prop, "TypeName")
+                        DataType = paramDataType
                     };
                     try
                     {
@@ -7415,7 +8617,7 @@ public sealed class TestStandService : ITestStandService
                 {
                     dynamic p = propObj.GetType().InvokeMember(
                         "GetNthSubProperty", _comFlags, null, propObj,
-                        new object[] { "", i, 0 });
+                        new object[] { "", i, 0 })!;
                     names.Add((string)p.Name);
                 }
                 catch (Exception ex) { _logger.LogDebug(ex, "Failed to read sub-property name at index {Index} in GetSubPropertyNames.", i); }
@@ -7759,7 +8961,7 @@ public sealed class TestStandService : ITestStandService
             var sf    = GetOrLoadSeqFile(filePath);
             var seq = sf.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
-            var step  = seq.GetStepByName(stepName, (object)sgVal);
+            var step  = ResolveStepInGroup(seq, sgVal, stepName);
 
             // The Step COM property is AdapterKeyName (e.g. "DotNet Adapter"),
             // NOT "AdapterName" — the latter does not exist and always read back "".
@@ -7822,6 +9024,34 @@ public sealed class TestStandService : ITestStandService
                 }
             }
             catch (Exception ex) { _logger.LogDebug(ex, "Failed to read module properties via property object for step '{Step}'.", stepName); }
+
+            // NI_LV utility steps (e.g. NI_LV_RunVIAsynchronously = "Run VI Asynchronously") use the
+            // None adapter and store their REAL VI config in the step's own VIModule.ViCall — NOT
+            // step.Module, which for these steps returns the async-launch SequenceCall wrapper
+            // (SequenceName "MainSequence", SequenceFilePath "Evaluate(Step.SequenceFileExpr)") and is
+            // therefore misleading. Surface the actual VI + async target so callers see what runs.
+            try
+            {
+                NiPropertyObject spo = ((NiStep)(object)step).AsPropertyObject();
+                string viModuleViPath = "";
+                try { viModuleViPath = spo.GetValString("VIModule.ViCall.VIPath", 0); }
+                catch (Exception ex) { _logger.LogDebug(ex, "No VIModule.ViCall.VIPath on step '{Step}'.", stepName); }
+                if (!string.IsNullOrEmpty(viModuleViPath))
+                {
+                    info.ModuleProperties["VIModuleVIPath"] = viModuleViPath;
+                    foreach (var (path, key) in new[]
+                    {
+                        ("VIModule.ViCall.Namespace", "VIModuleNamespace"),
+                        ("TS.SData.SeqNameExpr",      "AsyncSequenceNameExpr"),
+                        ("TS.SData.SFPathExpr",       "AsyncSequenceFileExpr"),
+                    })
+                    {
+                        try { var v = spo.GetValString(path, 0); if (!string.IsNullOrEmpty(v)) info.ModuleProperties[key] = (object)v; }
+                        catch (Exception ex) { _logger.LogDebug(ex, "Failed to read '{Path}' for LV utility step '{Step}'.", path, stepName); }
+                    }
+                }
+            }
+            catch (Exception ex) { _logger.LogDebug(ex, "Failed to inspect VIModule for step '{Step}'.", stepName); }
 
             return info;
         });
@@ -7900,7 +9130,7 @@ public sealed class TestStandService : ITestStandService
                             {
                                 dynamic v    = propObj.GetType().InvokeMember(
                                     "GetNthSubProperty", _comFlags, null, propObj,
-                                    new object[] { "", vi, 0 });
+                                    new object[] { "", vi, 0 })!;
                                 string vName = (string)v.Name;
                                 if (vName.IndexOf(pattern, comparison) >= 0)
                                 {
@@ -8212,6 +9442,213 @@ public sealed class TestStandService : ITestStandService
                 catch (Exception ex) { _logger.LogDebug(ex, "Failed to read call stack frame at depth {Depth}.", d); }
             }
             return frames;
+        });
+    }
+
+    // ── Live Thread-Context Inspection (runtime debugging) ────────────────────
+    // All methods below read/write the LIVE SequenceContext of a running or paused thread at a
+    // chosen call-stack frame. Access path: FindThread → typed NiThread →
+    // GetSequenceContext(frame, out _) → AsPropertyObject() == the ThisContext property tree
+    // (subprops Locals/Parameters/FileGlobals/StationGlobals/RunState/Step/Sequence). This is the
+    // ONLY path that sees runtime values; get_property_tree / evaluate_expression resolve against
+    // engine Globals and never reach it. See memory teststand-runstate-inaccessible-at-breakpoint.
+
+    // Resolves the live SequenceContext of (executionId, threadId ?? first thread) at callStackIndex.
+    private NiSequenceContext ResolveThreadContext(string executionId, string? threadId,
+        int callStackIndex)
+    {
+        var thread = FindThread(executionId, string.IsNullOrEmpty(threadId) ? "0" : threadId!);
+        var t = (NiThread)thread;
+
+        int depth = 0;
+        try { depth = t.CallStackSize; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read CallStackSize."); }
+        if (depth <= 0)
+            throw new InvalidOperationException(
+                "Thread has no active call-stack frame (it is not currently executing a sequence). " +
+                "Inspect only while the thread is running/paused inside a sequence.");
+        if (callStackIndex < 0 || callStackIndex >= depth)
+            throw new ArgumentOutOfRangeException(nameof(callStackIndex),
+                $"call_stack_index {callStackIndex} is out of range; thread has {depth} frame(s) (0..{depth - 1}).");
+
+        return t.GetSequenceContext(callStackIndex, out int _);
+    }
+
+    // The ThisContext property tree of a frame — root for Locals/Parameters/RunState/Step/Sequence.
+    private NiPropertyObject ThisContextPropertyObject(string executionId, string? threadId,
+        int callStackIndex)
+        => (NiPropertyObject)(object)
+           ResolveThreadContext(executionId, threadId, callStackIndex).AsPropertyObject();
+
+    /// <inheritdoc/>
+    public async Task<PropertyNode> InspectThreadContextAsync(string executionId, string? threadId,
+        int callStackIndex, string scope, string? lookupString, int maxDepth,
+        bool includeHidden, int maxArrayElements)
+    {
+        EnsureConnected();
+        return await Task.Run(() =>
+        {
+            NiPropertyObject ctxPo = ThisContextPropertyObject(executionId, threadId, callStackIndex);
+
+            NiPropertyObject start;
+            string rootLabel;
+            switch ((scope ?? "runstate").Trim().ToLowerInvariant())
+            {
+                case "full":
+                case "thiscontext":
+                    start = ctxPo; rootLabel = "ThisContext"; break;
+                case "locals":
+                    start = (NiPropertyObject)(object)ctxPo.GetPropertyObject("Locals", 0);     rootLabel = "Locals";     break;
+                case "parameters":
+                    start = (NiPropertyObject)(object)ctxPo.GetPropertyObject("Parameters", 0); rootLabel = "Parameters"; break;
+                case "step":
+                    start = (NiPropertyObject)(object)ctxPo.GetPropertyObject("Step", 0);        rootLabel = "Step";       break;
+                case "sequence":
+                    start = (NiPropertyObject)(object)ctxPo.GetPropertyObject("Sequence", 0);    rootLabel = "Sequence";   break;
+                case "runstate":
+                default:
+                    start = (NiPropertyObject)(object)ctxPo.GetPropertyObject("RunState", 0);    rootLabel = "RunState";   break;
+            }
+
+            if (!string.IsNullOrWhiteSpace(lookupString))
+            {
+                start     = (NiPropertyObject)(object)start.GetPropertyObject(lookupString, 0);
+                rootLabel = lookupString!;
+            }
+
+            int budget = 200_000;
+            return BuildPropertyNode(start, rootLabel, 0, maxDepth, includeHidden,
+                Math.Max(0, maxArrayElements), ref budget);
+        });
+    }
+
+    /// <inheritdoc/>
+    public async Task<ExpressionResult> EvaluateInThreadContextAsync(string executionId,
+        string? threadId, int callStackIndex, string expression)
+    {
+        EnsureConnected();
+        return await Task.Run(() =>
+        {
+            var result = new ExpressionResult { Expression = expression };
+            try
+            {
+                NiPropertyObject ctxPo = ThisContextPropertyObject(executionId, threadId, callStackIndex);
+                // EvaluateEx on the ThisContext property tree resolves names as its subproperties —
+                // exactly the scope the Sequence Editor uses (Locals./Parameters./RunState./Step.…).
+                NiPropertyObject resultPo =
+                    ctxPo.EvaluateEx(expression, (int)NiEvalOptions.EvalOption_NoOptions);
+                if (resultPo == null) { result.ValueType = "Empty"; result.Value = null; }
+                else { result.ValueType = InferValueKind(resultPo, out _, out _); result.Value = TryGetValue(resultPo); }
+                result.IsValid = true;
+            }
+            catch (Exception ex)
+            {
+                result.IsValid      = false;
+                result.ErrorMessage = $"{ex.GetType().Name}: {ex.Message}";
+            }
+            return result;
+        });
+    }
+
+    /// <inheritdoc/>
+    public async Task<RuntimeVariableInfo> GetRuntimeVariableAsync(string executionId,
+        string? threadId, int callStackIndex, string propertyPath)
+    {
+        EnsureConnected();
+        return await Task.Run(() =>
+        {
+            NiPropertyObject ctxPo = ThisContextPropertyObject(executionId, threadId, callStackIndex);
+            NiPropertyObject prop  = (NiPropertyObject)(object)ctxPo.GetPropertyObject(propertyPath, 0);
+
+            var info = new RuntimeVariableInfo { PropertyPath = propertyPath };
+            info.ValueType = InferValueKind(prop, out bool isArray, out int numElem);
+            info.IsArray   = isArray;
+            if (isArray) info.NumElements = numElem;
+            if (info.ValueType is "Number" or "Boolean" or "String")
+                info.Value = TryGetValue(prop);
+            return info;
+        });
+    }
+
+    /// <inheritdoc/>
+    public async Task<RuntimeVariableInfo> SetRuntimeVariableAsync(string executionId,
+        string? threadId, int callStackIndex, string propertyPath, string value, string? valueType)
+    {
+        EnsureConnected();
+        return await Task.Run(() =>
+        {
+            NiPropertyObject ctxPo = ThisContextPropertyObject(executionId, threadId, callStackIndex);
+
+            // Explicit value_type wins; when omitted, auto-detect from the literal (parses as a
+            // number → number; "true"/"false" → boolean; otherwise string) — like SetPropertyAsync.
+            string kind    = (valueType ?? "").Trim().ToLowerInvariant();
+            bool asNumber  = kind is "number" or "double" or "float" or "int" or "integer";
+            bool asBoolean = kind is "boolean" or "bool";
+            bool asString  = kind is "string";
+            if (!asNumber && !asBoolean && !asString)
+            {
+                if (double.TryParse(value, System.Globalization.NumberStyles.Any,
+                        System.Globalization.CultureInfo.InvariantCulture, out _)) asNumber = true;
+                else if (value.Equals("true", StringComparison.OrdinalIgnoreCase)
+                      || value.Equals("false", StringComparison.OrdinalIgnoreCase)) asBoolean = true;
+                else asString = true;
+            }
+
+            if (asNumber)
+                ctxPo.SetValNumber(propertyPath, 0, double.Parse(value,
+                    System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture));
+            else if (asBoolean)
+                ctxPo.SetValBoolean(propertyPath, 0,
+                    value.Equals("true", StringComparison.OrdinalIgnoreCase) || value == "1");
+            else
+                ctxPo.SetValString(propertyPath, 0, value);
+
+            // Read the value back so the caller sees the applied result.
+            NiPropertyObject prop = (NiPropertyObject)(object)ctxPo.GetPropertyObject(propertyPath, 0);
+            var info = new RuntimeVariableInfo { PropertyPath = propertyPath, Written = true };
+            info.ValueType = InferValueKind(prop, out bool isArray, out int numElem);
+            info.IsArray   = isArray;
+            if (isArray) info.NumElements = numElem;
+            if (info.ValueType is "Number" or "Boolean" or "String")
+                info.Value = TryGetValue(prop);
+            return info;
+        });
+    }
+
+    /// <inheritdoc/>
+    public async Task<RunStateSummary> GetRunStateSummaryAsync(string executionId,
+        string? threadId, int callStackIndex)
+    {
+        EnsureConnected();
+        return await Task.Run(() =>
+        {
+            NiSequenceContext ctx = ResolveThreadContext(executionId, threadId, callStackIndex);
+            NiPropertyObject ctxPo = (NiPropertyObject)(object)ctx.AsPropertyObject();
+            NiPropertyObject rs    = (NiPropertyObject)(object)ctxPo.GetPropertyObject("RunState", 0);
+
+            var s = new RunStateSummary();
+            // Position — from the typed SequenceContext (same reads proven in MapThreadInfo).
+            try { s.CurrentStepName     = (string)ctx.Step.Name;         } catch (Exception) { /* no current step */ }
+            try { s.CurrentSequenceName = (string)ctx.Sequence.Name;     } catch (Exception) { /* no sequence */ }
+            try { s.CurrentFilePath     = (string)ctx.SequenceFile.Path; } catch (Exception) { /* no file */ }
+
+            int    Num(string p) { try { return (int)Math.Round(rs.GetValNumber(p, 0)); } catch { return 0; } }
+            string Str(string p) { try { return rs.GetValString(p, 0); }                 catch { return ""; } }
+            bool   Bl (string p) { try { return rs.GetValBoolean(p, 0); }                catch { return false; } }
+
+            s.StepGroup         = Str("StepGroup");
+            s.StepIndex         = Num("StepIndex");
+            s.NextStepIndex     = Num("NextStepIndex");
+            s.PreviousStepIndex = Num("PreviousStepIndex");
+            s.CallStackDepth    = Num("CallStackDepth");
+            s.LoopIndex         = Num("LoopIndex");
+            s.NumStepsExecuted  = Num("NumStepsExecuted");
+            s.SequenceFailed    = Bl ("SequenceFailed");
+            s.GotoCleanup       = Bl ("GotoCleanup");
+            s.ErrorReported     = Bl ("ErrorReported");
+            s.ErrorCode         = Num("SequenceError.Code");
+            s.ErrorMessage      = Str("SequenceError.Msg");
+            s.ErrorOccurred     = Bl ("SequenceError.Occurred");
+            return s;
         });
     }
 
@@ -8669,68 +10106,84 @@ public sealed class TestStandService : ITestStandService
             var sf    = GetOrLoadSeqFile(filePath);
             var seq = sf.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
-            var step  = seq.GetStepByName(stepName, (object)sgVal);
+            var step  = ResolveStepInGroup(seq, sgVal, stepName);
 
             var result = new List<ModuleParameterInfo>();
+            NiPropertyObject stepPo = ((NiStep)(object)step).AsPropertyObject();
 
-            try
+            // 1) LabVIEW (G Flexible VI) connector-pane bindings: TS.SData.ViCall.Parms —
+            //    an ARRAY of VIParameter containers (Label/ArgVal/Direction, clusters nest
+            //    via ArrayClusterEls). 2) The same shape on utility steps that embed their VI
+            //    call at the step root (NI_LV_RunVIAsynchronously → VIModule.ViCall.Parms).
+            foreach (var parmsPath in new[] { "TS.SData.ViCall.Parms", "VIModule.ViCall.Parms" })
             {
-                NiPropertyObject stepPo = ((NiStep)(object)step).AsPropertyObject();
-                dynamic moduleParams;
                 try
                 {
-                    moduleParams = stepPo.GetPropertyObject("TS.Module.Parameters", 0);
+                    NiPropertyObject parms =
+                        (NiPropertyObject)(object)stepPo.GetPropertyObject(parmsPath, 0);
+                    CollectViCallParms(parms, "", result);
+                    if (result.Count > 0) return result;
                 }
-                catch
+                catch (Exception ex) { _logger.LogDebug(ex, "No VI parms at '{Path}'.", parmsPath); }
+            }
+
+            // 3) SequenceCall arguments: TS.SData.ActualArgs — named SequenceArgument
+            //    containers whose Expr is the bound expression (UseDef=true → default used).
+            try
+            {
+                NiPropertyObject args =
+                    (NiPropertyObject)(object)stepPo.GetPropertyObject("TS.SData.ActualArgs", 0);
+                int n = args.GetNumSubProperties("");
+                for (int i = 0; i < n; i++)
                 {
-                    moduleParams = stepPo.GetPropertyObject("Module.Parameters", 0);
+                    try
+                    {
+                        NiPropertyObject a = args.GetNthSubProperty("", i, 0);
+                        var pi = new ModuleParameterInfo
+                        {
+                            Name = a.Name,
+                            Type = "SequenceArgument",
+                        };
+                        try { pi.Value = a.GetValString("Expr", 0); } catch { }
+                        try
+                        {
+                            if (a.GetValBoolean("UseDef", 0) && string.IsNullOrEmpty(pi.Value))
+                                pi.Value = null; // default used, nothing bound
+                        }
+                        catch { }
+                        try { pi.DataType = a.GetTypeDisplayString("", 0); } catch { }
+                        result.Add(pi);
+                    }
+                    catch (Exception ex) { _logger.LogDebug(ex, "Failed to read ActualArgs entry {Index}.", i); }
                 }
+                if (result.Count > 0) return result;
+            }
+            catch (Exception ex) { _logger.LogDebug(ex, "No SequenceCall ActualArgs on step '{Step}'.", stepName); }
 
-                var mpObj  = (object)moduleParams;
-                var mpType = mpObj.GetType();
-                int count  = Convert.ToInt32(mpType.InvokeMember(
-                    "GetNumSubProperties", _comFlags, null, mpObj, new object[] { "" }));
+            // 4) Legacy adapters that expose a flat Module.Parameters container.
+            try
+            {
+                NiPropertyObject moduleParams;
+                try { moduleParams = (NiPropertyObject)(object)stepPo.GetPropertyObject("TS.Module.Parameters", 0); }
+                catch { moduleParams = (NiPropertyObject)(object)stepPo.GetPropertyObject("Module.Parameters", 0); }
 
+                int count = moduleParams.GetNumSubProperties("");
                 for (int i = 0; i < count; i++)
                 {
                     try
                     {
-                        // GetNthSubPropertyName returns the name; then GetPropertyObject gets the value
-                        string paramName = (string)mpType.InvokeMember(
-                            "GetNthSubPropertyName", _comFlags, null, mpObj,
-                            new object[] { "", i, 0 });
-                        dynamic param = mpType.InvokeMember(
-                            "GetPropertyObject", _comFlags, null, mpObj,
-                            new object[] { paramName, 0 });
-
-                        var pi = new ModuleParameterInfo
-                        {
-                            Name     = paramName,
-                            DataType = TryGetString(param, "TypeName"),
-                        };
-
+                        NiPropertyObject param = moduleParams.GetNthSubProperty("", i, 0);
+                        var pi = new ModuleParameterInfo { Name = param.Name };
+                        try { pi.DataType = param.GetTypeDisplayString("", 0); } catch { }
                         try
                         {
-                            var pObj   = (object)param;
-                            int flags2 = Convert.ToInt32(pObj.GetType().InvokeMember(
-                                "GetFlags", _comFlags, null, pObj, new object[] { "", 0 }));
+                            int flags2 = param.GetFlags("", 0);
                             pi.Direction = (flags2 & 4) != 0 ? "InOut"
                                          : (flags2 & 2) != 0 ? "Output"
                                          : "Input";
                         }
                         catch { pi.Direction = "Input"; }
-
-                        try { pi.Value = (string)param.GetValString("", (object)0); }
-                        catch
-                        {
-                            try { pi.Value = ((double)param.GetValNumber("", (object)0)).ToString(); }
-                            catch
-                            {
-                                try { pi.Value = ((bool)param.GetValBoolean("", (object)0)).ToString(); }
-                                catch (Exception ex) { _logger.LogDebug(ex, "Failed to read module parameter value as boolean."); }
-                            }
-                        }
-
+                        pi.Value = TryGetValue(param)?.ToString();
                         result.Add(pi);
                     }
                     catch (Exception ex) { _logger.LogDebug(ex, "Failed to read module parameter at index {Index}.", i); }
@@ -8740,6 +10193,81 @@ public sealed class TestStandService : ITestStandService
 
             return result;
         });
+    }
+
+    /// <summary>
+    /// Flattens a ViCall.Parms array (VIParameter entries) into ModuleParameterInfo rows.
+    /// Cluster members (ArrayClusterEls) recurse with a "parent.child" name so every
+    /// bindable slot is visible/addressable.
+    /// </summary>
+    private void CollectViCallParms(NiPropertyObject parms, string prefix,
+        List<ModuleParameterInfo> result)
+    {
+        int n = 0;
+        try { n = parms.GetNumElements(); } catch { return; }
+        for (int i = 0; i < n; i++)
+        {
+            try
+            {
+                NiPropertyObject p = parms.GetPropertyObjectByOffset(i, 0);
+                string label = "";
+                try { label = p.GetValString("Label", 0); } catch { }
+                string name = string.IsNullOrEmpty(prefix) ? label : prefix + "." + label;
+
+                var pi = new ModuleParameterInfo { Name = name, Type = "VIParameter" };
+                try { pi.Value = p.GetValString("ArgVal", 0); } catch { }
+                try { pi.DataType = p.GetValString("DisplayType", 0); } catch { }
+                try
+                {
+                    double dir = p.GetValNumber("Direction", 0);
+                    pi.Direction = dir >= 1 ? "Output" : "Input";
+                }
+                catch { pi.Direction = "Input"; }
+                result.Add(pi);
+
+                try
+                {
+                    NiPropertyObject els =
+                        (NiPropertyObject)(object)p.GetPropertyObject("ArrayClusterEls", 0);
+                    CollectViCallParms(els, name, result);
+                }
+                catch { /* scalar parameter — no cluster members */ }
+            }
+            catch (Exception ex) { _logger.LogDebug(ex, "Failed to read VI parm at index {Index}.", i); }
+        }
+    }
+
+    /// <summary>
+    /// Resolves a VIParameter entry in a ViCall.Parms array by its Label path — one segment
+    /// per nesting level ("error out", "status" descends into the cluster's ArrayClusterEls).
+    /// Returns null when no entry matches.
+    /// </summary>
+    private NiPropertyObject? FindViCallParm(NiPropertyObject parms, string[] labelPath)
+    {
+        if (labelPath.Length == 0) return null;
+        int n = 0;
+        try { n = parms.GetNumElements(); } catch { return null; }
+        for (int i = 0; i < n; i++)
+        {
+            NiPropertyObject p;
+            string label = "";
+            try
+            {
+                p = parms.GetPropertyObjectByOffset(i, 0);
+                try { label = p.GetValString("Label", 0); } catch { }
+            }
+            catch { continue; }
+            if (!string.Equals(label, labelPath[0], StringComparison.OrdinalIgnoreCase)) continue;
+            if (labelPath.Length == 1) return p;
+            try
+            {
+                NiPropertyObject els =
+                    (NiPropertyObject)(object)p.GetPropertyObject("ArrayClusterEls", 0);
+                return FindViCallParm(els, labelPath[1..]);
+            }
+            catch { return null; }
+        }
+        return null;
     }
 
     /// <inheritdoc/>
@@ -8753,38 +10281,98 @@ public sealed class TestStandService : ITestStandService
             var sf    = GetOrLoadSeqFile(filePath);
             var seq = sf.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
-            var step  = seq.GetStepByName(stepName, (object)sgVal);
+            var step  = ResolveStepInGroup(seq, sgVal, stepName);
 
             NiPropertyObject stepPo = ((NiStep)(object)step).AsPropertyObject();
-
-            string[] paramPaths = {
-                $"TS.Module.Parameters.{parameterName}",
-                $"Module.Parameters.{parameterName}"
-            };
-
             bool set = false;
-            foreach (var path in paramPaths)
+
+            // 1) LabVIEW connector-pane binding (TS.SData.ViCall.Parms or the step-root
+            //    VIModule.ViCall.Parms of utility steps): match by Label — nested cluster
+            //    members via "parent.child" (e.g. "error out.status"). Writes ArgVal and
+            //    clears UseDefaultValues so the binding takes effect.
+            foreach (var parmsPath in new[] { "TS.SData.ViCall.Parms", "VIModule.ViCall.Parms" })
             {
                 try
                 {
-                    if (useExpression)
+                    NiPropertyObject parms =
+                        (NiPropertyObject)(object)stepPo.GetPropertyObject(parmsPath, 0);
+                    NiPropertyObject? parm = FindViCallParm(parms, parameterName.Split('.'));
+                    if (parm != null)
                     {
-                        stepPo.SetValString(path, 0x8, value);
+                        parm.SetValString("ArgVal", 0, value);
+                        try { parm.SetValBoolean("UseDefaultValues", 0, string.IsNullOrEmpty(value)); }
+                        catch (Exception ex) { _logger.LogDebug(ex, "UseDefaultValues not settable on '{Param}'.", parameterName); }
+                        set = true;
+                        break;
                     }
-                    else
-                    {
-                        if (double.TryParse(value, System.Globalization.NumberStyles.Any,
-                            System.Globalization.CultureInfo.InvariantCulture, out double d))
-                            stepPo.SetValNumber(path, 0, d);
-                        else if (bool.TryParse(value, out bool b))
-                            stepPo.SetValBoolean(path, 0, b);
-                        else
-                            stepPo.SetValString(path, 0, value);
-                    }
-                    set = true;
-                    break;
                 }
-                catch (Exception ex) { _logger.LogDebug(ex, "Failed to set module parameter '{Param}' via path '{Path}' on step '{Step}'.", parameterName, path, stepName); }
+                catch (Exception ex) { _logger.LogDebug(ex, "No VI parms at '{Path}'.", parmsPath); }
+            }
+
+            // 2) SequenceCall argument (TS.SData.ActualArgs.<name>): bind the Expr and clear
+            //    UseDef. When the entry is missing, first try to materialise the WHOLE callee
+            //    prototype (editor "Load Prototype") so every parameter becomes a correctly-typed
+            //    SequenceArgument (right ParamType/ParamRepresentation/Flags, UseDef=True) and the
+            //    cached Prototype container is filled. Only if the target cannot be resolved
+            //    (headless / missing file) do we fall back to a bare on-demand entry.
+            if (!set)
+            {
+                try
+                {
+                    bool ArgExists(NiPropertyObject a)
+                    { try { a.GetPropertyObject(parameterName, 0); return true; } catch { return false; } }
+
+                    NiPropertyObject args =
+                        (NiPropertyObject)(object)stepPo.GetPropertyObject("TS.SData.ActualArgs", 0);
+                    if (!ArgExists(args))
+                    {
+                        TryLoadModulePrototype(((NiStep)(object)step).Module, stepName);
+                        args = (NiPropertyObject)(object)stepPo.GetPropertyObject("TS.SData.ActualArgs", 0);
+                    }
+                    if (!ArgExists(args))
+                        args.NewSubProperty(parameterName,
+                            (NiPropValueTypes)((int)NiPropValueTypes.PropValType_NamedType),
+                            false, "SequenceArgument", 0);
+                    NiPropertyObject arg =
+                        (NiPropertyObject)(object)args.GetPropertyObject(parameterName, 0);
+                    arg.SetValString("Expr", 0, value);
+                    try { arg.SetValBoolean("UseDef", 0, string.IsNullOrEmpty(value)); }
+                    catch (Exception ex) { _logger.LogDebug(ex, "UseDef not settable on '{Param}'.", parameterName); }
+                    set = true;
+                }
+                catch (Exception ex) { _logger.LogDebug(ex, "No SequenceCall ActualArgs on step '{Step}'.", stepName); }
+            }
+
+            // 3) Legacy flat Module.Parameters container.
+            if (!set)
+            {
+                string[] paramPaths = {
+                    $"TS.Module.Parameters.{parameterName}",
+                    $"Module.Parameters.{parameterName}"
+                };
+                foreach (var path in paramPaths)
+                {
+                    try
+                    {
+                        if (useExpression)
+                        {
+                            stepPo.SetValString(path, 0x8, value);
+                        }
+                        else
+                        {
+                            if (double.TryParse(value, System.Globalization.NumberStyles.Any,
+                                System.Globalization.CultureInfo.InvariantCulture, out double d))
+                                stepPo.SetValNumber(path, 0, d);
+                            else if (bool.TryParse(value, out bool b))
+                                stepPo.SetValBoolean(path, 0, b);
+                            else
+                                stepPo.SetValString(path, 0, value);
+                        }
+                        set = true;
+                        break;
+                    }
+                    catch (Exception ex) { _logger.LogDebug(ex, "Failed to set module parameter '{Param}' via path '{Path}' on step '{Step}'.", parameterName, path, stepName); }
+                }
             }
 
             if (!set)
@@ -8816,7 +10404,7 @@ public sealed class TestStandService : ITestStandService
             var seqFile = (NiSequenceFile)(object)GetOrLoadSeqFile(filePath);
             NiSequence seq = seqFile.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
-            NiStep step = seq.GetStepByName(stepName, (NiStepGroups)sgVal);
+            NiStep step = (NiStep)(object)ResolveStepInGroup(seq, sgVal, stepName);
             NiPropertyObject po = step.AsPropertyObject();
 
             // MessagePopup settings are TOP-LEVEL step properties (NOT under "TS.MessagePopup",
@@ -8869,7 +10457,7 @@ public sealed class TestStandService : ITestStandService
             var seqFile = (NiSequenceFile)(object)GetOrLoadSeqFile(filePath);
             NiSequence seq = seqFile.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
-            NiStep step = seq.GetStepByName(stepName, (NiStepGroups)sgVal);
+            NiStep step = (NiStep)(object)ResolveStepInGroup(seq, sgVal, stepName);
             NiPropertyObject po = step.AsPropertyObject();
 
             // A real PropertyLoader step (created with step type "NI_PropertyLoader") stores its
@@ -8917,7 +10505,7 @@ public sealed class TestStandService : ITestStandService
             var seqFile = (NiSequenceFile)(object)GetOrLoadSeqFile(filePath);
             NiSequence seq = seqFile.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
-            NiStep step = seq.GetStepByName(stepName, (NiStepGroups)sgVal);
+            NiStep step = (NiStep)(object)ResolveStepInGroup(seq, sgVal, stepName);
             NiPropertyObject po = step.AsPropertyObject();
 
             // Correct paths: NumericLimitTest stores limits under Limits.Low/High/Units
@@ -8961,7 +10549,7 @@ public sealed class TestStandService : ITestStandService
             var seqFile = (NiSequenceFile)(object)GetOrLoadSeqFile(filePath);
             NiSequence seq = seqFile.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
-            NiStep step = seq.GetStepByName(stepName, (NiStepGroups)sgVal);
+            NiStep step = (NiStep)(object)ResolveStepInGroup(seq, sgVal, stepName);
             NiPropertyObject po = step.AsPropertyObject();
 
             var result = new Dictionary<string, object?>();
@@ -9004,7 +10592,7 @@ public sealed class TestStandService : ITestStandService
             var seqFile = (NiSequenceFile)(object)GetOrLoadSeqFile(filePath);
             NiSequence seq = seqFile.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
-            NiStep step = seq.GetStepByName(stepName, (NiStepGroups)sgVal);
+            NiStep step = (NiStep)(object)ResolveStepInGroup(seq, sgVal, stepName);
             NiPropertyObject po = step.AsPropertyObject();
             // DataSource is the measurement expression for NumericLimitTest
             po.SetValString("DataSource", 0, expression);
@@ -9023,7 +10611,7 @@ public sealed class TestStandService : ITestStandService
             var seqFile = (NiSequenceFile)(object)GetOrLoadSeqFile(filePath);
             NiSequence seq = seqFile.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
-            NiStep step = seq.GetStepByName(stepName, (NiStepGroups)sgVal);
+            NiStep step = (NiStep)(object)ResolveStepInGroup(seq, sgVal, stepName);
             NiPropertyObject po = step.AsPropertyObject();
 
             // NI_Wait: WaitForTarget=0 selects the "wait a time interval" mode; TimeExpr holds the
@@ -9033,6 +10621,124 @@ public sealed class TestStandService : ITestStandService
             po.SetValString("TimeExpr", 0, timeExpression);
             SaveSequenceFileWithRetry(seqFile, filePath);
             _loadedSequenceFiles[filePath] = seqFile;
+        });
+    }
+
+    /// <inheritdoc/>
+    public async Task ConfigureWaitAsync(string filePath, string sequenceName,
+        string stepGroup, string stepName, string waitMode, string? expression = null,
+        string? timeoutExpr = null, bool? timeoutEnabled = null, bool? errorOnTimeout = null)
+    {
+        EnsureConnected();
+        await Task.Run(() =>
+        {
+            var seqFile = (NiSequenceFile)(object)GetOrLoadSeqFile(filePath);
+            NiSequence seq = seqFile.GetSequenceByName(sequenceName);
+            int sgVal = ParseStepGroup(stepGroup);
+            NiStep step = (NiStep)(object)ResolveStepInGroup(seq, sgVal, stepName);
+            NiPropertyObject po = step.AsPropertyObject();
+
+            // WaitForTarget selects what the NI_Wait waits on: 0 = time interval, 1 = execution,
+            // 2 = thread (verified against real files). Each mode reads a different expression prop.
+            var mode = (waitMode ?? "time").Trim().ToLowerInvariant();
+            (int target, string exprProp) = mode switch
+            {
+                "thread"           => (2, "ThreadRefExpr"),
+                "execution" or "exec" => (1, "ExecutionRefExpr"),
+                _                  => (0, "TimeExpr"),   // time interval
+            };
+            po.SetValNumber("WaitForTarget", 0, target);
+            if (expression != null)
+                po.SetValString(exprProp, 0, expression);
+
+            // A fresh NI_Wait can carry SpecifyBySeqCall=true / SeqCallStepGroupIdx=0, which would make
+            // it wait on a sequence-call step instead of the target we just set. Clear them so the
+            // explicit time/thread/execution target actually takes effect (and matches editor output).
+            try { po.SetValBoolean("SpecifyBySeqCall", 0, false); } catch (Exception ex) { _logger.LogDebug(ex, "No SpecifyBySeqCall on wait step '{Step}'.", stepName); }
+            try { po.SetValNumber("SeqCallStepGroupIdx", 0, -1); } catch (Exception ex) { _logger.LogDebug(ex, "No SeqCallStepGroupIdx on wait step '{Step}'.", stepName); }
+
+            if (timeoutExpr != null)
+                try { po.SetValString("TimeoutExpr", 0, timeoutExpr); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to set TimeoutExpr on wait step '{Step}'.", stepName); }
+            if (timeoutEnabled.HasValue)
+                try { po.SetValBoolean("TimeoutEnabled", 0, timeoutEnabled.Value); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to set TimeoutEnabled on wait step '{Step}'.", stepName); }
+            if (errorOnTimeout.HasValue)
+                try { po.SetValBoolean("ErrorOnTimeout", 0, errorOnTimeout.Value); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to set ErrorOnTimeout on wait step '{Step}'.", stepName); }
+
+            SaveSequenceFileWithRetry(seqFile, filePath);
+            _loadedSequenceFiles[filePath] = seqFile;
+        });
+    }
+
+    /// <inheritdoc/>
+    public async Task<Dictionary<string, object>> ConfigureRunViAsyncAsync(string filePath,
+        string sequenceName, string stepGroup, string stepName, string viPath,
+        string? viNamespace = null, int threadOption = 1, string? threadRefExpr = null,
+        bool autoWait = true, string sequenceNameExpr = "\"MainSequence\"",
+        string sequenceFileExpr = "Evaluate(Step.SequenceFileExpr)", bool save = true)
+    {
+        EnsureConnected();
+        return await Task.Run(() =>
+        {
+            var seqFile = (NiSequenceFile)(object)GetOrLoadSeqFile(filePath);
+            NiSequence seq = seqFile.GetSequenceByName(sequenceName);
+            int sgVal = ParseStepGroup(stepGroup);
+            NiStep step = (NiStep)(object)ResolveStepInGroup(seq, sgVal, stepName);
+            NiPropertyObject po = step.AsPropertyObject();
+            var applied = new Dictionary<string, object>();
+
+            // Build the async-launch module (TS.SData). An NI_LV_RunVIAsynchronously step inserts with a
+            // NoneStepAdditions module, but the real "Run VI Asynchronously" step drives the async launch
+            // through a Sequence-adapter SeqCallStepAdditions module (it calls "MainSequence" in a new
+            // thread to host the VI). Switching the adapter to get that module CORRUPTS the step (it turns
+            // into an Action and drops VIModule), so build the module by RETYPING the container directly —
+            // Engine.NewPropertyObject(PropValType_NamedType,"SeqCallStepAdditions") + SetPropertyObject.
+            string sdataType = "";
+            try { sdataType = ((NiPropertyObject)(object)po.GetPropertyObject("TS.SData", 0)).GetTypeDisplayString("", 0); }
+            catch (Exception ex) { _logger.LogDebug(ex, "Could not read TS.SData type on step '{Step}'.", stepName); }
+            if (!sdataType.StartsWith("SeqCallStepAdditions", StringComparison.Ordinal))
+            {
+                NiPropertyObject sdataNew = (NiPropertyObject)(object)_engine!.NewPropertyObject(
+                    NiPropValueTypes.PropValType_NamedType, false, "SeqCallStepAdditions", 0);
+                po.SetPropertyObject("TS.SData", 0, sdataNew);
+            }
+            applied["module"] = "SeqCallStepAdditions";
+
+            // Async-launch defaults (the "Run VI Asynchronously" template): launch "MainSequence" in a
+            // new thread, using the cached prototype, resolving the file/sequence by expression.
+            po.SetValString ("TS.SData.SFPathExpr",          0, sequenceFileExpr);
+            po.SetValString ("TS.SData.SeqNameExpr",         0, sequenceNameExpr);
+            po.SetValBoolean("TS.SData.SpecifyByExpr",       0, true);
+            po.SetValBoolean("TS.SData.UsePrototype",        0, true);
+            po.SetValNumber ("TS.SData.ThreadOpt",           0, threadOption);   // 1 = new thread
+            po.SetValBoolean("TS.SData.AutoWaitAsync",       0, autoWait);
+            // The async-VI step uses a plain "-1" affinity, not the SeqCall type default expression.
+            try { po.SetValString("TS.SData.CustomThreadAffinity", 0, "-1"); } catch (Exception ex) { _logger.LogDebug(ex, "Could not set CustomThreadAffinity on '{Step}'.", stepName); }
+            if (!string.IsNullOrEmpty(threadRefExpr))
+            {
+                po.SetValString("TS.SData.AsyncThreadExpr", 0, threadRefExpr);
+                applied["threadRefExpr"] = threadRefExpr!;
+            }
+            applied["threadOpt"] = threadOption;
+            applied["autoWait"]  = autoWait;
+
+            // The VI itself lives in the step-own VIModule.ViCall (independent of the launch module).
+            po.SetValString("VIModule.ViCall.VIPath", 0, viPath);
+            applied["viPath"] = viPath;
+            if (!string.IsNullOrEmpty(viNamespace))
+            {
+                po.SetValString("VIModule.ViCall.Namespace", 0, viNamespace);
+                applied["namespace"] = viNamespace!;
+            }
+
+            // The module-marker PropFlag (0x200000) TestStand puts on the VIModule container.
+            try { po.SetFlags("VIModule", 0, 0x200000); } catch (Exception ex) { _logger.LogDebug(ex, "Could not set VIModule flag on '{Step}'.", stepName); }
+
+            if (save)
+            {
+                SaveSequenceFileWithRetry(seqFile, filePath);
+                _loadedSequenceFiles[filePath] = seqFile;
+            }
+            return applied;
         });
     }
 
@@ -9047,7 +10753,7 @@ public sealed class TestStandService : ITestStandService
             var seqFile = (NiSequenceFile)(object)GetOrLoadSeqFile(filePath);
             NiSequence seq = seqFile.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
-            NiStep step = seq.GetStepByName(stepName, (NiStepGroups)sgVal);
+            NiStep step = (NiStep)(object)ResolveStepInGroup(seq, sgVal, stepName);
             NiPropertyObject po = step.AsPropertyObject();
 
             // StringValueTest: DataSource = expression being tested
@@ -9083,7 +10789,7 @@ public sealed class TestStandService : ITestStandService
             var sf    = GetOrLoadSeqFile(filePath);
             var seq = sf.GetSequenceByName(sequenceName);
             int sgVal = ParseStepGroup(stepGroup);
-            dynamic step = seq.GetStepByName(stepName, (object)sgVal);
+            dynamic step = ResolveStepInGroup(seq, sgVal, stepName);
 
             // TestStand API: Step.BreakOnStep (bool) sets a "break before" breakpoint.
             // For "After" we set it on the next step conceptually; TestStand's file-level
@@ -9155,7 +10861,7 @@ public sealed class TestStandService : ITestStandService
                                     System.Reflection.BindingFlags.GetProperty |
                                     System.Reflection.BindingFlags.Instance |
                                     System.Reflection.BindingFlags.Public,
-                                    null, s2Obj, null);
+                                    null, s2Obj, null)!;
                             }
                             catch
                             {

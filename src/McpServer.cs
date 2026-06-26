@@ -22,7 +22,6 @@ public class McpServer
     private readonly TestStandResourceProvider _resources;
     private readonly TestStandPromptProvider _prompts;
     private readonly ILogger<McpServer> _logger;
-    private bool _initialized;
     private readonly Queue<string> _commandHistory = new();
     private int _panelLinesWritten;
 
@@ -153,7 +152,6 @@ public class McpServer
 
     private InitializeResult HandleInitialize(JsonRpcRequest req)
     {
-        _initialized = true;
         _logger.LogInformation("Client initialized. Protocol: {Method}", req.Method);
         DrawCommandPanel();
         return new InitializeResult
