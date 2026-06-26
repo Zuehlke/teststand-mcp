@@ -206,6 +206,25 @@ public class TestStandToolRegistry
                     required: false),
             ValidateSequencePlanAsync);
 
+        Register("audit_sequence_references",
+            "POST-BUILD reference audit — reads the expressions ACTUALLY stored on a built " +
+            "sequence (ConditionExpr/ItemExpr/PreExpression/PostExpression/StatusExpression) and " +
+            "reports every Locals.X / Parameters.X / FileGlobals.X reference that is NOT declared " +
+            "in that sequence's locals/parameters (or the file globals). Unlike validate_sequence_plan " +
+            "— which only checks Locals refs present in the build PLAN and never sees conditions " +
+            "written afterwards via set_flow_condition — this reads the REAL sequence, so it catches " +
+            "dangling parameter/local refs introduced by EITHER path (e.g. an If condition referencing " +
+            "Parameters.X where X was never declared). Returns {valid, issueCount, issues[], stats{}}; " +
+            "each issue carries code E_UNDECLARED_LOCAL / E_UNDECLARED_PARAM / E_UNDECLARED_FILEGLOBAL " +
+            "plus the sequence, step, property and expression. Omit sequence_name to audit EVERY " +
+            "sequence in the file. Advisory and read-only — it reports, it never modifies. References " +
+            "under other scopes (StationGlobals, RunState.*, Step.*, etc.) are intentionally not audited.",
+            s => s
+                .AddRequired("file_path", "string", "Path to the sequence file")
+                .AddOptional("sequence_name", "string",
+                    "Sequence to audit. Omit to audit every sequence in the file."),
+            AuditSequenceReferencesAsync);
+
         Register("insert_local_variable",
             "Insert a new local variable into a sequence. data_type accepts the builtins " +
             "'string'/'number'/'boolean' OR the name of a custom data type / enum defined in the " +
@@ -2296,6 +2315,15 @@ public class TestStandToolRegistry
 
         var result = SequencePlanValidator.Validate(sequenceName, planSteps, localNames);
         return Task.FromResult(OkJson(result));
+    }
+
+    private async Task<CallToolResult> AuditSequenceReferencesAsync(JsonElement? args)
+    {
+        var filePath     = args!.Value.GetRequiredString("file_path");
+        var sequenceName = args!.Value.GetStringOrNull("sequence_name");
+        var data   = await _ts.ReadReferenceAuditDataAsync(filePath, sequenceName);
+        var result = ReferenceAuditor.Audit(data);
+        return OkJson(result);
     }
 
     private async Task<CallToolResult> InsertLocalVariableAsync(JsonElement? args)

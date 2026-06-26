@@ -289,6 +289,11 @@ public interface ITestStandService : IDisposable
         bool? passByReference = null);
     /// <summary>Deletes the specified local variable from the given sequence.</summary>
     Task DeleteLocalVariableAsync(string filePath, string sequenceName, string variableName);
+    /// <summary>Reads the expressions and declared scopes needed to audit Locals./Parameters./
+    /// FileGlobals. references in a built sequence. When <paramref name="sequenceName"/> is null
+    /// or empty, every sequence in the file is read. Pure COM read — the auditing itself is done
+    /// by the engine-free <c>TestStandMCP.Tools.ReferenceAuditor</c>.</summary>
+    Task<ReferenceAuditData> ReadReferenceAuditDataAsync(string filePath, string? sequenceName = null);
     /// <summary>Returns all step templates available in the specified sequence file.</summary>
     Task<List<StepTemplateInfo>> GetStepTemplatesAsync(string filePath);
     /// <summary>Inserts a step based on the named template into the specified sequence.</summary>
@@ -686,7 +691,6 @@ public sealed class TestStandService : ITestStandService
 {
     private readonly ILogger<TestStandService> _logger;
     private NiEngine? _engine;        // NationalInstruments.TestStand.Interop.API.Engine (coclass)
-    private dynamic? _engineMgr;      // EngineManager
     private bool _disposed;
 
     // Number of live TestStand engine instances across the whole process. Engine.ShutDown
@@ -1459,7 +1463,8 @@ public sealed class TestStandService : ITestStandService
                 while (exec != null && DateTime.UtcNow < deadline)
                 {
                     // ExecRunState: 1=Running, 2=Paused, 3=Stopped
-                    int runState = GetExecutionRunState((object)exec);
+                    // exec is guaranteed non-null by the enclosing `while (exec != null ...)`.
+                    int runState = GetExecutionRunState((object)exec!);
                     if (runState == 3) break; // Stopped = done
                     await Task.Delay(200);
                     exec = FindExecution(executionId);
@@ -3866,7 +3871,7 @@ public sealed class TestStandService : ITestStandService
                 try
                 {
                     dynamic prop = propType.InvokeMember("GetNthSubProperty",
-                        _comFlags, null, propObj, new object[] { "", i, 0 });
+                        _comFlags, null, propObj, new object[] { "", i, 0 })!;
 
                     // PropertyObject has no `TypeName` property — the human-readable type
                     // name comes from GetTypeDisplayString(lookupString, options).
@@ -3915,7 +3920,7 @@ public sealed class TestStandService : ITestStandService
         try
         {
             return (T)((object)_engine!).GetType().InvokeMember(
-                propName, _comFlags, null, _engine, null);
+                propName, _comFlags, null, _engine, null)!;
         }
         catch (Exception ex) { _logger.LogDebug(ex, "Failed to read engine property '{PropName}'.", propName); }
         return default;
@@ -4922,7 +4927,7 @@ public sealed class TestStandService : ITestStandService
                     string stepType = "";
                     string desc = "";
 
-                    try { name = (string)iType.InvokeMember("Name", _comFlags, null, item, null); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read template Name at index {Index}.", i); }
+                    try { name = iType.InvokeMember("Name", _comFlags, null, item, null)?.ToString() ?? ""; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read template Name at index {Index}.", i); }
 
                     // StepType: step.StepType is an object; get its Name property
                     try
@@ -4933,7 +4938,7 @@ public sealed class TestStandService : ITestStandService
                     }
                     catch (Exception ex) { _logger.LogDebug(ex, "Failed to read StepType for template '{Name}'.", name); }
 
-                    try { desc = (string)iType.InvokeMember("Description", _comFlags, null, item, null); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read Description for template '{Name}'.", name); }
+                    try { desc = iType.InvokeMember("Description", _comFlags, null, item, null)?.ToString() ?? ""; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read Description for template '{Name}'.", name); }
                     if (string.IsNullOrEmpty(desc))
                     {
                         try { desc = Convert.ToString(iType.InvokeMember("GetValString",
@@ -5121,6 +5126,93 @@ public sealed class TestStandService : ITestStandService
             var sf  = GetOrLoadSeqFile(filePath);
             var seq = sf.GetSequenceByName(sequenceName);
             return MapVariables(seq.Locals);
+        });
+    }
+
+    /// <inheritdoc/>
+    public async Task<ReferenceAuditData> ReadReferenceAuditDataAsync(string filePath, string? sequenceName = null)
+    {
+        EnsureConnected();
+        return await Task.Run(() =>
+        {
+            var sf   = GetOrLoadSeqFile(filePath);
+            var data = new ReferenceAuditData();
+
+            // File globals are file-level (shared by every sequence).
+            try { foreach (var v in MapVariables(GetFileGlobals(sf))) data.FileGlobals.Add(v.Name); }
+            catch (Exception ex) { _logger.LogDebug(ex, "Failed to read file globals for reference audit."); }
+
+            // Which sequences to audit: the named one, or every sequence in the file.
+            var seqNames = new List<string>();
+            if (!string.IsNullOrWhiteSpace(sequenceName))
+                seqNames.Add(sequenceName!);
+            else
+            {
+                int n = 0;
+                try { n = Convert.ToInt32((object)sf.NumSequences); }
+                catch (Exception ex) { _logger.LogDebug(ex, "Failed to read NumSequences for reference audit."); }
+                for (int i = 0; i < n; i++)
+                {
+                    try { seqNames.Add((string)sf.GetSequence(i).Name); }
+                    catch (Exception ex) { _logger.LogDebug(ex, "Failed to read sequence name at index {Index}.", i); }
+                }
+            }
+
+            string[] groupNames = { "Setup", "Main", "Cleanup" };
+            foreach (var sn in seqNames)
+            {
+                var seq = sf.GetSequenceByName(sn);
+
+                var scope = new DeclaredScope { SequenceName = sn };
+                try { foreach (var v in MapVariables(seq.Locals))     scope.Locals.Add(v.Name); }
+                catch (Exception ex) { _logger.LogDebug(ex, "Failed to read locals of '{Seq}'.", sn); }
+                try { foreach (var p in MapParameters(seq.Parameters)) scope.Parameters.Add(p.Name); }
+                catch (Exception ex) { _logger.LogDebug(ex, "Failed to read parameters of '{Seq}'.", sn); }
+                data.Scopes.Add(scope);
+
+                for (int g = 0; g <= 2; g++)
+                {
+                    int count;
+                    try { count = Convert.ToInt32((object)seq.GetNumSteps((NiStepGroups)g)); }
+                    catch (Exception ex) { _logger.LogDebug(ex, "Failed GetNumSteps group {Group} of '{Seq}'.", g, sn); continue; }
+
+                    for (int i = 0; i < count; i++)
+                    {
+                        object step;
+                        try { step = seq.GetStep(i, (NiStepGroups)g); }
+                        catch (Exception ex) { _logger.LogDebug(ex, "Failed GetStep {Index} group {Group} of '{Seq}'.", i, g, sn); continue; }
+
+                        string stepName = "";
+                        try { stepName = (string)((NiStep)step).Name; } catch { /* best-effort */ }
+
+                        NiPropertyObject po = ((NiStep)step).AsPropertyObject();
+                        string grpName = groupNames[g];
+
+                        void Collect(string prop, string? value)
+                        {
+                            if (!string.IsNullOrWhiteSpace(value))
+                                data.Expressions.Add(new ExpressionEntry
+                                {
+                                    SequenceName = sn,
+                                    StepGroup    = grpName,
+                                    StepName     = stepName,
+                                    Property     = prop,
+                                    Expression   = value!
+                                });
+                        }
+
+                        // Statement actions + Pre/Post/Status conditions live on these step properties;
+                        // branch conditions live in ConditionExpr (If/ElseIf/While/DoWhile) / ItemExpr
+                        // (Select/Case) — present only on flow steps, hence the per-read try/catch.
+                        try { Collect("PreExpression",    (string)((NiStep)step).PreExpression); }    catch { }
+                        try { Collect("PostExpression",   (string)((NiStep)step).PostExpression); }   catch { }
+                        try { Collect("StatusExpression", (string)((NiStep)step).StatusExpression); } catch { }
+                        try { Collect("ConditionExpr",    (string)po.GetValString("ConditionExpr", 0)); } catch { }
+                        try { Collect("ItemExpr",         (string)po.GetValString("ItemExpr", 0)); }      catch { }
+                    }
+                }
+            }
+            return data;
         });
     }
 
@@ -6501,10 +6593,10 @@ public sealed class TestStandService : ITestStandService
             {
                 try
                 {
-                    string fname = (string)tObj.GetType().InvokeMember(
-                        "GetNthSubPropertyName", _comFlags, null, tObj, new object[] { "", i, 0 });
+                    string fname = tObj.GetType().InvokeMember(
+                        "GetNthSubPropertyName", _comFlags, null, tObj, new object[] { "", i, 0 })?.ToString() ?? "";
                     dynamic fp = tObj.GetType().InvokeMember(
-                        "GetNthSubProperty", _comFlags, null, tObj, new object[] { "", i, 0 });
+                        "GetNthSubProperty", _comFlags, null, tObj, new object[] { "", i, 0 })!;
                     result.Add(new TypeFieldInfo { Name = fname, DataType = TryGetString(fp, "TypeName") });
                 }
                 catch (Exception ex) { _logger.LogDebug(ex, "Failed to read data type field at index {Index}.", i); }
@@ -6813,7 +6905,7 @@ public sealed class TestStandService : ITestStandService
                 try
                 {
                     dynamic prop = propType.InvokeMember("GetNthSubProperty",
-                        _comFlags, null, propObj, new object[] { "", i, 0 });
+                        _comFlags, null, propObj, new object[] { "", i, 0 })!;
                     var pi = new ParameterInfo
                     {
                         Name     = (string)prop.Name,
@@ -7415,7 +7507,7 @@ public sealed class TestStandService : ITestStandService
                 {
                     dynamic p = propObj.GetType().InvokeMember(
                         "GetNthSubProperty", _comFlags, null, propObj,
-                        new object[] { "", i, 0 });
+                        new object[] { "", i, 0 })!;
                     names.Add((string)p.Name);
                 }
                 catch (Exception ex) { _logger.LogDebug(ex, "Failed to read sub-property name at index {Index} in GetSubPropertyNames.", i); }
@@ -7900,7 +7992,7 @@ public sealed class TestStandService : ITestStandService
                             {
                                 dynamic v    = propObj.GetType().InvokeMember(
                                     "GetNthSubProperty", _comFlags, null, propObj,
-                                    new object[] { "", vi, 0 });
+                                    new object[] { "", vi, 0 })!;
                                 string vName = (string)v.Name;
                                 if (vName.IndexOf(pattern, comparison) >= 0)
                                 {
@@ -8696,12 +8788,12 @@ public sealed class TestStandService : ITestStandService
                     try
                     {
                         // GetNthSubPropertyName returns the name; then GetPropertyObject gets the value
-                        string paramName = (string)mpType.InvokeMember(
+                        string paramName = mpType.InvokeMember(
                             "GetNthSubPropertyName", _comFlags, null, mpObj,
-                            new object[] { "", i, 0 });
+                            new object[] { "", i, 0 })?.ToString() ?? "";
                         dynamic param = mpType.InvokeMember(
                             "GetPropertyObject", _comFlags, null, mpObj,
-                            new object[] { paramName, 0 });
+                            new object[] { paramName, 0 })!;
 
                         var pi = new ModuleParameterInfo
                         {
@@ -9155,7 +9247,7 @@ public sealed class TestStandService : ITestStandService
                                     System.Reflection.BindingFlags.GetProperty |
                                     System.Reflection.BindingFlags.Instance |
                                     System.Reflection.BindingFlags.Public,
-                                    null, s2Obj, null);
+                                    null, s2Obj, null)!;
                             }
                             catch
                             {
