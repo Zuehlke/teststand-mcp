@@ -691,7 +691,6 @@ public sealed class TestStandService : ITestStandService
 {
     private readonly ILogger<TestStandService> _logger;
     private NiEngine? _engine;        // NationalInstruments.TestStand.Interop.API.Engine (coclass)
-    private dynamic? _engineMgr;      // EngineManager
     private bool _disposed;
 
     // Number of live TestStand engine instances across the whole process. Engine.ShutDown
@@ -1464,7 +1463,8 @@ public sealed class TestStandService : ITestStandService
                 while (exec != null && DateTime.UtcNow < deadline)
                 {
                     // ExecRunState: 1=Running, 2=Paused, 3=Stopped
-                    int runState = GetExecutionRunState((object)exec);
+                    // exec is guaranteed non-null by the enclosing `while (exec != null ...)`.
+                    int runState = GetExecutionRunState((object)exec!);
                     if (runState == 3) break; // Stopped = done
                     await Task.Delay(200);
                     exec = FindExecution(executionId);
@@ -3871,7 +3871,7 @@ public sealed class TestStandService : ITestStandService
                 try
                 {
                     dynamic prop = propType.InvokeMember("GetNthSubProperty",
-                        _comFlags, null, propObj, new object[] { "", i, 0 });
+                        _comFlags, null, propObj, new object[] { "", i, 0 })!;
 
                     // PropertyObject has no `TypeName` property — the human-readable type
                     // name comes from GetTypeDisplayString(lookupString, options).
@@ -3920,7 +3920,7 @@ public sealed class TestStandService : ITestStandService
         try
         {
             return (T)((object)_engine!).GetType().InvokeMember(
-                propName, _comFlags, null, _engine, null);
+                propName, _comFlags, null, _engine, null)!;
         }
         catch (Exception ex) { _logger.LogDebug(ex, "Failed to read engine property '{PropName}'.", propName); }
         return default;
@@ -4927,7 +4927,7 @@ public sealed class TestStandService : ITestStandService
                     string stepType = "";
                     string desc = "";
 
-                    try { name = (string)iType.InvokeMember("Name", _comFlags, null, item, null); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read template Name at index {Index}.", i); }
+                    try { name = iType.InvokeMember("Name", _comFlags, null, item, null)?.ToString() ?? ""; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read template Name at index {Index}.", i); }
 
                     // StepType: step.StepType is an object; get its Name property
                     try
@@ -4938,7 +4938,7 @@ public sealed class TestStandService : ITestStandService
                     }
                     catch (Exception ex) { _logger.LogDebug(ex, "Failed to read StepType for template '{Name}'.", name); }
 
-                    try { desc = (string)iType.InvokeMember("Description", _comFlags, null, item, null); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read Description for template '{Name}'.", name); }
+                    try { desc = iType.InvokeMember("Description", _comFlags, null, item, null)?.ToString() ?? ""; } catch (Exception ex) { _logger.LogDebug(ex, "Failed to read Description for template '{Name}'.", name); }
                     if (string.IsNullOrEmpty(desc))
                     {
                         try { desc = Convert.ToString(iType.InvokeMember("GetValString",
@@ -6593,10 +6593,10 @@ public sealed class TestStandService : ITestStandService
             {
                 try
                 {
-                    string fname = (string)tObj.GetType().InvokeMember(
-                        "GetNthSubPropertyName", _comFlags, null, tObj, new object[] { "", i, 0 });
+                    string fname = tObj.GetType().InvokeMember(
+                        "GetNthSubPropertyName", _comFlags, null, tObj, new object[] { "", i, 0 })?.ToString() ?? "";
                     dynamic fp = tObj.GetType().InvokeMember(
-                        "GetNthSubProperty", _comFlags, null, tObj, new object[] { "", i, 0 });
+                        "GetNthSubProperty", _comFlags, null, tObj, new object[] { "", i, 0 })!;
                     result.Add(new TypeFieldInfo { Name = fname, DataType = TryGetString(fp, "TypeName") });
                 }
                 catch (Exception ex) { _logger.LogDebug(ex, "Failed to read data type field at index {Index}.", i); }
@@ -6905,7 +6905,7 @@ public sealed class TestStandService : ITestStandService
                 try
                 {
                     dynamic prop = propType.InvokeMember("GetNthSubProperty",
-                        _comFlags, null, propObj, new object[] { "", i, 0 });
+                        _comFlags, null, propObj, new object[] { "", i, 0 })!;
                     var pi = new ParameterInfo
                     {
                         Name     = (string)prop.Name,
@@ -7507,7 +7507,7 @@ public sealed class TestStandService : ITestStandService
                 {
                     dynamic p = propObj.GetType().InvokeMember(
                         "GetNthSubProperty", _comFlags, null, propObj,
-                        new object[] { "", i, 0 });
+                        new object[] { "", i, 0 })!;
                     names.Add((string)p.Name);
                 }
                 catch (Exception ex) { _logger.LogDebug(ex, "Failed to read sub-property name at index {Index} in GetSubPropertyNames.", i); }
@@ -7992,7 +7992,7 @@ public sealed class TestStandService : ITestStandService
                             {
                                 dynamic v    = propObj.GetType().InvokeMember(
                                     "GetNthSubProperty", _comFlags, null, propObj,
-                                    new object[] { "", vi, 0 });
+                                    new object[] { "", vi, 0 })!;
                                 string vName = (string)v.Name;
                                 if (vName.IndexOf(pattern, comparison) >= 0)
                                 {
@@ -8788,12 +8788,12 @@ public sealed class TestStandService : ITestStandService
                     try
                     {
                         // GetNthSubPropertyName returns the name; then GetPropertyObject gets the value
-                        string paramName = (string)mpType.InvokeMember(
+                        string paramName = mpType.InvokeMember(
                             "GetNthSubPropertyName", _comFlags, null, mpObj,
-                            new object[] { "", i, 0 });
+                            new object[] { "", i, 0 })?.ToString() ?? "";
                         dynamic param = mpType.InvokeMember(
                             "GetPropertyObject", _comFlags, null, mpObj,
-                            new object[] { paramName, 0 });
+                            new object[] { paramName, 0 })!;
 
                         var pi = new ModuleParameterInfo
                         {
@@ -9247,7 +9247,7 @@ public sealed class TestStandService : ITestStandService
                                     System.Reflection.BindingFlags.GetProperty |
                                     System.Reflection.BindingFlags.Instance |
                                     System.Reflection.BindingFlags.Public,
-                                    null, s2Obj, null);
+                                    null, s2Obj, null)!;
                             }
                             catch
                             {
