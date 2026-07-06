@@ -150,11 +150,14 @@ Write UTF-8 JSON to a temp folder (e.g. `$TEMP/tspres/<SeqName>.json`). Contract
 
 ### Phase 7 — Generate & verify
 ```
-py "<repo>/scripts/generate_teststand_presentation.py" "<data.json>" "<output.html>"
+py "<scripts>/generate_teststand_presentation.py" "<data.json>" "<output.html>"
 ```
-`<repo>` is this project's root (`scripts/generate_teststand_presentation.py`;
-it reads its sibling `scripts/presentation_template.html`). Run with the `py`
-launcher — plain `python` is not on PATH.
+`<scripts>` is the deployed scripts directory — get it from `get_engine_paths`
+→ `ScriptsDirectory` (an absolute path; the scripts ship next to the MCP server
+exe, so this works from ANY working directory). The script reads its sibling
+`presentation_template.html` from that same folder. If `ScriptsDirectory` is
+empty (older server / not deployed), fall back to `scripts/` under this
+project's root. Run with the `py` launcher — plain `python` is not on PATH.
 
 The script:
 - reconstructs the nested flowchart (loops as bordered boxes, If/Select as

@@ -79,6 +79,14 @@ internal class Program
         Console.Error.WriteLine($"{bgOn}  TestStand MCP: developed by {osc8}{url}{st}Zühlke{osc8}{st} Claude  {bgOff}");
         Console.Error.WriteLine();
 
+        // Explicit opt-in maintenance command — NEVER runs on the normal MCP serve path.
+        // Mirrors .claude\agents\link-agents.bat: junctions %USERPROFILE%\.claude\agents to
+        // the .claude\agents folder shipped next to this exe, so Claude Code sees the deployed
+        // agents user-wide. Meaningless under non-Claude hosts (Copilot etc.) that don't read
+        // ~/.claude/agents — which is exactly why it stays a deliberate manual step.
+        if (args.Contains("--setup-agents"))
+            return SetupAgents();
+
         // ── Configuration ─────────────────────────────────────────────────────
         var config = new ConfigurationBuilder()
             .SetBasePath(AppContext.BaseDirectory)
@@ -175,6 +183,76 @@ internal class Program
         Console.Error.Flush();
         TerminateProcess(GetCurrentProcess(), (uint)exitCode);
         return exitCode; // not reached
+    }
+
+    /// <summary>
+    /// Creates a directory junction %USERPROFILE%\.claude\agents → the .claude\agents folder
+    /// shipped next to this executable, mirroring .claude\agents\link-agents.bat so Claude Code
+    /// picks up the deployed agents user-wide. Junctions need no admin rights. Aborts (non-zero)
+    /// if the target already exists as a REAL directory, so a user's own agents are never clobbered.
+    /// Explicit opt-in only — this is never invoked on the MCP serve path.
+    /// </summary>
+    private static int SetupAgents()
+    {
+        string src  = Path.Combine(AppContext.BaseDirectory, ".claude", "agents")
+                          .TrimEnd(Path.DirectorySeparatorChar);
+        string link = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".claude", "agents");
+
+        Console.Error.WriteLine();
+        Console.Error.WriteLine($"  Junction : {link}");
+        Console.Error.WriteLine($"  Target   : {src}");
+        Console.Error.WriteLine();
+
+        if (!Directory.Exists(src))
+        {
+            Console.Error.WriteLine($"  [ERROR] Agents source folder not found: {src}");
+            return 1;
+        }
+
+        // Ensure the parent .claude directory exists
+        Directory.CreateDirectory(Path.GetDirectoryName(link)!);
+
+        // Handle an existing target
+        if (Directory.Exists(link))
+        {
+            bool isReparse = (new DirectoryInfo(link).Attributes & FileAttributes.ReparsePoint) != 0;
+            if (isReparse)
+            {
+                Console.Error.WriteLine("  Existing link found - removing and recreating...");
+                Directory.Delete(link, false); // removes only the junction, not the target contents
+            }
+            else
+            {
+                Console.Error.WriteLine($"  [ABORTED] \"{link}\" already exists as a real directory.");
+                Console.Error.WriteLine("            Please back up/remove its contents and run again.");
+                return 1;
+            }
+        }
+
+        // Create the junction via cmd's mklink /J (needs no admin rights; Directory.CreateSymbolicLink
+        // would create a symlink requiring privilege / Developer Mode).
+        var psi = new System.Diagnostics.ProcessStartInfo("cmd.exe", $"/c mklink /J \"{link}\" \"{src}\"")
+        {
+            UseShellExecute        = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError  = true
+        };
+        using var proc = System.Diagnostics.Process.Start(psi)!;
+        proc.StandardOutput.ReadToEnd();
+        string err = proc.StandardError.ReadToEnd();
+        proc.WaitForExit();
+
+        if (proc.ExitCode != 0)
+        {
+            Console.Error.WriteLine($"  [ERROR] Failed to create the junction. {err.Trim()}");
+            return 1;
+        }
+
+        Console.Error.WriteLine("  Done. All projects now use the agents from this folder.");
+        Console.Error.WriteLine();
+        return 0;
     }
 
     /// <summary>

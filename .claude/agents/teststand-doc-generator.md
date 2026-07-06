@@ -165,11 +165,14 @@ Contract (full reference in the script docstring):
 ### Phase 6 — Generate & verify
 
 ```
-py "<repo>/scripts/generate_teststand_doc.py" "<data.json>" "<output.docx>" --diagram-out "<temp>/<SeqName>_dependencies.png"
+py "<scripts>/generate_teststand_doc.py" "<data.json>" "<output.docx>" --diagram-out "<temp>/<SeqName>_dependencies.png"
 ```
 
-`<repo>` is this project's root (the script lives at
-`scripts/generate_teststand_doc.py`). The script:
+`<scripts>` is the deployed scripts directory — get it from
+`get_engine_paths` → `ScriptsDirectory` (an absolute path; the scripts ship
+next to the MCP server exe, so this works from ANY working directory). If that
+field is empty (older server / not deployed), fall back to `scripts/` under
+this project's root. The script: 
 
 - computes a layered dependency layout (entry sequences on top, external
   files as dashed nodes, recursion as a loop, call multiplicity as ×n),

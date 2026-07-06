@@ -1,7 +1,7 @@
 ---
 name: teststand-sequence-builder
-description: Converts a flowchart or test description into a well-structured TestStand sequence. For every step, interactively asks whether a SequenceCall should be linked in detail (target file + subsequence) or whether the step should be inserted as a plain placeholder (e.g. Statement) without any link. Use this agent whenever the user wants to start in TestStand from a flowchart, test description, spec, or use case, or explicitly says things like "build a sequence from a flowchart", "set up a test sequence", "generate steps from a description".
-tools: AskUserQuestion, Read, Glob, Grep, Bash, mcp__teststand__connect_engine, mcp__teststand__open_sequence_file, mcp__teststand__get_loaded_sequence_files, mcp__teststand__get_sequence, mcp__teststand__get_sequence_properties, mcp__teststand__set_sequence_properties, mcp__teststand__create_sequence_file, mcp__teststand__save_sequence_file, mcp__teststand__insert_sequence, mcp__teststand__insert_step, mcp__teststand__insert_steps_bulk, mcp__teststand__validate_sequence_plan, mcp__teststand__insert_step_from_template, mcp__teststand__set_step_comment, mcp__teststand__set_step_expression, mcp__teststand__set_sequence_call_target, mcp__teststand__set_step_module_path, mcp__teststand__rename_step, mcp__teststand__get_step_types, mcp__teststand__get_step_templates, mcp__teststand__change_step_adapter, mcp__teststand__get_steps, mcp__teststand__sequence_name_exists, mcp__teststand__step_name_exists, mcp__teststand__insert_local_variable, mcp__teststand__set_local_variable, mcp__teststand__get_workspace
+description: Converts a flowchart or test description into a well-structured TestStand sequence. For every step, interactively asks whether a SequenceCall should be linked in detail (target file + subsequence) or whether the step should be inserted as a plain placeholder (e.g. Statement) without any link. Applies whenever the user wants to start in TestStand from a flowchart, test description, spec, or use case, or explicitly says things like "build a sequence from a flowchart", "set up a test sequence", "generate steps from a description". ⚠ DO NOT run this via the Agent/Task tool — this workflow is INTERACTIVE (it calls AskUserQuestion per step for SequenceCall linking vs. placeholder), and AskUserQuestion is UNAVAILABLE to spawned subagents. If spawned, every linking question fails silently and all steps degrade to Statement placeholders. The orchestrator MUST open this file, read its workflow, and execute those steps DIRECTLY in the MAIN conversation thread — never delegate it to a subagent.
+tools: AskUserQuestion, Read, Glob, Grep, Bash, mcp__teststand__connect_engine, mcp__teststand__open_sequence_file, mcp__teststand__get_loaded_sequence_files, mcp__teststand__get_sequence, mcp__teststand__get_sequence_properties, mcp__teststand__set_sequence_properties, mcp__teststand__get_file_properties, mcp__teststand__set_file_properties, mcp__teststand__create_sequence_file, mcp__teststand__save_sequence_file, mcp__teststand__insert_sequence, mcp__teststand__insert_step, mcp__teststand__insert_steps_bulk, mcp__teststand__validate_sequence_plan, mcp__teststand__insert_step_from_template, mcp__teststand__set_step_comment, mcp__teststand__set_step_expression, mcp__teststand__set_sequence_call_target, mcp__teststand__set_step_module_path, mcp__teststand__rename_step, mcp__teststand__get_step_types, mcp__teststand__get_step_templates, mcp__teststand__change_step_adapter, mcp__teststand__get_steps, mcp__teststand__sequence_name_exists, mcp__teststand__step_name_exists, mcp__teststand__insert_local_variable, mcp__teststand__set_local_variable, mcp__teststand__get_workspace
 ---
 
 # TestStand Sequence Builder
@@ -79,6 +79,17 @@ carry unchanged into validation and build:
 - Confirm the target sequence with the user (name + file). If the file or
   sequence does not exist yet, create it (`create_sequence_file` /
   `insert_sequence`).
+- **Sequence-file comment (mandatory when a NEW file is created):** Whenever
+  this build creates the `.seq` file itself (`create_sequence_file` — not when
+  appending to an already-existing file), set a meaningful **file-level**
+  comment via `set_file_properties` → `comment`. This is the description of the
+  whole file (distinct from the per-sequence `Description` below) and is what
+  the doc/presentation generators show as the file description. Use 1–2
+  sentences in the user's language stating the file's overall purpose (derive it
+  from the flowchart title / test-spec heading). If the purpose is not obvious
+  from the input, ask the user once via `AskUserQuestion`. Keep the text ASCII —
+  file comments round-trip through Windows-1252, so `→ — • …` become `?` (use
+  `->`, `-`, `*`, `...`); umlauts survive.
 - **Sequence-level comment (mandatory):** Right after the sequence is
   inserted, set a meaningful description on the sequence itself via
   `set_sequence_properties` → `Description`. The comment should briefly
@@ -322,9 +333,11 @@ back to Phase 2/3, re-validate, and review again.
 
 Write the approved plan to TestStand, in this order:
 
-1. `set_sequence_properties` → `Description` (if not already set in Phase 0).
-2. `insert_local_variable` for each entry in `plan.locals`.
-3. **`insert_steps_bulk`** with `plan.steps` — one call, file saved once.
+1. `set_file_properties` → `comment` for a newly created `.seq` file (if not
+   already set in Phase 0).
+2. `set_sequence_properties` → `Description` (if not already set in Phase 0).
+3. `insert_local_variable` for each entry in `plan.locals`.
+4. **`insert_steps_bulk`** with `plan.steps` — one call, file saved once.
 
 Trust the returned `BulkInsertResult` (`insertedCount`, `expressionsSet`,
 `targetsSet`, `warnings`) — **do not** read back with `get_steps` (token rule).

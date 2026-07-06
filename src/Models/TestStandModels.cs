@@ -820,6 +820,12 @@ public class EnginePaths
     public string StationId { get; set; } = "";
     /// <summary>Host computer name.</summary>
     public string ComputerName { get; set; } = "";
+    /// <summary>Directory of the running MCP server executable (AppContext.BaseDirectory).</summary>
+    public string McpServerDirectory { get; set; } = "";
+    /// <summary>Deployed Python helper-scripts directory (McpServerDirectory\scripts), shipped
+    /// next to the exe. Agents use this absolute path instead of a working-directory-relative
+    /// "&lt;repo&gt;\scripts" guess, so they work from any project. Empty if the folder is missing.</summary>
+    public string ScriptsDirectory { get; set; } = "";
 }
 
 /// <summary>Selected engine/station option flags.</summary>
