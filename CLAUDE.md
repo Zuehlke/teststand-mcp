@@ -18,6 +18,66 @@ main-conversation UI). Therefore:
   those steps yourself in the main thread — so the per-step `AskUserQuestion`
   linking prompts actually reach the user.
 
+## Documenting sequence files (teststand-doc-generator)
+
+The `teststand-doc-generator` agent turns a `.seq` file into a modern Word
+documentation: title + short file description, real Word TOC, one section per
+sequence (description, parameter table with By Value / By Reference, compact
+flow-indented step listing with the Setup/Main/Cleanup groups preserved and
+each step's original TestStand icon tinted monochrome in the document accent
+color), and a rendered diagram of the call dependencies between the sequences.
+
+- **Unlike the builder, this agent MAY (and should) be spawned as a subagent**
+  via the Agent tool — it is non-interactive and strictly READ-ONLY toward
+  TestStand.
+- **Ask the document language FIRST — in the MAIN thread.** Before spawning
+  the agent, ask the user via `AskUserQuestion` which language the
+  documentation should be written in (offer at least Deutsch / English, with
+  the language of the user's request as the recommended first option; "Other"
+  free text covers further languages). The subagent cannot ask —
+  `AskUserQuestion` does not work in subagents. Skip the question only when
+  the user already stated the language in their request.
+- Pass in the task prompt: the `.seq` path (required), the document language
+  (from the question above; `de`/`en` built in, other languages via the
+  script's `labels` override), optionally output `.docx` path and custom title.
+- The heavy lifting is deterministic: `scripts/generate_teststand_doc.py`
+  (data JSON → dependency diagram via headless Edge/Chrome → .docx via
+  python-docx; run with the `py` launcher — plain `python` is not on PATH).
+  The agent only collects data via the read-only MCP tools and runs the script.
+
+## Presenting sequence files (teststand-presentation-generator)
+
+The `teststand-presentation-generator` agent turns a `.seq` file into a modern,
+interactive **HTML presentation** (dark glassmorphism single-page app): a header
+with the sequence/source, Setup/Main/Cleanup phase cards, clickable subsequences
+that open a detail overlay, and a "Code & Flowchart" compare view. The flowchart
+nodes use the **original TestStand step icons in full color** (pulled from the
+local install) and reconstruct loops (While/For/…) and branches (If/Select/Case)
+as nested blocks. Output is ONE **self-contained `.html`** (icons embedded as
+base64) — shareable as a single file. It is the visual counterpart to the
+`teststand-doc-generator` (Word). Modelled on `.Demo_jcm/TSmcp_demo/index.html`,
+but **without** the QR code / NI-Gold-Partner image.
+
+- **MAY (and should) be spawned as a subagent** via the Agent tool — non-interactive
+  and strictly READ-ONLY toward TestStand.
+- **Ask the presentation language FIRST — in the MAIN thread** (same rule as the
+  doc-generator: `AskUserQuestion` does not work in subagents). `de`/`en` built in.
+- Pass in the task prompt: the `.seq` path (required), the language, optionally the
+  output `.html` path and a custom title.
+- **No live SeqEdit screenshots.** TestStand 2026's Sequence Editor renders its UI
+  with embedded Chromium (CEF) → opaque to Windows UI automation, so per-sequence
+  screenshots cannot be captured reliably/automatically (see memory
+  `teststand-seqedit-cef-no-automation`). The compare view's right pane is a
+  **rendered TestStand-style step listing** (real icons, flow indentation,
+  Setup/Main/Cleanup groups) built from the data — always works, needs no editor.
+  If someone supplies a folder of manually-captured PNGs + `_manifest.json`, the
+  generator can embed them via the optional `--shots-dir`.
+- The heavy lifting is deterministic:
+  `scripts/generate_teststand_presentation.py` (data JSON + `scripts/presentation_template.html`
+  → self-contained `.html`; real icons via Pillow from `…\National Instruments\TestStand*\Components`;
+  run with the `py` launcher). No headless browser needed (unlike the doc-generator).
+  The agent only collects data via the read-only MCP tools and runs the script.
+
 ## Sequence Design Rules
 
 ### Flow Control: If/Else always with NI_Flow_* Step Types
@@ -161,8 +221,25 @@ descriptions; the cross-cutting rules below apply regardless of which tool you c
 ### Properties & variables
 - `set_property_value` with **`sequence_name=null` → FileGlobals**; with a sequence
   name → that sequence's **Locals**. (`T20`.)
+- **To set a STEP's own property, use `set_step_property`** (dotted path relative to the
+  step, e.g. `VIModule.ViCall.VIPath`, `PortNumber`). `set_property_value`/`set_property`
+  only reach Globals/Locals, never a step; the `configure_*_module` tools only reach the
+  adapter module (and `configure_labview_module` switches the adapter — wrong for None-adapter
+  utility steps like `NI_LV_RunVIAsynchronously`; since 2026-07 it **refuses** those steps with
+  a clear error instead of corrupting them). `set_step_property` writes the step property
+  directly and leaves the adapter untouched. Path must already exist. (`T30`.)
 - **Containers:** create with `value_type="container"`, then set nested members via a
   dotted path, e.g. `"MyCont.Inner"`. `delete_sub_property` removes a global/subproperty. (`T20`.)
+- **Typed params & typed nested Locals members:** `insert_sequence_parameter` accepts enum /
+  `reference` / `container` / array types (`name[]`) — same contract as `insert_local_variable`,
+  NO silent String fallback. To build a nested typed member inside a container Local, call
+  `insert_local_variable` with a **dotted path** (`"MyCont.Sub.Field"`, data_type = enum/named/
+  builtin) parent-before-child. (`T33`.)
+- **Setting an ENUM value:** `set_property_value(value_type="number", value=<n>)` and
+  `set_local_variable` now write an enum instance by its numeric value (the server coerces via
+  `PropOption_CoerceToEnum`) and **preserve** the enum type — a plain set otherwise throws
+  "Expected type X. Found type Number/String". Param default enum values are NOT reachable this
+  way (value tools target Locals/FileGlobals, never a sequence's Parameters). (`T33`.)
 - **A step's "comment" IS its `Description`** — `set_step_comment` writes the field
   that reads back as `Description`. (`T04`, `TestDataBuilder`.)
 - **Numeric limits:** `get_numeric_limits` returns the public contract keys
@@ -178,6 +255,47 @@ descriptions; the cross-cutting rules below apply regardless of which tool you c
 - **Undo/redo is not auto-recorded** by the headless API (it's a Sequence Editor
   feature). `CanUndo` is false on a fresh file; MCP edits won't be undoable. Revert by
   performing the inverse operation explicitly. (`T08`.)
+- **LabVIEW `ViCall` prototypes don't materialize headless.** A step's VI is in a `.lvlibp`
+  that can't load without LabVIEW, so the connector-pane (`ViCall.Parms`) stays empty, Namespace/
+  VI Description/Connector-Pane-Checksum are blank/`-1`, and `set_module_parameter` cannot bind
+  (nothing to match by Label). Expected — configure the VI path via `configure_labview_module`
+  and accept the empty prototype.
+- **The engine connection auto-reconnects.** If the MCP host restarts the server mid-session,
+  `EnsureConnected` does a one-shot lazy reconnect (default engine path) before failing; mutating
+  tools also auto-load their file on demand. So a transient "Not connected" self-heals on the next
+  call — no manual `connect_engine` needed (though it's still harmless).
+
+### 1:1 file rebuild fidelity ceilings (`T33`; see memory `teststand-1to1-rebuild-fidelity`)
+- **FileDiffer `[val]` vs `{val}`** = an explicitly-set value vs the type-default flag. Enum
+  defaults written via the tools show `{val}`; editor-authored originals show `[val]` — so they
+  still diff even when the numeric value is IDENTICAL. Treat as cosmetic.
+- **Duplicate step names** (multiple `End`/`If`/`Check…`): the by-name step-config tools hit the
+  FIRST match only. To configure the 2nd+ occurrence, temporarily give it a unique name, configure,
+  then `rename_step` back (rename allows a duplicate target name).
+- **Not tool-reachable (accept as residual):** number Representation (UInt64) / NumberFormat,
+  PropFlags on Locals/Globals/Params members, a Parameter's default value / comment / nested
+  container members, and embedding unused type definitions.
+
+### Live thread-context inspection (runtime debugging)
+Reading a **running/paused** thread's RUNTIME state (live variable values, the RunState
+execution cursor) needs the thread-context tools — NOT `get_property_tree` /
+`evaluate_expression`, which resolve against engine Globals and never see the thread scope
+(`get_local_variables` likewise returns the static file default, not the live value). The
+access path is `Thread.GetSequenceContext(frame).AsPropertyObject()` == the ThisContext tree
+(`Locals`/`Parameters`/`FileGlobals`/`RunState`/`Step`/`Sequence`). Tools (`T29`):
+- `inspect_thread_context` — dump a frame's live tree; `scope` = `runstate` (default) /
+  `locals` / `parameters` / `step` / `sequence` / `full`, `lookup_string` to descend,
+  `call_stack_index` for a caller frame (0 = current/innermost).
+- `evaluate_in_thread_context` — evaluate any expression in the live frame scope
+  (`Locals.X`, `RunState.NextStepIndex`, `Locals.C * 2`) — the scope `evaluate_expression`
+  cannot reach.
+- `get_runtime_variable` / `set_runtime_variable` — typed read / write of one path.
+  Writing `RunState.NextStepIndex` is the "Set Next Step" action; patch `Locals.X` before
+  resuming; clear `RunState.SequenceError`/`GotoCleanup`. Only meaningful while PAUSED/parked.
+- `get_runstate_summary` — curated flat snapshot (position + cursor + flags + SequenceError).
+- **The thread must be executing inside a sequence.** No active frame → `InvalidOperationException`;
+  bad `call_stack_index` → `ArgumentOutOfRangeException`; unknown execution → `KeyNotFoundException`.
+  A MessagePopup parks a thread headless (Running) — the deterministic way to hold a frame open.
 
 ### Step-type / enum specifics
 - **`UseStepUnloadOption` (module unload, value 5) is only valid at file/model level —
@@ -215,11 +333,53 @@ max+1. (`T22`.)
 
 ### Pre-build validation
 - `validate_sequence_plan` is engine-free; run it on the exact `steps` array before
-  `insert_steps_bulk`. Error codes: `E_UNCLOSED_BLOCK`, `E_UNMATCHED_END`,
-  `E_ELSE_WITHOUT_IF`, `E_JUMP_OUTSIDE_LOOP`, `E_FORBIDDEN_TYPE` (Goto/Label),
-  `E_UNDECLARED_LOCAL`, `E_DUP_NAME`. Warnings (advisory only): `W_UNLINKED_CALLS`
-  (unlinked `SequenceCall` placeholders are fine), `W_UNUSED_LOCAL`. Build only when
-  `valid==true`. (`T10`.)
+  `insert_steps_bulk` (pass the planned `locals` AND `parameters`). Error codes:
+  `E_UNCLOSED_BLOCK`, `E_UNMATCHED_END`, `E_ELSE_WITHOUT_IF`, `E_JUMP_OUTSIDE_LOOP`,
+  `E_FORBIDDEN_TYPE` (Goto/Label), `E_UNDECLARED_LOCAL`, `E_UNDECLARED_PARAM` (only when a
+  `parameters` list is supplied), `E_DUP_NAME`. Warnings (advisory only): `W_UNLINKED_CALLS`
+  (unlinked `SequenceCall` placeholders are fine), `W_UNUSED_LOCAL`, and
+  `W_UNKNOWN_TYPE` (a step type outside the builtin whitelist — installed custom
+  types like `NI_LV_RunVIAsynchronously` insert fine, so this never blocks a build).
+  Build only when `valid==true`. (`T10`, `T31`.)
+
+### Authoring-complete step editing (1:1 file rebuilds; `T31`/`T32`)
+- **`create_step_property`** creates NEW subproperties on a step by dotted path:
+  `number`/`boolean`/`string`/`container`/`reference` (Object Reference), `named_type`
+  (+`type_name`, e.g. `SequenceArgument`, `ErrorDialogOptions`, `Error`), and
+  `array_elements` (+`num_elements`) which creates/resizes typed arrays — elements are
+  instantiated with the array's ELEMENT type (authors `TS.SData.ViCall.Parms`,
+  `…Parms[i].ArrayClusterEls`, `TS.AdditionalResultsHints`, `Result.TimeoutOccurred`).
+  Named types resolve engine-wide (fallback `Engine.NewPropertyObject` +
+  `SetPropertyObject(PropOption_InsertIfMissing)`); requesting a named type on an
+  existing node of a DIFFERENT type RETYPES it in place. Idempotent otherwise.
+- **`set_step_property_flags`** sets raw PropFlags (SetFlags) on any step property —
+  e.g. `0x4` PassByReference on Prototype members, `0x200000` module marker.
+- **`rename_step_property`** sets a step property's NAME (PropertyObject.Name).
+  **Array elements can be NAMED** — ViCall.Parms entries carry the connector-pane label
+  as their element name, the editor/FileDiffer display them as `[i] Name` and **pair
+  array elements BY that name**. `create_step_property(array_elements)` creates elements
+  unnamed → always set each element's name afterwards, or the differ shows the whole
+  array as same-named Delete/Insert pairs despite identical content. `get_property_tree`
+  reports element names via the node's `elementName` field.
+- `set_step_property`/`create_step_property` accept `unescape:true` to decode
+  `\r \n \t \\ \uXXXX` — the only way to write bare control chars (VIDescriptions with CR).
+- `insert_file_global`/`insert_local_variable` accept `'reference'` (Object Reference)
+  and named custom types; there is NO silent String fallback anymore.
+- `set_module_parameter` binds LabVIEW connector-pane parms by Label (`'error out.status'`
+  descends into clusters; writes ArgVal + clears UseDefaultValues) and, for SequenceCall,
+  binds `ActualArgs.<name>.Expr` + clears that arg's `UseDef`.
+  `get_module_parameters` reads ViCall.Parms / VIModule.ViCall.Parms / ActualArgs.
+- **SequenceCall prototype auto-load:** setting a SeqCall target (`configure_sequence_call_module`,
+  `set_sequence_call_target`, `insert_steps_bulk`) — and `set_module_parameter` when the named arg
+  is missing — now calls `Module.LoadPrototype(0)` (the engine's "Load Prototype"). When the target
+  RESOLVES, `TS.SData.ActualArgs` gets one correctly-typed `SequenceArgument` per callee parameter
+  (real `ParamType`/`ParamRepresentation`/`Flags`) plus the cached `Prototype` container; the helper
+  then enforces `UseDef ⇔ empty Expr` (unbound args `UseDef=True`, bound `False`) — matching a genuine
+  call for the FileDiffer. Unresolvable targets (unlinked placeholder / missing file / not-yet-loaded)
+  skip silently and fall back to a bare on-demand entry. So the target file must be loadable (loaded
+  or on the search path) for the full prototype to materialise headless.
+- With element names mirrored, a full tool-driven rebuild of TFW_DemoModule.seq
+  diffs **identical (0 differences)** against the original (`T32`).
 
 ### Post-build validation (reference audit)
 - `audit_sequence_references` reads the ACTUAL built sequence — `ConditionExpr` / `ItemExpr` /
@@ -230,11 +390,13 @@ max+1. (`T22`.)
   `sequence_name` to audit every sequence in the file. Read-only/advisory — it reports, it never
   modifies. Other scopes (`StationGlobals`, `RunState.*`, `Step.*`) are intentionally not audited.
 - **Run it AFTER building** and after any `set_flow_condition` / `set_step_expression`. It is the
-  complement to `validate_sequence_plan`, which (pre-build) only checks `Locals.X` in the build
-  PLAN — it never sees `Parameters.X` refs, nor conditions written later via `set_flow_condition`
-  (those land in `ConditionExpr`/`ItemExpr`, outside the plan). The audit reads the real sequence,
-  so it catches BOTH paths. (`T28`; pure logic in `ReferenceAuditor`.)
+  complement to `validate_sequence_plan`, which (pre-build) checks `Locals.X` in the build PLAN and
+  — since 2026-07 — also `Parameters.X` **when you pass a `parameters` list** (`E_UNDECLARED_PARAM`;
+  omit the list to keep the old locals-only behaviour). What the pre-build validator still cannot see
+  are conditions written LATER via `set_flow_condition`/`set_step_expression` (those land in
+  `ConditionExpr`/`ItemExpr`, outside the plan). The audit reads the real sequence, so it catches
+  BOTH paths. (`T28`; pure logic in `ReferenceAuditor`.)
 - **Therefore, while building, declare every `Locals.X` AND `Parameters.X` you reference**
-  (`insert_local_variable` / `insert_sequence_parameter`) — do not rely on the pre-build validator
-  to catch a missing `Parameters`. A parameter written inside a sub-sequence and read back by the
-  caller must be passed **by reference** (`pass_by_reference:true`).
+  (`insert_local_variable` / `insert_sequence_parameter`) and pass the planned `parameters` to
+  `validate_sequence_plan` so it catches a missing `Parameters`. A parameter written inside a
+  sub-sequence and read back by the caller must be passed **by reference** (`pass_by_reference:true`).

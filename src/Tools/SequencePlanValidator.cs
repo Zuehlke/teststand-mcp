@@ -58,6 +58,8 @@ public class PlanValidationStats
     public int UnlinkedSequenceCalls { get; set; }
     /// <summary>Number of declared local variables.</summary>
     public int LocalsDeclared { get; set; }
+    /// <summary>Number of declared parameters.</summary>
+    public int ParamsDeclared { get; set; }
     /// <summary>Maximum flow-block nesting depth.</summary>
     public int MaxNestingDepth { get; set; }
 }
@@ -117,6 +119,9 @@ public static class SequencePlanValidator
     private static readonly Regex LocalRef =
         new(@"Locals\.([A-Za-z_][A-Za-z0-9_]*)", RegexOptions.Compiled);
 
+    private static readonly Regex ParamRef =
+        new(@"Parameters\.([A-Za-z_][A-Za-z0-9_]*)", RegexOptions.Compiled);
+
     private sealed class Block
     {
         public string Type { get; init; } = "";
@@ -127,7 +132,8 @@ public static class SequencePlanValidator
 
     /// <summary>Validates a build plan and returns its issues and statistics.</summary>
     public static PlanValidationResult Validate(
-        string sequenceName, IReadOnlyList<PlanStepInput> steps, IReadOnlyList<string> localNames)
+        string sequenceName, IReadOnlyList<PlanStepInput> steps, IReadOnlyList<string> localNames,
+        IReadOnlyList<string>? paramNames = null)
     {
         var r = new PlanValidationResult();
         void Err(string code, string msg, int? idx = null, string? name = null) =>
@@ -139,7 +145,9 @@ public static class SequencePlanValidator
             Err("E_NO_SEQUENCE", "Plan has no sequenceName.");
 
         var locals = new HashSet<string>(localNames ?? Array.Empty<string>(), StringComparer.OrdinalIgnoreCase);
+        var parameters = new HashSet<string>(paramNames ?? Array.Empty<string>(), StringComparer.OrdinalIgnoreCase);
         r.Stats.LocalsDeclared = locals.Count;
+        r.Stats.ParamsDeclared = parameters.Count;
         r.Stats.StepCount = steps?.Count ?? 0;
 
         if (steps == null || steps.Count == 0)
@@ -152,6 +160,7 @@ public static class SequencePlanValidator
         var seenNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var stack = new Stack<Block>();
         var referencedLocals = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var referencedParams = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         int unlinkedSequenceCalls = 0;
 
         for (int i = 0; i < steps.Count; i++)
@@ -170,7 +179,12 @@ public static class SequencePlanValidator
             if (Forbidden.Contains(type))
                 Err("E_FORBIDDEN_TYPE", $"Step type '{type}' is forbidden (CLAUDE.md). Use NI_Flow_* constructs instead.", i, label);
             else if (!IsKnownType(type))
-                Err("E_UNKNOWN_TYPE", $"Unknown step type '{type}'.", i, label);
+                // Advisory only: the validator is engine-free, so it cannot know every INSTALLED
+                // step type (custom types, utility types like NI_LV_RunVIAsynchronously). The
+                // insert tools accept any registered type — an unknown name here may simply be
+                // outside the builtin whitelist, so it must not block the build.
+                Warn("W_UNKNOWN_TYPE", $"Step type '{type}' is not in the builtin whitelist — " +
+                    "verify it is an installed step type (insert will fail otherwise).", i, label);
 
             // Category stats
             if (IsFlowType(type)) r.Stats.FlowSteps++;
@@ -182,16 +196,26 @@ public static class SequencePlanValidator
                 string.IsNullOrWhiteSpace(s.TargetSequenceName))
                 unlinkedSequenceCalls++;
 
-            // Collect Locals.X references from the condition/expression
+            // Collect Locals.X / Parameters.X references from the condition/expression
             if (!string.IsNullOrEmpty(s.Expression))
+            {
                 foreach (Match m in LocalRef.Matches(s.Expression))
                     referencedLocals.Add(m.Groups[1].Value);
+                foreach (Match m in ParamRef.Matches(s.Expression))
+                    referencedParams.Add(m.Groups[1].Value);
+            }
 
             // ── Flow structure bookkeeping ───────────────────────────────────
             if (Openers.Contains(type))
             {
                 if (ConditionBearing.Contains(type) && string.IsNullOrWhiteSpace(s.Expression))
                     Warn("W_NO_CONDITION", $"{type} '{label}' has no condition expression — TestStand will use its default.", i, label);
+                // A counted For loop needs its loop-continue test (ConditionExpr). Empty here is only OK
+                // if it is configured afterwards (configure_for_loop / set_step_property). Advisory.
+                if (type.Equals("NI_Flow_For", StringComparison.OrdinalIgnoreCase) && string.IsNullOrWhiteSpace(s.Expression))
+                    Warn("W_FOR_NO_CONDITION",
+                        $"NI_Flow_For '{label}' has no loop-continue test — set 'expression' (+ init_expr/increment_expr) " +
+                        "or configure it later via configure_for_loop.", i, label);
                 stack.Push(new Block { Type = type, Name = name, Index = i });
                 if (stack.Count > r.Stats.MaxNestingDepth) r.Stats.MaxNestingDepth = stack.Count;
             }
@@ -256,6 +280,14 @@ public static class SequencePlanValidator
         foreach (var refName in referencedLocals)
             if (!locals.Contains(refName))
                 Err("E_UNDECLARED_LOCAL", $"Expression references Locals.{refName}, which is not declared in the plan's locals.");
+
+        // Parameters referenced in expressions but not declared. Only enforced when the caller
+        // supplies the parameter list — the pre-build validator never saw Parameters refs before,
+        // so an omitted list keeps the historical (locals-only) behaviour instead of false errors.
+        if (paramNames != null)
+            foreach (var refName in referencedParams)
+                if (!parameters.Contains(refName))
+                    Err("E_UNDECLARED_PARAM", $"Expression references Parameters.{refName}, which is not declared in the plan's parameters.");
 
         // Declared locals never used (informational)
         foreach (var dec in locals)

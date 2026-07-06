@@ -24,6 +24,7 @@
     <Compile Include="..\..\src\Services\TestStandService.cs" Link="Shared\TestStandService.cs" />
     <Compile Include="..\..\src\Services\SequenceEditorService.cs" Link="Shared\SequenceEditorService.cs" />
     <Compile Include="..\..\src\Tools\SequencePlanValidator.cs" Link="Shared\SequencePlanValidator.cs" />
+    <Compile Include="..\..\src\Tools\InputGuards.cs" Link="Shared\InputGuards.cs" />
     <Compile Include="..\..\src\Tools\ReferenceAuditor.cs" Link="Shared\ReferenceAuditor.cs" />
     <Compile Include="..\..\src\Tools\ExpressionReference.cs" Link="Shared\ExpressionReference.cs" />
     <Compile Include="..\..\src\Tools\SchemaBuilder.cs" Link="Shared\SchemaBuilder.cs" />

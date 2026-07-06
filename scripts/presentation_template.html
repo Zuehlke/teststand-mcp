@@ -1,0 +1,782 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>TestStand Sequenz-Präsentation</title>
+<style>
+/* ============================ THEME ============================ */
+:root{
+  --bg0:#070b16; --bg1:#0b1322; --bg2:#0e1828;
+  --panel:rgba(255,255,255,.045);
+  --panel-strong:rgba(255,255,255,.07);
+  --pborder:rgba(255,255,255,.10);
+  --pborder-soft:rgba(255,255,255,.06);
+  --txt:#eaf0fb; --muted:#9fadc6; --faint:#6c7892;
+  --line:rgba(160,180,220,.30);
+  --brand:#3b82f6; --brand2:#22d3ee; --brand3:#8b5cf6;
+  --ok:#34d399; --off:#5b6680;
+  --shadow:0 18px 50px -22px rgba(0,0,0,.85);
+  --r:16px;
+  font-synthesis-weight:none;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{
+  font-family:"Segoe UI Variable Display","Segoe UI",Inter,system-ui,-apple-system,Roboto,Arial,sans-serif;
+  color:var(--txt);
+  background:var(--bg0);
+  -webkit-font-smoothing:antialiased;
+  overflow-x:hidden;
+  letter-spacing:.1px;
+}
+.bg{position:fixed;inset:0;z-index:-2;overflow:hidden;background:
+  radial-gradient(1200px 700px at 12% -8%, rgba(59,130,246,.20), transparent 60%),
+  radial-gradient(1100px 650px at 100% 0%, rgba(34,211,238,.16), transparent 55%),
+  radial-gradient(1100px 800px at 80% 110%, rgba(139,92,246,.16), transparent 55%),
+  linear-gradient(180deg,var(--bg1),var(--bg0) 60%);
+}
+.bg::after{content:"";position:absolute;inset:-2px;
+  background-image:
+    radial-gradient(rgba(255,255,255,.045) 1px, transparent 1.4px);
+  background-size:30px 30px;
+  -webkit-mask-image:radial-gradient(1400px 900px at 50% 0%, #000, transparent 75%);
+          mask-image:radial-gradient(1400px 900px at 50% 0%, #000, transparent 75%);
+  opacity:.6;
+}
+
+/* ============================ HEADER ============================ */
+.top{
+  position:sticky;top:0;z-index:40;
+  display:flex;align-items:center;gap:22px;flex-wrap:wrap;
+  padding:18px clamp(18px,4vw,46px);
+  background:linear-gradient(180deg, rgba(8,12,22,.86), rgba(8,12,22,.55));
+  backdrop-filter:blur(16px) saturate(140%);
+  -webkit-backdrop-filter:blur(16px) saturate(140%);
+  border-bottom:1px solid var(--pborder-soft);
+}
+.brand{display:flex;align-items:center;gap:15px;min-width:0}
+.mark{
+  width:56px;height:56px;border-radius:13px;flex:none;overflow:hidden;background:#985b9c;
+  box-shadow:0 12px 30px -8px rgba(152,91,156,.6), inset 0 0 0 1px rgba(255,255,255,.14);
+}
+.mark svg{display:block;width:100%;height:100%}
+.brand-text h1{
+  margin:0;font-size:clamp(30px,3.6vw,45px);font-weight:800;line-height:1.05;letter-spacing:.2px;
+  background:linear-gradient(90deg,#fff, #ead9ff 55%, #a9ecf8);
+  -webkit-background-clip:text;background-clip:text;color:transparent;
+}
+.brand-text .zh{font-weight:800}
+.brand-text p{margin:3px 0 0;color:var(--muted);font-size:13px;font-weight:500}
+.spacer{flex:1 1 auto}
+.meta{display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:flex-end}
+.chip{
+  display:inline-flex;align-items:center;gap:8px;
+  padding:8px 13px;border-radius:999px;font-size:12.5px;font-weight:600;
+  background:var(--panel);border:1px solid var(--pborder);color:var(--muted);
+  white-space:nowrap;
+}
+.chip b{color:var(--txt);font-weight:700}
+.chip .led{width:8px;height:8px;border-radius:50%;background:var(--brand2);box-shadow:0 0 10px var(--brand2)}
+.toggle{cursor:pointer;user-select:none;transition:.2s}
+.toggle:hover{border-color:rgba(255,255,255,.22);color:var(--txt)}
+.toggle .box{
+  width:34px;height:19px;border-radius:999px;background:rgba(255,255,255,.12);
+  position:relative;transition:.22s;flex:none;
+}
+.toggle .box::after{content:"";position:absolute;top:2px;left:2px;width:15px;height:15px;border-radius:50%;
+  background:#fff;transition:.22s;box-shadow:0 1px 3px rgba(0,0,0,.4)}
+.toggle.on .box{background:linear-gradient(90deg,var(--brand),var(--brand2))}
+.toggle.on .box::after{left:17px}
+
+/* ============================ LEGEND ============================ */
+.legend{
+  display:flex;align-items:center;gap:10px 16px;flex-wrap:wrap;
+  padding:13px clamp(18px,4vw,46px);
+  border-bottom:1px solid var(--pborder-soft);
+  background:rgba(255,255,255,.018);
+}
+.legend .lg-title{font-size:11.5px;letter-spacing:1.4px;text-transform:uppercase;color:var(--faint);font-weight:700;margin-right:4px}
+.lg{display:inline-flex;align-items:center;gap:8px;font-size:12.5px;color:var(--muted);font-weight:600}
+.lg .sw{width:26px;height:20px;border-radius:7px;border:1px solid var(--cl);background:var(--ct);
+  display:grid;place-items:center;color:var(--c)}
+.lg .sw img{width:14px;height:14px;display:block}
+.lg .dotline{width:14px;height:14px;border-radius:50%}
+
+/* ============================ HINT ============================ */
+.hint-banner{
+  margin:20px clamp(18px,4vw,46px) -2px;
+  padding:13px 18px;border-radius:13px;font-size:13.5px;color:#dbe7ff;font-weight:500;
+  background:linear-gradient(90deg, rgba(59,130,246,.16), rgba(34,211,238,.10));
+  border:1px solid rgba(99,179,237,.30);
+  display:flex;align-items:center;gap:11px;
+}
+.hint-banner svg{width:20px;height:20px;flex:none;color:var(--brand2)}
+.hint-banner kbd{background:rgba(255,255,255,.10);border:1px solid var(--pborder);border-radius:6px;padding:2px 7px;font:inherit;font-size:12px;font-weight:700}
+
+/* ============================ OVERVIEW ============================ */
+.stage{padding:22px clamp(14px,4vw,46px) 60px}
+.overview{
+  display:flex;align-items:stretch;justify-content:center;gap:8px;flex-wrap:nowrap;
+  overflow-x:auto;padding:8px 4px 16px;scrollbar-width:thin;
+}
+.phase{
+  flex:1 1 360px;min-width:360px;max-width:440px;
+  background:var(--panel);border:1px solid var(--pborder);border-radius:20px;
+  padding:0 0 18px;box-shadow:var(--shadow);position:relative;overflow:hidden;
+  backdrop-filter:blur(8px);
+}
+.phase::before{content:"";position:absolute;inset:0 0 auto;height:4px;
+  background:linear-gradient(90deg,var(--pa),var(--pa2))}
+.phase-main{flex:1.15 1 380px;min-width:380px;max-width:490px}
+.phase-head{
+  display:flex;align-items:center;gap:11px;padding:18px 20px 14px;
+}
+.phase-dot{width:11px;height:11px;border-radius:50%;background:var(--pa);box-shadow:0 0 14px var(--pa)}
+.phase-head h2{margin:0;font-size:18px;font-weight:800;letter-spacing:.3px}
+.phase-head .phase-count{margin-left:auto;font-size:11.5px;font-weight:700;color:var(--muted);
+  background:rgba(255,255,255,.06);border:1px solid var(--pborder-soft);padding:5px 10px;border-radius:999px}
+.phase-blue{--pa:#38bdf8;--pa2:#3b82f6}
+.phase-violet{--pa:#a78bfa;--pa2:#8b5cf6}
+.phase-amber{--pa:#fbbf24;--pa2:#fb923c}
+.phase-flow{padding:6px 20px 4px;display:flex;flex-direction:column;align-items:stretch}
+
+.phasearrow{display:flex;align-items:center;justify-content:center;flex:0 0 30px;color:var(--line)}
+.phasearrow svg{width:30px;height:30px;filter:drop-shadow(0 0 8px rgba(120,160,230,.25))}
+
+/* ============================ NODE / CARD ============================ */
+.node{
+  --c:#94a3b8;--ct:rgba(148,163,184,.13);--cl:rgba(148,163,184,.4);
+  position:relative;display:flex;align-items:center;gap:12px;
+  width:100%;max-width:400px;margin:0 auto;
+  padding:12px 13px;border-radius:14px;
+  background:linear-gradient(180deg, var(--panel-strong), rgba(255,255,255,.02));
+  border:1px solid var(--pborder);
+  box-shadow:0 8px 22px -16px rgba(0,0,0,.9);
+  transition:transform .16s ease, box-shadow .2s ease, border-color .2s ease, background .2s;
+}
+.node::before{content:"";position:absolute;left:0;top:10px;bottom:10px;width:4px;border-radius:0 4px 4px 0;
+  background:var(--c);box-shadow:0 0 14px -2px var(--c)}
+.node .num{
+  flex:none;width:30px;height:30px;border-radius:9px;display:grid;place-items:center;
+  font-size:12.5px;font-weight:800;color:var(--muted);
+  background:rgba(255,255,255,.05);border:1px solid var(--pborder-soft);margin-left:3px;
+}
+.node .ico{flex:none;width:34px;height:34px;border-radius:10px;display:grid;place-items:center;
+  color:var(--c);background:var(--ct);border:1px solid var(--cl)}
+.node .ico img{width:20px;height:20px;display:block}
+.node .ico svg{width:18px;height:18px}
+.node .body{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1}
+.node .label{font-size:14px;font-weight:650;line-height:1.25;color:var(--txt);overflow-wrap:anywhere}
+.node .sub{font-size:11.5px;color:var(--muted);line-height:1.2;font-weight:500}
+.node .tag{flex:none;font-size:10px;font-weight:800;letter-spacing:.4px;text-transform:uppercase;
+  color:var(--c);background:var(--ct);border:1px solid var(--cl);padding:4px 8px;border-radius:7px;white-space:nowrap}
+.node .status{flex:none;width:9px;height:9px;border-radius:50%;margin-left:2px}
+.node .status.on{background:var(--ok);box-shadow:0 0 9px rgba(52,211,153,.8)}
+.node .status.off{background:transparent;border:1.6px solid var(--off)}
+
+/* clickable */
+.node.clickable{cursor:pointer}
+.node.clickable:hover{transform:translateY(-3px);border-color:var(--cl);
+  box-shadow:0 16px 34px -18px var(--c), 0 0 0 1px var(--cl)}
+.node.clickable::after{content:"";position:absolute;right:11px;top:50%;width:8px;height:8px;
+  border-right:2px solid var(--muted);border-bottom:2px solid var(--muted);
+  transform:translateY(-50%) rotate(-45deg);opacity:0;transition:.2s;}
+.node.clickable:hover::after{opacity:.9;right:9px}
+.node .open-hint{position:absolute;right:13px;bottom:-9px;font-size:9.5px;font-weight:800;letter-spacing:.5px;
+  text-transform:uppercase;color:var(--c);background:var(--bg1);border:1px solid var(--cl);
+  padding:2px 7px;border-radius:7px;opacity:0;transform:translateY(-3px);transition:.2s;pointer-events:none}
+.node.clickable:hover .open-hint{opacity:1;transform:none}
+
+/* decision + end */
+.node-dec{background:linear-gradient(180deg, rgba(244,114,182,.10), rgba(255,255,255,.02));border-color:rgba(244,114,182,.28)}
+.node-dec .label{font-weight:750}
+.node-end{padding:9px 14px;border-radius:999px;background:rgba(255,255,255,.04)}
+.node-end .ico{width:24px;height:24px;border-radius:7px}.node-end .ico img{width:14px;height:14px}
+.node-end .label{font-size:12.5px;color:var(--muted);font-weight:700}
+.node-end .tag{display:none}.node-end::before{display:none}
+
+/* dimming of disabled (toggled) */
+body.dim .node.disabled{opacity:.5;filter:grayscale(.55)}
+body.dim .node.disabled::before{box-shadow:none}
+
+/* pulse hint on first clickable */
+.node.pulse{animation:pulse 2.4s ease-in-out infinite}
+@keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(34,211,238,.0)}50%{box-shadow:0 0 0 6px rgba(34,211,238,.16)}}
+
+/* ============================ CONNECTOR ============================ */
+.conn{display:flex;justify-content:center;color:var(--line);height:30px}
+.conn svg{width:16px;height:30px}
+
+/* ============================ LOOP ============================ */
+.loop{position:relative;width:100%;max-width:400px;margin:0 auto;
+  border:1.5px dashed rgba(192,132,252,.45);border-radius:16px;
+  background:rgba(192,132,252,.05);padding:10px 12px 12px;}
+.loop-head{display:flex;align-items:center;gap:9px;margin-bottom:6px}
+.loop-badge{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:800;letter-spacing:.4px;
+  text-transform:uppercase;color:#d8b4fe;background:rgba(192,132,252,.16);border:1px solid rgba(192,132,252,.4);
+  padding:3px 9px;border-radius:999px}
+.loop-badge img{width:13px;height:13px;display:block}
+.loop-label{font-size:12px;color:var(--muted);font-weight:600}
+.loop-body{display:flex;flex-direction:column;align-items:center}
+.loop-foot{display:flex;justify-content:center;margin-top:8px}
+.retry{display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:700;color:#d8b4fe;
+  background:rgba(192,132,252,.10);border:1px dashed rgba(192,132,252,.4);padding:3px 10px;border-radius:999px}
+
+/* ============================ BRANCH (detail fork) ============================ */
+.branch{display:flex;flex-direction:column;align-items:center;width:100%}
+.fork{position:relative;display:grid;grid-auto-flow:column;grid-auto-columns:minmax(178px,1fr);
+  gap:22px;align-items:stretch;width:100%;padding:30px 0}
+.fork::before{content:"";position:absolute;top:0;left:50%;width:2px;height:16px;background:var(--line);transform:translateX(-50%)}
+.fork::after{content:"";position:absolute;bottom:0;left:50%;width:2px;height:16px;background:var(--line);transform:translateX(-50%)}
+.fork-railtop,.fork-railbot{position:absolute;height:2px;background:var(--line)}
+.fork-railtop{top:16px}.fork-railbot{bottom:16px}
+.lane{position:relative;display:flex;flex-direction:column;align-items:center;
+  border:1px solid var(--pborder-soft);border-radius:15px;background:rgba(255,255,255,.025);padding:14px 12px}
+.lane::before,.lane::after{content:"";position:absolute;left:50%;width:2px;height:14px;background:var(--line);transform:translateX(-50%)}
+.lane::before{top:-14px}.lane::after{bottom:-14px}
+.lane-label{display:inline-block;font-size:11.5px;font-weight:800;color:#dbe7ff;letter-spacing:.3px;
+  background:rgba(99,179,237,.14);border:1px solid rgba(99,179,237,.32);padding:4px 11px;border-radius:999px;margin-bottom:4px}
+.lane-body{display:flex;flex-direction:column;align-items:center;width:100%}
+.lane-body .node{padding-right:11px}
+.lane-body .node .tag{display:none}      /* lanes are space-constrained: icon+colour already convey the type */
+.lane-skip{font-size:12px;color:var(--faint);font-style:italic;padding:8px}
+
+/* ============================ BRANCH (overview stacked) ============================ */
+.obranch{display:flex;flex-direction:column;align-items:stretch;width:100%}
+.opath-wrap{display:flex;flex-direction:column;gap:10px;padding-left:14px;border-left:2px dashed var(--line);margin:0 0 0 16px}
+.opath{display:flex;flex-direction:column;gap:6px}
+.opath-tag{align-self:flex-start;font-size:11px;font-weight:800;letter-spacing:.3px;color:#dbe7ff;
+  background:rgba(99,179,237,.14);border:1px solid rgba(99,179,237,.32);padding:3px 10px;border-radius:999px}
+.opath-body{display:flex;flex-direction:column;align-items:stretch}
+.skip{font-size:12px;color:var(--faint);font-style:italic;padding:4px 2px}
+
+/* ============================ OVERLAY / SHEET ============================ */
+.overlay{position:fixed;inset:0;z-index:90;display:grid;place-items:center;padding:clamp(12px,3vw,40px)}
+.overlay[hidden]{display:none}
+.overlay-bg{position:absolute;inset:0;background:rgba(4,7,14,.66);backdrop-filter:blur(6px);
+  animation:fade .25s ease}
+.sheet{position:relative;width:min(880px,100%);max-height:90vh;display:flex;flex-direction:column;
+  background:linear-gradient(180deg,var(--bg2),var(--bg1));
+  border:1px solid var(--pborder);border-radius:22px;overflow:hidden;
+  box-shadow:0 40px 100px -30px rgba(0,0,0,.9), 0 0 0 1px rgba(255,255,255,.03);
+  animation:pop .32s cubic-bezier(.2,.9,.3,1.2)}
+@keyframes fade{from{opacity:0}to{opacity:1}}
+@keyframes pop{from{opacity:0;transform:translateY(18px) scale(.97)}to{opacity:1;transform:none}}
+.sheet-head{display:flex;align-items:flex-start;gap:14px;padding:20px 22px 16px;
+  border-bottom:1px solid var(--pborder-soft);
+  background:linear-gradient(180deg, rgba(59,130,246,.10), transparent)}
+.sheet-title{flex:1;min-width:0}
+.bread{font-size:11.5px;color:var(--faint);font-weight:600;display:flex;align-items:center;gap:6px;margin-bottom:5px}
+.bread b{color:var(--muted)}
+.sheet-title h2{margin:0;font-size:21px;font-weight:800;letter-spacing:.3px;
+  font-family:"Cascadia Code",ui-monospace,"Consolas",monospace;color:#eaf2ff}
+.sheet-sub{margin:4px 0 0;color:var(--muted);font-size:13.5px;font-weight:500}
+.sheet-badges{display:flex;gap:7px;flex-wrap:wrap;align-items:center}
+.badge{font-size:11px;font-weight:800;letter-spacing:.3px;padding:5px 10px;border-radius:999px;white-space:nowrap}
+.badge.sub{color:#c7d6ff;background:rgba(99,179,237,.14);border:1px solid rgba(99,179,237,.34)}
+.badge.ext{color:#a7f3e8;background:rgba(45,212,191,.14);border:1px solid rgba(45,212,191,.36)}
+.badge.on{color:#bdf2d4;background:rgba(52,211,153,.14);border:1px solid rgba(52,211,153,.36)}
+.badge.off{color:#c2cad9;background:rgba(91,102,128,.18);border:1px solid rgba(91,102,128,.4)}
+.icobtn{flex:none;width:38px;height:38px;border-radius:11px;border:1px solid var(--pborder);
+  background:rgba(255,255,255,.05);color:var(--muted);font-size:20px;cursor:pointer;display:grid;place-items:center;
+  transition:.18s;line-height:1}
+.icobtn:hover{color:#fff;border-color:rgba(255,255,255,.25);background:rgba(255,255,255,.10)}
+.back{width:auto;padding:0 14px;font-size:13px;font-weight:700;gap:6px}
+.sheet-body{overflow:auto;padding:26px 22px 30px;scrollbar-width:thin}
+.flow{width:100%;max-width:760px;margin:0 auto;display:flex;flex-direction:column;align-items:center}
+.flow>*{animation:rise .4s ease both}
+.flow>*:nth-child(1){animation-delay:.02s}.flow>*:nth-child(2){animation-delay:.06s}
+.flow>*:nth-child(3){animation-delay:.10s}.flow>*:nth-child(4){animation-delay:.14s}
+.flow>*:nth-child(5){animation-delay:.18s}.flow>*:nth-child(6){animation-delay:.22s}
+.flow>*:nth-child(7){animation-delay:.26s}.flow>*:nth-child(n+8){animation-delay:.30s}
+@keyframes rise{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
+
+/* ============================ FOOTER ============================ */
+.foot{padding:0 clamp(18px,4vw,46px) 34px;color:var(--faint);font-size:12px;text-align:center}
+.foot b{color:var(--muted)}
+
+/* ============================ ATTRACT / AUTO-DEMO ============================ */
+#attractBadge{position:fixed;left:50%;bottom:28px;transform:translate(-50%,12px);z-index:250;
+  opacity:0;pointer-events:none;transition:opacity .45s ease, transform .45s ease;
+  display:flex;align-items:center;gap:12px;padding:12px 22px;border-radius:999px;
+  background:rgba(59,130,246,.22);border:1px solid rgba(59,130,246,.55);
+  backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);
+  color:#e6f0ff;font-size:13.5px;font-weight:600;letter-spacing:.2px;
+  box-shadow:0 16px 44px -14px rgba(0,0,0,.8)}
+body.attract #attractBadge{opacity:1;transform:translate(-50%,0)}
+#attractBadge .pl{width:24px;height:24px;border-radius:50%;flex:none;display:grid;place-items:center;
+  background:linear-gradient(135deg,#3b82f6,#22d3ee);animation:pl 1.8s ease-out infinite}
+#attractBadge .pl svg{width:11px;height:11px;color:#fff;margin-left:1px}
+@keyframes pl{0%{box-shadow:0 0 0 0 rgba(59,130,246,.55)}70%,100%{box-shadow:0 0 0 13px rgba(59,130,246,0)}}
+
+/* ============================ COMPARE (Flowchart + SeqEdit) ============================ */
+.codebtn{display:inline-flex;align-items:center;gap:7px;cursor:pointer;
+  font-size:11.5px;font-weight:700;letter-spacing:.2px;color:#cdd8ee;
+  background:rgba(255,255,255,.05);border:1px solid var(--pborder);border-radius:9px;
+  padding:6px 11px;transition:transform .16s ease, background .2s, border-color .2s, color .2s;white-space:nowrap}
+.codebtn:hover{color:#fff;border-color:rgba(99,179,237,.5);background:rgba(99,179,237,.14);transform:translateY(-1px)}
+.codebtn svg{width:14px;height:14px;color:var(--brand2)}
+.phase-head .codebtn{margin-left:8px}
+.sheet-head .codebtn{align-self:center;flex:none}
+
+#compareModal{position:fixed;inset:0;z-index:200;display:grid;place-items:center;padding:clamp(10px,2.4vw,38px)}
+#compareModal[hidden]{display:none}
+.cmp-bg{position:absolute;inset:0;background:rgba(3,6,12,.8);backdrop-filter:blur(7px);-webkit-backdrop-filter:blur(7px);animation:fade .22s ease}
+.cmp-win{position:relative;z-index:1;width:min(1400px,96vw);max-height:92vh;display:flex;flex-direction:column;
+  background:linear-gradient(180deg,var(--bg2),var(--bg1));border:1px solid var(--pborder);border-radius:18px;overflow:hidden;
+  box-shadow:0 44px 120px -30px rgba(0,0,0,.95);animation:pop .3s cubic-bezier(.2,.9,.3,1.2)}
+.cmp-bar{display:flex;align-items:center;gap:14px;padding:15px 20px;border-bottom:1px solid var(--pborder-soft);background:linear-gradient(180deg, rgba(59,130,246,.10), transparent)}
+.cmp-bar .t{flex:1;min-width:0}
+.cmp-bar h2{margin:0;font-size:19px;font-weight:800;font-family:"Cascadia Code",ui-monospace,Consolas,monospace;color:#eaf2ff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cmp-bar p{margin:3px 0 0;color:var(--muted);font-size:12.5px;font-weight:500}
+.cmp-close{flex:none;width:38px;height:38px;border-radius:11px;border:1px solid var(--pborder);background:rgba(255,255,255,.05);color:var(--muted);font-size:20px;cursor:pointer;display:grid;place-items:center;line-height:1;transition:.18s}
+.cmp-close:hover{color:#fff;border-color:rgba(255,255,255,.25);background:rgba(255,255,255,.1)}
+.cmp-body{display:flex;min-height:0;flex:1}
+.cmp-pane{flex:1 1 50%;min-width:0;display:flex;flex-direction:column;min-height:0}
+.cmp-pane+.cmp-pane{border-left:1px solid var(--pborder-soft)}
+.cmp-phead{display:flex;align-items:center;gap:9px;padding:11px 16px;font-size:11px;font-weight:800;letter-spacing:.7px;text-transform:uppercase;color:var(--muted);background:rgba(255,255,255,.025);border-bottom:1px solid var(--pborder-soft)}
+.cmp-phead .dots{display:flex;gap:5px}
+.cmp-phead .dots i{width:9px;height:9px;border-radius:50%;display:block}
+.cmp-phead .dots i:nth-child(1){background:#ff5f57}.cmp-phead .dots i:nth-child(2){background:#febc2e}.cmp-phead .dots i:nth-child(3){background:#28c840}
+.cmp-phead svg{width:14px;height:14px;color:var(--brand2)}
+.cmp-scroll{overflow:auto;padding:20px 16px;flex:1;min-height:0;scrollbar-width:thin}
+.cmp-scroll.flowpane{display:flex;flex-direction:column;align-items:center}
+.cmp-scroll .node{pointer-events:none}
+.cmp-scroll .open-hint{display:none}
+.cmp-scroll .node.clickable::after{display:none}
+.cmp-scroll img.shot{display:block;max-width:100%;height:auto;margin:0 auto;border-radius:8px;border:1px solid var(--pborder-soft);background:#fff;box-shadow:0 10px 30px -12px rgba(0,0,0,.6)}
+.cmp-codecap{padding:9px 16px;border-top:1px solid var(--pborder-soft);color:var(--faint);font-size:11px;text-align:center}
+
+/* rendered step-listing fallback (when no SeqEdit screenshot) */
+.listing{display:flex;flex-direction:column;gap:3px;font-family:"Cascadia Code",ui-monospace,Consolas,monospace}
+.listing .lgroup{margin:10px 0 3px;font-size:10.5px;font-weight:800;letter-spacing:1px;text-transform:uppercase;color:var(--faint)}
+.lrow{display:flex;align-items:center;gap:9px;padding:5px 9px;border-radius:8px;background:rgba(255,255,255,.03);border:1px solid var(--pborder-soft)}
+.lrow:hover{background:rgba(255,255,255,.05)}
+.lrow .li-ico{flex:none;width:20px;height:20px;display:grid;place-items:center}
+.lrow .li-ico img{width:16px;height:16px;display:block}
+.lrow .li-name{flex:1;min-width:0;font-size:12.5px;color:var(--txt);overflow-wrap:anywhere}
+.lrow .li-type{flex:none;font-size:10px;color:var(--faint);font-weight:700}
+.lrow.dis .li-name{text-decoration:line-through;color:var(--faint)}
+.fallback-note{margin:2px 0 12px;font-size:11.5px;color:var(--faint);text-align:center;font-style:italic}
+
+::-webkit-scrollbar{height:11px;width:11px}
+::-webkit-scrollbar-thumb{background:rgba(255,255,255,.14);border-radius:99px;border:3px solid transparent;background-clip:content-box}
+::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.24);background-clip:content-box}
+
+/* ============================ RESPONSIVE ============================ */
+@media(max-width:1080px){
+  .overview{flex-direction:column;align-items:center;overflow:visible}
+  .phase,.phase-main{max-width:560px;width:100%}
+  .phasearrow{transform:rotate(90deg)}
+}
+@media(max-width:880px){
+  .cmp-body{flex-direction:column;overflow:auto}
+  .cmp-pane+.cmp-pane{border-left:none;border-top:1px solid var(--pborder-soft)}
+  .cmp-scroll{overflow:visible}
+}
+@media(max-width:560px){
+  .node .tag{display:none}
+  .top{gap:12px}
+}
+@media(prefers-reduced-motion:reduce){
+  *{animation:none!important;transition:none!important}
+}
+</style>
+</head>
+<body>
+<div class="bg"></div>
+
+<header class="top">
+  <div class="brand">
+    <div class="mark" role="img" aria-label="Zühlke"><svg viewBox="0 0 283.46 283.46" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" overflow="hidden"><defs></defs><path d="M0 0 283.46 0 283.46 283.46 0 283.46Z" fill="#985B9C" fill-rule="evenodd"/><path d="M58.09 181.52 58.09 188.94 12.22 188.94 44.31 149.12 17.49 149.12 17.49 141.8 59.41 141.8 27.51 181.52ZM73.84 168.08C73.84 176 74.74 182.82 84.47 182.82 94.2 182.82 95.1 176 95.1 168.08L95.1 141.8 103.1 141.8 103.1 169C103.1 181.54 98.39 190.26 84.45 190.26 70.51 190.26 65.82 181.52 65.82 169L65.82 141.8 73.82 141.8ZM81.43 116.62C81.43 119.613 79.0034 122.04 76.01 122.04 73.0166 122.04 70.59 119.613 70.59 116.62 70.59 113.631 73.0105 111.206 76 111.2 78.9767 111.178 81.4078 113.573 81.4299 116.55 81.4301 116.573 81.4301 116.597 81.43 116.62ZM98.44 116.62C98.44 119.613 96.0134 122.04 93.02 122.04 90.0266 122.04 87.6 119.613 87.6 116.62 87.6 113.634 90.0145 111.211 93 111.2 95.9711 111.167 98.4066 113.548 98.4398 116.52 98.4402 116.553 98.4403 116.587 98.44 116.62ZM122.83 111.47 122.83 147.32 123.03 147.52C126.34 143.01 130.65 140.52 136.47 140.52 149.47 140.52 152.47 149.95 152.47 160.98L152.47 188.98 144.47 188.98 144.47 162.36C144.47 154.74 143.87 147.92 134.54 147.92 123.54 147.92 122.81 158.15 122.81 166.57L122.81 188.94 114.81 188.94 114.81 111.47ZM172.34 188.94 164.34 188.94 164.34 111.47 172.34 111.47ZM193.57 159.26 210.72 141.8 221.45 141.8 201.29 161.86 225.29 188.94 214.63 188.94 193.57 165.07 193.57 188.94 185.57 188.94 185.57 111.47 193.57 111.47ZM262.62 173.88C259.62 179.09 255.38 182.82 249.02 182.82 240.08 182.82 234.02 175.82 233.89 167.07L270.15 167.07C270.93 153.07 263.07 140.5 248.23 140.5 233.79 140.5 225.84 152.04 225.84 165.97 225.84 179.51 234.67 190.24 248.43 190.24 257.55 190.24 264.65 185.63 269.11 177.72ZM248.33 147.88C255.21 147.88 260.81 153.4 261.89 160.22L234.28 160.22C235.427 153.292 241.311 148.141 248.33 147.92ZM27.21 227.21C26.0535 229.76 23.4783 231.365 20.68 231.28 15.15 231.28 12.97 226.5 12.97 221.61 12.97 216.48 15.29 211.95 20.97 211.95 23.6671 211.839 26.1406 213.442 27.14 215.95 27.4692 216.681 27.6527 217.469 27.68 218.27 27.68 219.02 27.32 219.27 26.68 219.41L15.72 221C15.9 224.25 17.36 228.35 21.21 228.35 23.64 228.35 25.14 226.85 26.32 224.89 26.57 224.5 26.64 224.14 27.17 224.14 27.7 224.14 27.85 224.57 27.85 225.03 27.7643 225.788 27.5477 226.526 27.21 227.21ZM24.21 217.98C24.1726 215.855 22.5107 214.115 20.39 213.98 17.29 213.98 16.01 216.58 15.72 219.33ZM54.32 230.18C54.32 230.64 54.21 230.85 53.68 230.85L51.79 230.85C51.25 230.85 51.14 230.75 51.14 230.18L51.14 218.58C51.14 216.19 50.79 213.94 47.75 213.94 46.3458 213.854 45.0368 214.652 44.47 215.94 44.34 216.5 44.2795 217.075 44.29 217.65L44.29 230.14C44.29 230.56 44.29 230.81 43.72 230.81L41.72 230.81C41.4246 230.851 41.152 230.644 41.1111 230.349 41.1048 230.303 41.1044 230.256 41.11 230.21L41.11 217.9C41.11 215.58 40.18 213.84 37.61 213.84 36.2109 213.735 34.903 214.542 34.37 215.84 34.1718 216.449 34.097 217.092 34.15 217.73L34.15 230.22C34.15 230.75 34.01 230.89 33.48 230.89L31.67 230.89C31.13 230.89 31.02 230.75 31.02 230.22L31.02 215.83C30.8739 214.989 31.142 214.129 31.74 213.52 32.74 212.41 36.23 211.95 37.62 211.95 39.76 211.95 41.62 212.37 42.94 214.12 44.3723 212.572 46.4386 211.771 48.54 211.95 52.25 211.95 54.32 213.55 54.32 217.3ZM65.56 231.28C64.1673 231.291 62.8102 230.841 61.7 230L61.7 238.63C61.7 239.02 61.53 239.24 61.13 239.24L59.21 239.24C58.74 239.24 58.53 239.13 58.53 238.59L58.53 217C58.3991 216.051 58.5486 215.085 58.96 214.22 60 212.59 63.77 212 65.52 212 71.01 212 73.83 215.6 73.83 220.84 73.83 225.65 71.09 231.28 65.56 231.28ZM64.81 213.91C62.42 213.91 61.7 214.8 61.7 217.05L61.7 227.93C62.7716 228.648 64.0209 229.057 65.31 229.11 69.23 229.11 70.59 224.61 70.59 221.44 70.59 217.8 69 213.91 64.81 213.91ZM84.36 231.28C78.93 231.28 76.15 226.47 76.15 221.58 76.15 216.69 79.15 211.95 84.36 211.95 89.57 211.95 92.42 217.05 92.42 221.79 92.42 226.53 89.49 231.28 84.36 231.28ZM89.06 221.28C89.06 218.46 87.57 213.96 84.06 213.96 80.45 213.96 79.42 218.28 79.42 221.13 79.42 223.98 80.63 229.13 84.42 229.13 87.95 229.13 88.98 224.7 88.98 221.95ZM116.46 213.41 111.18 230.32C111.08 230.64 111.04 230.85 110.65 230.85L109.4 230.85C108.86 230.85 108.79 230.85 108.65 230.32L105.12 218.83 101.59 230.32C101.44 230.85 101.41 230.85 100.87 230.85L99.87 230.85C99.41 230.85 99.3 230.75 99.16 230.32L93.74 213.41C93.6489 213.219 93.6011 213.011 93.6 212.8 93.6 212.48 93.84 212.37 94.13 212.37L96.13 212.37C96.7 212.37 96.81 212.48 96.99 213.05L100.91 226.22 104.77 213.05C104.94 212.3 104.87 212.37 105.77 212.37 106.16 212.37 106.13 212.62 106.23 212.95L110.3 226.36 114 213.05C114.15 212.52 114.18 212.37 114.75 212.37L116 212.37C116.25 212.37 116.61 212.37 116.61 212.73 116.612 212.965 116.56 213.197 116.46 213.41ZM132 227.21C130.831 229.749 128.264 231.349 125.47 231.28 119.94 231.28 117.76 226.5 117.76 221.61 117.76 216.48 120.08 211.95 125.76 211.95 129.338 211.919 132.299 214.726 132.46 218.3 132.46 219.05 132.11 219.3 131.46 219.44L120.53 221C120.71 224.25 122.17 228.35 126.02 228.35 128.45 228.35 129.95 226.85 131.12 224.89 131.37 224.5 131.45 224.14 131.98 224.14 132.51 224.14 132.66 224.57 132.66 225.03 132.568 225.789 132.345 226.527 132 227.21ZM129 218C128.963 215.875 127.301 214.135 125.18 214 122.08 214 120.79 216.6 120.51 219.35ZM144.72 215.55C143.29 215.55 143.29 213.66 141.11 213.66 139.44 213.66 139.04 214.73 139.04 216.19L139.04 230.19C139.04 230.58 138.94 230.83 138.51 230.83L136.58 230.83C136.05 230.83 135.83 230.83 135.83 230.19L135.83 215.34C135.726 214.671 135.924 213.99 136.37 213.48 137.37 212.48 141.04 211.95 142.47 211.95 143.9 211.95 146.14 212.2 146.14 214.01 146.179 214.821 145.553 215.51 144.742 215.549 144.735 215.549 144.727 215.55 144.72 215.55ZM150.06 209.2C149.068 209.267 148.21 208.517 148.143 207.525 148.139 207.464 148.138 207.402 148.14 207.34 148.112 206.308 148.926 205.448 149.959 205.42 149.992 205.419 150.026 205.419 150.06 205.42 151.104 205.42 151.95 206.266 151.95 207.31 151.95 208.354 151.104 209.2 150.06 209.2ZM151.63 230.2C151.63 230.73 151.56 230.87 151.03 230.87L148.92 230.87C148.53 230.87 148.46 230.77 148.46 230.37L148.46 213C148.46 212.53 148.6 212.42 149.06 212.42L151 212.42C151.57 212.42 151.68 212.53 151.68 213.1ZM170.15 230.14C170.15 230.53 170.05 230.85 169.58 230.85L167.73 230.85C167.19 230.85 166.98 230.78 166.98 230.21L166.98 218.15C167.034 217.317 166.925 216.482 166.66 215.69 165.94 214.16 164.34 213.76 162.8 213.76 161.56 213.76 160.06 214.05 159.35 215.16 159.067 215.73 158.946 216.366 159 217L159 230.16C159 230.69 158.9 230.87 158.36 230.87L156.36 230.87C155.89 230.87 155.79 230.62 155.79 230.2L155.79 215.8C155.67 215.014 155.934 214.218 156.5 213.66 157.86 212.37 161.6 211.95 163.39 211.95 165.95 211.95 168.67 212.48 169.81 215.05 170.083 215.95 170.202 216.89 170.16 217.83ZM173.86 236.63C173.949 236.529 174.046 236.436 174.15 236.35 174.254 236.245 174.393 236.182 174.54 236.17 175.93 236.28 177 237.1 178.68 237.1 182.35 237.1 184.68 235.17 184.68 231.17L184.68 229.64C182.89 230.46 181.82 231.5 179.83 231.5 175.15 231.5 173.01 227.14 173.01 222.69 173.01 217.26 176.15 211.84 181.75 211.84 183.32 211.84 187.82 212.66 187.82 215.12L187.82 231.71C187.82 236.6 183.32 239.38 179.08 239.38 177.967 239.332 176.869 239.102 175.83 238.7 174.69 238.24 173.9 237.81 173.9 236.95ZM180.86 228.93C181.6 228.93 184.64 228.36 184.64 227.39L184.64 215.91C184.64 214.27 182.53 213.84 181.35 213.84 177.47 213.84 176.11 218.58 176.11 221.9 176.11 225.22 177.25 228.93 180.86 228.93ZM201.4 209.2C200.408 209.267 199.55 208.517 199.483 207.525 199.479 207.464 199.478 207.402 199.48 207.34 199.452 206.308 200.266 205.448 201.299 205.42 201.332 205.419 201.366 205.419 201.4 205.42 202.444 205.42 203.29 206.266 203.29 207.31 203.29 208.354 202.444 209.2 201.4 209.2ZM202.97 230.2C202.97 230.73 202.9 230.87 202.37 230.87L200.26 230.87C199.87 230.87 199.8 230.77 199.8 230.37L199.8 213C199.8 212.53 199.94 212.42 200.41 212.42L202.3 212.42C202.87 212.42 202.97 212.53 202.97 213.1ZM221.74 227.32C221.795 227.957 221.617 228.593 221.24 229.11 219.99 230.75 216.64 231.28 214.67 231.28 209.11 231.28 206.26 227.54 206.26 222.18 206.26 217.18 209.14 211.95 214.71 211.95 216.076 211.92 217.415 212.33 218.53 213.12L218.53 204.24C218.476 203.919 218.692 203.614 219.014 203.56 219.079 203.549 219.145 203.549 219.21 203.56L221 203.56C221.47 203.56 221.72 203.63 221.72 204.17ZM218.53 215.12C217.596 214.261 216.369 213.789 215.1 213.8 211.25 213.8 209.47 217.98 209.47 221.29 209.47 225 211.07 229.07 215.35 229.07 217.46 229.07 218.53 228.39 218.53 226.25ZM239.07 227.21C237.917 229.758 235.345 231.363 232.55 231.28 227.02 231.28 224.84 226.5 224.84 221.61 224.84 216.48 227.16 211.95 232.84 211.95 236.418 211.919 239.379 214.726 239.54 218.3 239.54 219.05 239.19 219.3 238.54 219.44L227.59 221C227.77 224.25 229.23 228.35 233.08 228.35 235.51 228.35 237 226.85 238.18 224.89 238.43 224.5 238.5 224.14 239.04 224.14 239.58 224.14 239.72 224.57 239.72 225.03 239.636 225.79 239.416 226.528 239.07 227.21ZM236.07 217.98C236.033 215.855 234.371 214.115 232.25 213.98 229.15 213.98 227.86 216.58 227.58 219.33ZM254.56 227.25C254.598 228.023 254.41 228.791 254.02 229.46 252.95 230.92 249.67 231.28 247.92 231.28 244.75 231.28 241.71 230.03 241.71 226.43 241.71 221.69 247.89 220.51 251.45 219.43L251.45 217.61C251.45 215.76 251.17 213.8 248.78 213.8 247.37 213.804 246.138 214.756 245.78 216.12 245.67 216.26 245.71 216.44 245.6 216.58 245.394 217.354 244.599 217.814 243.826 217.608 243.17 217.433 242.724 216.828 242.75 216.15 242.75 213.15 246.85 211.91 249.24 211.91 253.09 211.91 254.56 213.91 254.56 217.61ZM251.45 221.15C249 221.9 245 222.72 245 226 245 228.17 246.46 229.39 248.6 229.39 250.42 229.39 251.45 228.78 251.45 226.82ZM263.8 231.28C261.948 231.389 260.135 230.718 258.8 229.43 258.167 228.87 257.77 228.091 257.69 227.25 257.679 226.394 258.364 225.691 259.22 225.68 259.22 225.68 259.22 225.68 259.22 225.68 261.04 225.68 260.86 229.25 264.08 229.25 265.518 229.345 266.761 228.256 266.856 226.818 266.863 226.725 266.864 226.633 266.86 226.54 266.86 221.9 258.08 223.08 258.08 216.91 258.08 213.66 260.72 211.91 263.72 211.91 265.584 211.762 267.408 212.504 268.64 213.91 269.05 214.349 269.291 214.92 269.32 215.52 269.32 216.271 268.711 216.88 267.96 216.88 266.04 216.88 266.54 213.73 263.72 213.73 262.309 213.647 261.097 214.724 261.014 216.135 261.01 216.203 261.009 216.272 261.01 216.34 261.01 220.76 269.89 219.51 269.89 225.9 269.86 229.53 267.22 231.28 263.8 231.28Z" fill="#FFFFFF"/></svg></div>
+    <div class="brand-text">
+      <h1 id="hTitle"></h1>
+      <p id="hSub"></p>
+    </div>
+  </div>
+  <div class="spacer"></div>
+  <div class="meta">
+    <span class="chip"><span class="led"></span><span id="chipSeqLabel"></span>&nbsp;<b id="chipSeq"></b></span>
+    <span class="chip"><span id="chipSrcLabel"></span>&nbsp;<b id="chipSrc"></b></span>
+    <span class="chip toggle" id="dimToggle" role="switch" aria-checked="false" tabindex="0">
+      <span class="box"></span><span id="dimLabel"></span>
+    </span>
+    <span class="chip toggle on" id="autoToggle" role="switch" aria-checked="true" tabindex="0">
+      <span class="box"></span><span id="autoLabel"></span>
+    </span>
+  </div>
+</header>
+
+<div class="legend" id="legend">
+  <span class="lg-title" id="legendTitle"></span>
+</div>
+
+<main class="stage">
+  <div class="overview" id="overview"></div>
+</main>
+
+<footer class="foot" id="foot"></footer>
+
+<div id="attractBadge" aria-hidden="true">
+  <span class="pl"><svg viewBox="0 0 16 16" fill="currentColor"><path d="M5 3.2v9.6l7.5-4.8z"/></svg></span>
+  <span id="attractText"></span>
+</div>
+
+<!-- DETAIL OVERLAY -->
+<div class="overlay" id="overlay" hidden>
+  <div class="overlay-bg" data-close></div>
+  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheetTitle">
+    <div class="sheet-head">
+      <button class="icobtn back" id="backBtn" hidden></button>
+      <div class="sheet-title">
+        <div class="bread" id="bread"></div>
+        <h2 id="sheetTitle"></h2>
+        <p class="sheet-sub" id="sheetSub"></p>
+      </div>
+      <div class="sheet-badges" id="sheetBadges"></div>
+      <button class="codebtn" id="cmpBtn" data-cmp="" hidden><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="3.5" width="15" height="10.5" rx="1.5"/><path d="M7 17h6M10 14v3"/></svg><span id="cmpBtnLabel"></span></button>
+      <button class="icobtn" id="closeBtn" aria-label="close" data-close>×</button>
+    </div>
+    <div class="sheet-body"><div class="flow" id="sheetBody"></div></div>
+  </div>
+</div>
+
+<!-- COMPARE: FLOWCHART + SEQEDIT SCREENSHOT -->
+<div id="compareModal" hidden>
+  <div class="cmp-bg" data-close-cmp></div>
+  <div class="cmp-win">
+    <div class="cmp-bar">
+      <div class="t"><h2 id="cmpTitle"></h2><p id="cmpSub"></p></div>
+      <button class="cmp-close" data-close-cmp aria-label="close">×</button>
+    </div>
+    <div class="cmp-body">
+      <div class="cmp-pane">
+        <div class="cmp-phead"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="1.7"/><circle cx="6" cy="14" r="1.7"/><circle cx="14.5" cy="10" r="1.7"/><path d="M6 7.7v4.6"/><path d="M7.6 6h2.4a3 3 0 0 1 3 3v.5M7.6 14h2.4a3 3 0 0 0 3-3"/></svg><span id="cmpFlowHdr"></span></div>
+        <div class="cmp-scroll flowpane" id="cmpFlow"></div>
+      </div>
+      <div class="cmp-pane">
+        <div class="cmp-phead"><span class="dots"><i></i><i></i><i></i></span><span id="cmpEditorHdr"></span></div>
+        <div class="cmp-scroll" id="cmpCode"></div>
+        <div class="cmp-codecap" id="cmpCodeCap"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- DATA + LABELS (injected by generate_teststand_presentation.py) -->
+<script>
+/*%%DATA%%*/
+</script>
+
+<script>
+"use strict";
+/* ============================ HELPERS ============================ */
+const esc = s => String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const ARROW = `<svg viewBox="0 0 16 30" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="0" x2="8" y2="21"/><path d="M4 17.5l4 5 4-5"/></svg>`;
+const PHARROW = `<svg viewBox="0 0 30 30" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="15" x2="23" y2="15"/><path d="M18 9l6 6-6 6"/></svg>`;
+const LAYERS = `<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3l7 4-7 4-7-4z"/><path d="M3 11l7 4 7-4"/></svg>`;
+const MONITOR = `<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="3.5" width="15" height="10.5" rx="1.5"/><path d="M7 17h6M10 14v3"/></svg>`;
+
+const TYPE = DATA.types;      // kind -> {c, tag}
+const ICONS = DATA.icons;     // itype -> dataURI
+const SUBS = DATA.subs;
+const MAIN = DATA.main;
+const SHOTS = DATA.shots;     // sequence name -> dataURI | null
+const LISTING = DATA.listing; // key -> [rows]
+const L = LBL;
+
+function iconImg(itype, cls){
+  const src = ICONS[itype] || ICONS['__default__'];
+  return src ? `<img class="${cls||''}" src="${src}" alt="">` : '';
+}
+const conn = () => `<div class="conn">${ARROW}</div>`;
+
+/* ============================ NODE RENDER ============================ */
+function nodeHTML(n, variant){
+  const meta = TYPE[n.kind] || TYPE.stmt;
+  const c = meta.c;
+  const clickable = !!(n.target && SUBS[n.target]);
+  const dis = (variant==='overview') && (n.enabled===false);
+  const cls = ['node','t-'+n.kind];
+  if(n.kind==='dec') cls.push('node-dec');
+  if(n.kind==='end') cls.push('node-end');
+  if(clickable) cls.push('clickable');
+  if(dis) cls.push('disabled');
+  const style = `--c:${c};--ct:${c}20;--cl:${c}66`;
+  const attr = clickable ? ` data-open="${esc(n.target)}" role="button" tabindex="0" title="${esc(L.openSub)}"` : '';
+  const num = (variant==='overview' && n.num) ? `<span class="num">${esc(n.num)}</span>` : '';
+  const status = (variant==='overview' && n.kind!=='end' && n.kind!=='dec')
+        ? `<span class="status ${n.enabled===false?'off':'on'}" title="${n.enabled===false?esc(L.inactive):esc(L.active)}"></span>` : '';
+  const tag = (n.kind==='end') ? '' : `<span class="tag">${esc(n.ext ? L.externalSeq : meta.tag)}</span>`;
+  const hint = clickable ? `<span class="open-hint">${LAYERS} ${esc(L.open)}</span>` : '';
+  return `<div class="${cls.join(' ')}" style="${style}"${attr}>
+      ${num}<span class="ico">${iconImg(n.itype)}</span>
+      <span class="body"><span class="label">${esc(n.label)}</span>${n.sub?`<span class="sub">${esc(n.sub)}</span>`:''}</span>
+      ${status}${tag}${hint}
+    </div>`;
+}
+
+function loopHTML(b, variant){
+  const label = (b.label||'') + (b.cond ? ' · '+b.cond : '');
+  return `<div class="loop">
+    <div class="loop-head"><span class="loop-badge">${iconImg(b.itype)}${esc(L.loop)}</span><span class="loop-label">${esc(label)}</span></div>
+    <div class="loop-body">${renderBlocks(b.blocks,variant)}</div>
+    <div class="loop-foot"><span class="retry">↺ ${esc(L.retry)}</span></div>
+  </div>`;
+}
+
+function forkHTML(b, variant){
+  const N = Math.max(1,b.paths.length), rail = (0.5/N*100).toFixed(2);
+  const lanes = b.paths.map(p=>`<div class="lane">
+      <span class="lane-label">${esc(p.label)}</span>
+      <div class="lane-body">${ p.blocks.length ? renderBlocks(p.blocks,variant) : '<span class="lane-skip">'+esc(L.skipped)+'</span>'}</div>
+    </div>`).join('');
+  return `<div class="branch">
+    ${nodeHTML(b.dec,variant)}
+    <div class="fork">
+      <span class="fork-railtop" style="left:${rail}%;right:${rail}%"></span>
+      ${lanes}
+      <span class="fork-railbot" style="left:${rail}%;right:${rail}%"></span>
+    </div>
+    ${b.merge ? nodeHTML(b.merge,variant) : ''}
+  </div>`;
+}
+
+function obranchHTML(b){
+  const paths = b.paths.map(p=>`<div class="opath">
+      <span class="opath-tag">${esc(p.label)}</span>
+      <div class="opath-body">${ p.blocks.length ? renderBlocks(p.blocks,'overview') : '<span class="skip">'+esc(L.skipped)+'</span>'}</div>
+    </div>`).join('');
+  return `<div class="obranch">
+    ${nodeHTML(b.dec,'overview')}${conn()}
+    <div class="opath-wrap">${paths}</div>${conn()}
+    ${b.merge ? nodeHTML(b.merge,'overview') : ''}
+  </div>`;
+}
+
+function renderBlock(b, variant){
+  if(b.type==='node')   return nodeHTML(b.node,variant);
+  if(b.type==='loop')   return loopHTML(b,variant);
+  if(b.type==='branch') return (variant==='overview') ? obranchHTML(b) : forkHTML(b,variant);
+  return '';
+}
+function renderBlocks(blocks, variant){
+  return blocks.map((b,i)=> (i>0?conn():'') + renderBlock(b,variant)).join('');
+}
+
+/* number the top-level nodes of an overview phase */
+function numberTop(blocks){
+  let k=0;
+  blocks.forEach(b=>{
+    if(b.type==='node'){ if(b.node.kind!=='end'){ k++; b.node.num=String(k); } }
+    else if(b.type==='loop'){ /* loops are unnumbered containers */ }
+    else if(b.type==='branch'){ if(b.dec){ k++; b.dec.num=String(k); } }
+  });
+}
+function countSteps(blocks){
+  let c=0;
+  blocks.forEach(b=>{
+    if(b.type==='node'){ if(b.node.kind!=='end') c++; }
+    else if(b.type==='loop'){ c+=countSteps(b.blocks); }
+    else if(b.type==='branch'){ if(b.dec)c++; b.paths.forEach(p=>c+=countSteps(p.blocks)); }
+  });
+  return c;
+}
+
+/* ============================ OVERVIEW ============================ */
+function renderOverview(){
+  const parts = MAIN.map(ph=>{
+    numberTop(ph.blocks);
+    return `<section class="phase phase-${ph.accent}${ph.name===MAIN[1]?.name?' phase-main':''}">
+      <div class="phase-head">
+        <span class="phase-dot"></span><h2>${esc(ph.title||ph.name)}</h2>
+        <span class="phase-count">${countSteps(ph.blocks)} ${esc(L.stepsShort)}</span>
+        <button class="codebtn" data-cmp="phase:${esc(ph.name)}" title="${esc(L.compareTitle)}">${MONITOR}${esc(L.code)}</button>
+      </div>
+      <div class="phase-flow">${ ph.blocks.length ? renderBlocks(ph.blocks,'overview') : '<span class="skip">'+esc(L.emptyGroup)+'</span>'}</div>
+    </section>`;
+  });
+  document.getElementById('overview').innerHTML =
+    parts.join(`<div class="phasearrow">${PHARROW}</div>`);
+  const first = document.querySelector('#overview .node.clickable');
+  if(first) first.classList.add('pulse');
+}
+
+/* ============================ LEGEND ============================ */
+function renderLegend(){
+  document.getElementById('legendTitle').textContent = L.legend;
+  let h = (DATA.legend||[]).map(([kind,itype,label])=>{
+    const c = (TYPE[kind]||TYPE.stmt).c;
+    return `<span class="lg"><span class="sw" style="--c:${c};--ct:${c}20;--cl:${c}66">${iconImg(itype)}</span>${esc(label)}</span>`;
+  }).join('');
+  h += `<span class="lg"><span class="dotline" style="background:var(--ok);box-shadow:0 0 9px rgba(52,211,153,.8)"></span>${esc(L.active)}</span>`;
+  h += `<span class="lg"><span class="dotline" style="border:1.6px solid var(--off)"></span>${esc(L.inactive)}</span>`;
+  document.getElementById('legend').insertAdjacentHTML('beforeend',h);
+}
+
+/* ============================ DETAIL OVERLAY ============================ */
+const overlay = document.getElementById('overlay');
+const stack = [];
+function openDetail(key){
+  const sub = SUBS[key]; if(!sub) return;
+  stack.push(key); renderDetail();
+  overlay.hidden = false; document.body.style.overflow='hidden';
+  document.querySelector('#overview .node.pulse')?.classList.remove('pulse');
+}
+function renderDetail(){
+  const key = stack[stack.length-1];
+  const sub = SUBS[key];
+  document.getElementById('sheetTitle').textContent = sub.title;
+  document.getElementById('sheetSub').textContent  = sub.subtitle||'';
+  const crumbs = ['<b>'+esc(L.mainSeqCrumb)+' '+esc(DATA.meta.mainSeq)+'</b>', ...stack.map(k=>esc(SUBS[k].title))];
+  document.getElementById('bread').innerHTML = crumbs.join(' › ');
+  const badges = [];
+  badges.push(sub.external ? '<span class="badge ext">'+esc(L.externalFile)+'</span>' : '<span class="badge sub">'+esc(L.subsequence)+'</span>');
+  badges.push(sub.enabled===false ? '<span class="badge off">◦ '+esc(L.inactive)+'</span>' : '<span class="badge on">● '+esc(L.active)+'</span>');
+  document.getElementById('sheetBadges').innerHTML = badges.join('');
+  const body = document.getElementById('sheetBody');
+  body.innerHTML = sub.body.length ? renderBlocks(sub.body,'detail') : '<span class="skip">'+esc(L.emptyGroup)+'</span>';
+  body.parentElement.scrollTop = 0;
+  document.getElementById('backBtn').hidden = stack.length<2;
+  const cb=document.getElementById('cmpBtn'); cb.dataset.cmp='sub:'+key; cb.hidden=false;
+}
+function closeDetail(){ stack.length=0; overlay.hidden=true; document.body.style.overflow=''; }
+function back(){ if(stack.length>1){ stack.pop(); renderDetail(); } else closeDetail(); }
+
+document.addEventListener('click', e=>{
+  const open = e.target.closest('[data-open]');
+  if(open){ openDetail(open.getAttribute('data-open')); return; }
+  if(e.target.closest('[data-close]')) closeDetail();
+});
+document.addEventListener('keydown', e=>{
+  if(e.key==='Escape' && !overlay.hidden) back();
+  const open = e.target.closest && e.target.closest('[data-open]');
+  if(open && (e.key==='Enter'||e.key===' ')){ e.preventDefault(); openDetail(open.getAttribute('data-open')); }
+});
+document.getElementById('backBtn').addEventListener('click', back);
+
+/* ============================ COMPARE (flowchart + screenshot / listing) ============================ */
+const cmpModal=document.getElementById('compareModal');
+function listingHTML(key){
+  const rows = LISTING[key] || [];
+  if(!rows.length) return '<div class="shot-missing">'+esc(L.noSteps)+'</div>';
+  let out=(L.fallbackNote?'<div class="fallback-note">'+esc(L.fallbackNote)+'</div>':'')+'<div class="listing">';
+  rows.forEach(r=>{
+    if(r.group){ out+='<div class="lgroup">'+esc(r.group)+'</div>'; return; }
+    const pad = 'margin-left:'+(r.depth*18)+'px';
+    out+=`<div class="lrow${r.dis?' dis':''}" style="${pad}"><span class="li-ico">${iconImg(r.icon)}</span><span class="li-name">${esc(r.name)}</span><span class="li-type">${esc(r.tdisp||'')}</span></div>`;
+  });
+  return out+'</div>';
+}
+function openCompare(kind,id){
+  let title, sub, blocks, variant, shotKey, listKey;
+  if(kind==='phase'){
+    const ph=MAIN.find(p=>p.name===id); if(!ph) return;
+    title=ph.title||ph.name; sub=esc(L.phase)+' · '+esc(L.compareSub);
+    blocks=ph.blocks; variant='overview';
+    shotKey=DATA.meta.mainSeq; listKey='phase:'+id;
+  } else {
+    const s=SUBS[id]; if(!s) return;
+    title=s.title; sub=(s.external?esc(L.externalSeq):esc(L.subsequence))+' · '+esc(L.compareSub);
+    blocks=s.body; variant='detail';
+    shotKey=id; listKey=id;
+  }
+  document.getElementById('cmpTitle').textContent=title;
+  document.getElementById('cmpSub').textContent=sub;
+  const flow=document.getElementById('cmpFlow');
+  flow.innerHTML = blocks.length ? renderBlocks(blocks,variant) : '<span class="skip">'+esc(L.emptyGroup)+'</span>';
+  flow.scrollTop=0;
+  const code=document.getElementById('cmpCode');
+  const shot = SHOTS[shotKey];
+  if(shot){
+    code.innerHTML='<img class="shot" alt="'+esc(title)+'" src="'+shot+'">';
+    document.getElementById('cmpCodeCap').textContent = L.capScreenshot;
+  } else {
+    code.innerHTML=listingHTML(listKey);
+    document.getElementById('cmpCodeCap').textContent = L.capFallback;
+  }
+  code.scrollTop=0;
+  cmpModal.hidden=false;
+}
+function closeCompare(){ cmpModal.hidden=true; }
+cmpModal.addEventListener('click', e=>{ if(e.target.closest('[data-close-cmp]')) closeCompare(); });
+document.addEventListener('click', e=>{ const b=e.target.closest('[data-cmp]'); if(b&&b.dataset.cmp){ const i=b.dataset.cmp.indexOf(':'); openCompare(b.dataset.cmp.slice(0,i), b.dataset.cmp.slice(i+1)); } });
+document.addEventListener('keydown', e=>{ if(e.key==='Escape' && !cmpModal.hidden){ e.stopImmediatePropagation(); closeCompare(); } }, true);
+
+/* dim toggle */
+const dimToggle = document.getElementById('dimToggle');
+function setDim(on){ document.body.classList.toggle('dim', on); dimToggle.classList.toggle('on', on); dimToggle.setAttribute('aria-checked', on); }
+setDim(false);
+dimToggle.addEventListener('click', ()=> setDim(!document.body.classList.contains('dim')));
+dimToggle.addEventListener('keydown', e=>{ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); dimToggle.click(); } });
+
+/* ============================ ATTRACT / AUTO-DEMO ============================ */
+const IDLE_MS=20000, SHOW_MS=4500, GAP_MS=900, SUPPRESS_MS=600;
+const autoToggle=document.getElementById('autoToggle');
+let autoOff=false, attractOn=false, attractI=0, idleTimer=null, attractTimers=[], suppressUntil=0, lastX=null, lastY=null;
+const nowt=()=>performance.now();
+const suppress=ms=>{ suppressUntil=nowt()+ms; };
+const suppressed=()=>nowt()<suppressUntil;
+
+const ATTRACT=(()=>{ const seen=new Set(), list=[];
+  const add=t=>{ if(t&&SUBS[t]&&!SUBS[t].external&&!seen.has(t)){ seen.add(t); list.push(t); } };
+  const walk=bs=>bs.forEach(b=>{
+    if(b.type==='node') add(b.node.target);
+    else if(b.type==='loop') walk(b.blocks);
+    else if(b.type==='branch'){ add(b.dec.target); b.paths.forEach(p=>walk(p.blocks)); if(b.merge) add(b.merge.target); }
+  });
+  MAIN.forEach(ph=>walk(ph.blocks)); return list;
+})();
+function attractPlaylist(){
+  const list=[];
+  MAIN.forEach(ph=>{ list.push({kind:'phase',id:ph.name}); });
+  ATTRACT.forEach(k=>list.push({kind:'sub',id:k}));
+  return list;
+}
+function schedule(fn,ms){ const id=setTimeout(fn,ms); attractTimers.push(id); return id; }
+function clearSchedule(){ attractTimers.forEach(clearTimeout); attractTimers=[]; }
+function startAttract(){ if(attractOn||autoOff) return; attractOn=true; attractI=0; document.body.classList.add('attract'); attractStep(); }
+function attractStep(){
+  if(!attractOn) return;
+  const pl=attractPlaylist(); if(!pl.length){ stopAttract(); return; }
+  const t=pl[attractI%pl.length];
+  suppress(SUPPRESS_MS); openCompare(t.kind, t.id);
+  schedule(()=>{ if(!attractOn) return; suppress(SUPPRESS_MS); closeCompare(); attractI++; schedule(()=>{ if(attractOn) attractStep(); }, GAP_MS); }, SHOW_MS);
+}
+function stopAttract(){ if(!attractOn) return; attractOn=false; clearSchedule(); document.body.classList.remove('attract'); closeCompare(); closeDetail(); }
+function activity(){ if(suppressed()) return; if(attractOn) stopAttract(); clearTimeout(idleTimer); if(!autoOff) idleTimer=setTimeout(startAttract, IDLE_MS); }
+function onMove(e){ if(lastX!==null && e.clientX===lastX && e.clientY===lastY) return; lastX=e.clientX; lastY=e.clientY; activity(); }
+['mousedown','keydown','wheel','touchstart','pointerdown'].forEach(ev=>document.addEventListener(ev, activity, {passive:true}));
+document.addEventListener('mousemove', onMove, {passive:true});
+function setAuto(on){ autoOff=!on; autoToggle.classList.toggle('on', on); autoToggle.setAttribute('aria-checked', on); if(!on){ stopAttract(); clearTimeout(idleTimer); } else activity(); }
+autoToggle.addEventListener('click', ()=> setAuto(autoOff));
+autoToggle.addEventListener('keydown', e=>{ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); setAuto(autoOff); } });
+
+/* ============================ STATIC TEXT ============================ */
+function fillText(){
+  document.title = 'TestStand: ' + DATA.meta.title;
+  document.getElementById('hTitle').innerHTML = 'TestStand:&nbsp;<span class="zh">'+esc(DATA.meta.title)+'</span>';
+  document.getElementById('hSub').textContent = L.headerSub;
+  document.getElementById('chipSeqLabel').textContent = L.chipSequence;
+  document.getElementById('chipSeq').textContent = DATA.meta.mainSeq;
+  document.getElementById('chipSrcLabel').textContent = L.chipSource;
+  document.getElementById('chipSrc').textContent = DATA.meta.source;
+  document.getElementById('dimLabel').textContent = L.hideDisabled;
+  document.getElementById('autoLabel').textContent = L.autoDemo;
+  document.getElementById('backBtn').textContent = '← '+L.back;
+  document.getElementById('cmpBtnLabel').textContent = L.codeAndFlow;
+  document.getElementById('attractText').textContent = L.attractText;
+  document.getElementById('cmpFlowHdr').textContent = L.flowchart;
+  document.getElementById('cmpEditorHdr').textContent = L.editorHdr;
+  document.getElementById('foot').innerHTML = L.footer;
+}
+
+/* ============================ INIT ============================ */
+fillText();
+renderLegend();
+renderOverview();
+activity();
+</script>
+</body>
+</html>
