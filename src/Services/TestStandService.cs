@@ -5184,7 +5184,13 @@ public sealed class TestStandService : ITestStandService
                 MajorVersion      = GetEngineProperty<int>("MajorVersion"),
                 MinorVersion      = GetEngineProperty<int>("MinorVersion"),
                 StationId         = GetEngineProperty<string>("StationID") ?? "",
-                ComputerName      = GetEngineProperty<string>("ComputerName") ?? Environment.MachineName
+                ComputerName      = GetEngineProperty<string>("ComputerName") ?? Environment.MachineName,
+                McpServerDirectory= AppContext.BaseDirectory,
+                // scripts\ is shipped next to the exe (see the csproj <None Include="scripts\**"/>);
+                // expose the absolute path so the doc/presentation agents don't guess "<repo>\scripts".
+                ScriptsDirectory  = Directory.Exists(Path.Combine(AppContext.BaseDirectory, "scripts"))
+                    ? Path.Combine(AppContext.BaseDirectory, "scripts")
+                    : ""
             };
         });
     }

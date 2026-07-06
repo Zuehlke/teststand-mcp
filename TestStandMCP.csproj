@@ -38,12 +38,21 @@
          (an <Include> would raise a duplicate-item error).
        - .claude\** is excluded by the SDK default globs (**/.*/**), so the agent files must
          be added explicitly via <Include>. The Link metadata preserves the .claude\agents
-         subpath in the output; PreserveNewest keeps the copy incremental. -->
+         subpath in the output; PreserveNewest keeps the copy incremental.
+       - scripts\** (the Python doc/presentation generators + their sibling HTML template)
+         are shipped alongside so a deployed bin\ is self-contained: the doc- and
+         presentation-generator agents run from ANY working directory once junctioned
+         user-wide, so a working-directory-relative "<repo>\scripts" path would not exist.
+         The agents resolve the real location via get_engine_paths → ScriptsDirectory
+         (= AppContext.BaseDirectory\scripts), which points exactly here. -->
   <ItemGroup>
     <None Update="CLAUDE.md" CopyToOutputDirectory="PreserveNewest" />
     <None Update="README.md" CopyToOutputDirectory="PreserveNewest" />
     <None Include=".claude\agents\**\*"
           Link=".claude\agents\%(RecursiveDir)%(Filename)%(Extension)"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="scripts\**\*"
+          Link="scripts\%(RecursiveDir)%(Filename)%(Extension)"
           CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
