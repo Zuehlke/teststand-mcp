@@ -31,6 +31,22 @@
     <EmbeddedResource Remove="Test\**" />
   </ItemGroup>
 
+  <!-- Ship the guidance + agent files INTO the build output so a deployed bin\ folder is
+       self-contained. On the target PC, .claude\agents\link-agents.bat junctions
+       %USERPROFILE%\.claude\agents to this deployed .claude\agents folder (see that .bat).
+       - CLAUDE.md / README.md are already default-included as <None>, so we <Update> them
+         (an <Include> would raise a duplicate-item error).
+       - .claude\** is excluded by the SDK default globs (**/.*/**), so the agent files must
+         be added explicitly via <Include>. The Link metadata preserves the .claude\agents
+         subpath in the output; PreserveNewest keeps the copy incremental. -->
+  <ItemGroup>
+    <None Update="CLAUDE.md" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="README.md" CopyToOutputDirectory="PreserveNewest" />
+    <None Include=".claude\agents\**\*"
+          Link=".claude\agents\%(RecursiveDir)%(Filename)%(Extension)"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
   <!-- NI's official requirement for hosting the TestStand engine under .NET Core/8: the engine
        loads the .NET Core runtime in-process and the host app's runtimeconfig.json MUST declare
        BOTH of these shared frameworks (mirrors <TestStand>\AdapterSupport\DotNetSupport\
