@@ -1,5 +1,32 @@
 # TestStandMCP — Behavior Rules for Claude
 
+## Rebuilding a .seq 1:1 (whole-sequence clone) — the FAST, canonical path
+
+To reproduce an existing sequence file (a "rebuild"), prefer the **whole-sequence
+clone** over the per-step insert+configure dance. `duplicate_sequence` deep-clones a
+whole sequence (steps, modules, locals, parameters, comment, all settings) — within a
+file or **cross-file** via `target_file_path`. Recipe:
+
+1. `create_sequence_file` (the new file)
+2. `copy_typedefs` (all types) — so cloned sequences/globals resolve their types by GUID
+3. `duplicate_sequence` source→target for **each** sequence, in source order, same name
+4. `delete_sequence` the default `MainSequence`
+5. `copy_file_globals` — file globals belong to no sequence, so the clone misses them
+6. `copy_file_attributes` + `set_file_properties` (comment/version)
+7. `save_sequence_file`, then **verify with `diff_sequence_files`** (the native FileDiffer)
+
+**Verification semantics** (`diff_sequence_files` / `compare_sequence_files mode=native`
+are the SAME diff — use `diff_sequence_files`):
+- In the diff values, `{val}` = TYPE-DEFAULT (not explicitly set), `[val]` = EXPLICITLY
+  set. An enum/member already at its type default must be **left unset** — setting it
+  flips `{val}`→`[val]` and creates a spurious diff.
+- A lone **`File Properties > Attributes`** delete (e.g. `NI.Analyzer.IgnoredMessages`)
+  is IRREDUCIBLE: the engine API never loads those file attributes into memory (only
+  FileDiffer's raw reader sees them), so no tool can read or reproduce them. Treat an
+  Attributes-only diff as a functional 100% match (`identical=false` is expected).
+
+See memory `teststand-whole-sequence-clone-rebuild-2026-07-08`.
+
 ## CRITICAL: How to build sequences from a flowchart/description
 
 The `teststand-sequence-builder` workflow is **interactive** — it asks the user
@@ -369,15 +396,29 @@ max+1. (`T22`.)
   descends into clusters; writes ArgVal + clears UseDefaultValues) and, for SequenceCall,
   binds `ActualArgs.<name>.Expr` + clears that arg's `UseDef`.
   `get_module_parameters` reads ViCall.Parms / VIModule.ViCall.Parms / ActualArgs.
-- **SequenceCall prototype auto-load:** setting a SeqCall target (`configure_sequence_call_module`,
-  `set_sequence_call_target`, `insert_steps_bulk`) — and `set_module_parameter` when the named arg
-  is missing — now calls `Module.LoadPrototype(0)` (the engine's "Load Prototype"). When the target
-  RESOLVES, `TS.SData.ActualArgs` gets one correctly-typed `SequenceArgument` per callee parameter
-  (real `ParamType`/`ParamRepresentation`/`Flags`) plus the cached `Prototype` container; the helper
-  then enforces `UseDef ⇔ empty Expr` (unbound args `UseDef=True`, bound `False`) — matching a genuine
-  call for the FileDiffer. Unresolvable targets (unlinked placeholder / missing file / not-yet-loaded)
-  skip silently and fall back to a bare on-demand entry. So the target file must be loadable (loaded
-  or on the search path) for the full prototype to materialise headless.
+- **Prototype auto-load on module config (ALL adapters):** every typed module-config tool now runs
+  `Module.LoadPrototype(0)` (the engine's "Load Prototype") **after** it sets the target — so the
+  step's parameter interface is populated in one call: `configure_labview_module` (VI connector
+  pane → `ViCall.Parms`), `configure_dll_module`, `configure_dotnet_module`, `configure_python_module`
+  (function prototype → `Module.Parameters`) and `configure_sequence_call_module` (callee args →
+  `TS.SData.ActualArgs`). `set_sequence_call_target` / `insert_steps_bulk` also load the SeqCall
+  prototype; `set_module_parameter` loads it when the named arg is missing. **Order matters** — the
+  load is centralized in `ConfigureModuleAsync` to run strictly after the VI-path/target is set;
+  without it the interface stays empty. For SequenceCall the load also enforces `UseDef ⇔ empty Expr`
+  (unbound args `UseDef=True`, bound `False`) — matching a genuine call for the FileDiffer. All five
+  configure tools now RETURN the loaded interface in the result's **`parameters`** list, and each
+  takes an optional **`load_prototype`** (default `true`) to skip the load when the target is not yet
+  reachable. Unresolvable targets (unlinked placeholder / missing or not-yet-loaded file / a VI in an
+  unloadable `.lvlibp` headless) skip silently — so the target must be loadable (loaded or on the
+  search path) for the interface to materialise headless.
+- **`load_module_prototype`** — adapter-agnostic standalone tool = the editor's "Load Prototype"
+  button on any step (LabVIEW / DLL·CVI / .NET / **ActiveX** / SequenceCall). Two uses: (1) after a
+  `configure_*` with `load_prototype:false`, once the target is reachable; (2) **RE-SYNC a caller
+  after the target's own interface changed** — e.g. a subsequence's Parameters were edited, or a
+  DLL/VI/ActiveX signature changed — so the caller's arguments match again. Does NOT change the
+  adapter; non-destructive (existing bindings matched by name). Returns `{stepName, adapter,
+  prototypeLoaded, note, parameters[]}` — `prototypeLoaded:false` + a `note` when the target could
+  not be resolved. (New tool NAME → needs a fresh MCP session to appear in the catalog after rebuild.)
 - With element names mirrored, a full tool-driven rebuild of TFW_DemoModule.seq
   diffs **identical (0 differences)** against the original (`T32`).
 
@@ -400,3 +441,80 @@ max+1. (`T22`.)
   (`insert_local_variable` / `insert_sequence_parameter`) and pass the planned `parameters` to
   `validate_sequence_plan` so it catches a missing `Parameters`. A parameter written inside a
   sub-sequence and read back by the caller must be passed **by reference** (`pass_by_reference:true`).
+
+### 1:1-rebuild tool-gap batch (2026-07-07)
+Closed the residual gaps found rebuilding `TFW_MCP_Test.seq`. All verified live except where noted.
+- **Enum leaf reads** — `get_file_globals` / `get_property_object` / `get_property_tree` return an
+  enum leaf as `valueType:"Enum"`, `value:{ordinal, symbolicName}` (a plain read throws on enums, so
+  they used to come back `Unknown`/`Empty`/`0`). NUANCE: a value set by raw ORDINAL reads back with
+  an empty `symbolicName` until reload; set by NAME (or the authored default) keeps it — the ordinal
+  is always right.
+- **`value_type='enum'`** on `set_property_value` (+ new `type_name`) and `create_step_property`
+  (`type_name` existed): creates the member as an instance of the named enum typedef and sets its
+  ordinal/name (CoerceToEnum) — so an enum container-member gets its real type, not an anonymous
+  container. NEW enum values/params ⇒ need a fresh MCP session (see caveat below).
+- **`set_file_global`** now types a boolean correctly (was writing "true"/"false" as a String →
+  never persisted); it PRESERVES an existing global's authored type. NEW **`set_file_global_comment`**
+  (FileGlobals twin of `set_local_variable_comment`; dotted path reaches container members).
+- **`compare_sequence_files` DEFAULTS to `mode='native'`** (the authoritative FileDiffer, ==
+  `diff_sequence_files`). Use it to VERIFY a rebuild. `mode='structural'` is the old fast in-process
+  compare — now self-labelled (`fidelity`/`note`); its `totalDifferences==0` does NOT prove identity.
+- **`@idx:N` step selector** (0-based group index) added alongside `Name#N`; works in EVERY by-name
+  step tool (`set_step_*`, `set_module_parameter`, `configure_*`).
+- **`set_step_property` auto-detect peeks the target type first** — writing "True"/"False" to a
+  String expression prop (`ActualArgs.<arg>.Expr`, any `*.Expr`) stays a String (no more "Expected
+  Boolean, found String"); string set also retries CoerceToEnum for enum-by-label.
+- **Nameless `Label`** (empty name = blank spacer) auto-gets `TS.Icon="ni_blank.ico"` + step flag
+  `0x4000000` on insert (named labels keep `label.ico`); bulk now allows an empty name for a Label.
+- **Action step calling a subsequence** — set adapter `Sequence` (via `change_step_adapter` or
+  `insert_step`/`insert_steps_bulk` `adapter='Sequence'`), then `configure_sequence_call_module`
+  (works on ANY Sequence-Adapter step; the step keeps its `Action` type).
+- **Comment/description encoding is Windows-1252, NOT lossy for `–`/`—`/`…`/`•`/`€`/`™`/curly quotes**
+  — those SURVIVE a round-trip; only truly-non-1252 chars (`→` `✓` emoji/CJK) become `?`. The guard
+  was over-warning (checked `≤0xFF`); now Windows-1252-accurate. (This branch uses a hardcoded
+  1252-extras table; another branch fixed it via `WideCharToMultiByte` — prefer that on merge.)
+- **CAVEAT — the MCP client validates args against the schema cached at session start.** New tool
+  NAMES *and* new ENUM VALUES / optional PARAMS (`value_type='enum'`, compare `mode`,
+  `set_property_value` `type_name`, the `Sequence` adapter) only appear after a FRESH session; before
+  that they are rejected with `invalid_enum_value`. Rebuild the server, then start a new session.
+
+### 1:1-rebuild tool-gap batch — wave 2 (2026-07-07)
+Closes the P1 analyzer errors and the LabVIEW-metadata diffs.
+- **Nested member with a named/enum type — `set_property_value value_type='named_type'` (+`type_name`)**
+  creates a member as a FULL instance of a file-defined type (a container like
+  `TFW_DB_TestCasesLimits` / `VisionSensorSbsi_Reply_Payload` / `Error`, or a named leaf),
+  MATERIALISING the type's fields (like the editor) via `Engine.NewPropertyObject(NamedType)` +
+  `SetPropertyObject(InsertIfMissing)` — so afterwards you only set the fields that differ. This is
+  the ONLY way a nested container member gets its named type instead of an anonymous `Container`
+  (the cause of every `NI_ExpressionEvaluationError "Expected <Type>, found Container"`).
+  `value_type='enum'` (+`type_name`) creates an enum leaf inside a container — pass its value as the
+  new **`ordinal`** param (numeric, preferred) or `value` (ordinal or symbolic name). Same on
+  `create_step_property`. **Recipe:** `copy_typedefs` first (so the type exists), then
+  `set_property_value(named_type)` for each typed container member, then set only the non-default
+  fields; enum leaves via `value_type='enum'` + `ordinal`.
+- **LabVIEW `.lvlibp` module metadata — `copy_step_module`.** VIs in a packed library can't load
+  headless, so `load_module_prototype` returns `prototypeLoaded:false` and the connector pane
+  (`ViCall.Parms`, Namespace, VI Description, Connector-Pane-Checksum) cannot be regenerated. Instead,
+  **copy the cached module subtree from the SOURCE `.seq` step** onto the rebuilt step:
+  `copy_step_module` deep-copies `TS.SData` (a SequenceCall's ActualArgs, a RunVIAsync's
+  `SeqCallStepAdditions` incl. `Parameter0..3`, an adapter module) + the step-own `VIModule`
+  (ViCall metadata), and aligns the adapter — no LabVIEW needed. Run
+  `copy_typedefs` first. **(2026-07-08 fix — see [[teststand-copystepmodule-clone-fix]]):** each
+  subtree is now `PropertyObject.Clone(path, 0x20000000 PropOption_CopyAllFlags)`d BEFORE
+  `SetPropertyObject` — a live source object still has a parent and TestStand rejects it ("already
+  has a parent object. You must first clone the item"), which had made `copiedPaths` come back empty.
+  It ALSO clones the authored step-config subtrees a fresh insert doesn't instantiate from the
+  step-type template — `TS.AdditionalResultsHints`, `TS.CustomResults`, `TS.ErrorDialogOptions`,
+  `Result.TimeoutOccurred` (each copied only if present on the source) — so a NON-adapter step like
+  an `NI_Wait` reproduces faithfully too (its wait TARGET still needs `configure_wait`, as that lives
+  in step-root props, not `TS.SData`). Verified: rebuilding only `Init`+`Close` of
+  `TFW_Symphony_EOL.seq` diffs 0 under both sequences incl. all three `.lvlibp` LabVIEW steps.
+  (Reading a VI's connector-pane bindings: `get_module_parameters` returns
+  Label→ArgVal per parameter; the VI-level metadata reads via `get_property_tree` scoped with
+  `lookup_string` to the step's `…ViCall` — scope it, don't dump the whole `TS` at low depth, or the
+  node budget truncates it.)
+- **`set_step_property` now resolves `Icon` and `Flags`.** `property_path='Icon'` → `TS.Icon` (the
+  step icon file, e.g. `ni_blank.ico`); `property_path='Flags'` → the step's flag bitfield via
+  `SetFlags` (decimal or `0x`-hex, e.g. `0x4000000` to blank a nameless Label's icon). Previously both
+  errored "Unknown variable or property name". (Nameless-Label auto-blanking + bulk empty-name Label
+  landed in wave 1.)

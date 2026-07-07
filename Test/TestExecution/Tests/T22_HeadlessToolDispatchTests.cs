@@ -558,8 +558,11 @@ public class T22_HeadlessToolDispatchTests : TestBase
 
             await Ts.CreateSequenceFileAsync(file2);
 
+            // mode='structural' selects the fast in-process comparison whose result carries
+            // sequencesOnlyInFile1 (the DEFAULT mode is now 'native' = the FileDiffer, covered by
+            // the diff_sequence_files tests).
             var r = await Call("compare_sequence_files",
-                $"{{\"file_path_1\":{J(TempSeqFile)},\"file_path_2\":{J(file2)}}}");
+                $"{{\"file_path_1\":{J(TempSeqFile)},\"file_path_2\":{J(file2)},\"mode\":\"structural\"}}");
             Assert.That(r.IsError, Is.False, TextOf(r));
 
             var doc  = Doc(r);

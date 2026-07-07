@@ -13,16 +13,62 @@ namespace TestStandMCP.Tools;
 /// </summary>
 public static class InputGuards
 {
-    // ── A3: comment / description encoding is Latin-1 ────────────────────────────
-    // TestStand round-trips step / sequence / file comments through a Windows-1252 / Latin-1
-    // path. Characters representable in Latin-1 (ASCII plus the Latin-1 supplement — German
-    // umlauts ä ö ü ß, é, °, ± …) survive; anything OUTSIDE it (→ U+2192, — U+2014, • U+2022,
-    // … U+2026, and any other code point above U+00FF) is silently written as a literal '?'.
-    // We flag exactly the characters above U+00FF: that catches the proven data-loss cases
-    // while never false-flagging a Latin-1 character such as an umlaut.
+    // ── A3: comment / description encoding is WINDOWS-1252 ───────────────────────
+    // TestStand stores step / sequence / file comments, descriptions AND string values in the
+    // Windows-1252 code page (the .seq binary/XML string encoding). Verified empirically by a
+    // save -> close -> reopen round-trip: en dash (U+2013), em dash (U+2014), ellipsis (U+2026),
+    // bullet (U+2022), Euro (U+20AC), trademark (U+2122), curly quotes ... all SURVIVE -- they are
+    // part of Windows-1252 (the printable 0x80-0x9F block ISO-8859-1 lacks). Only code points that
+    // Windows-1252 genuinely cannot represent (e.g. arrow U+2192, checkmark U+2713, CJK, emoji)
+    // become a literal '?'. This is a FILE-FORMAT limitation, not a write-API one: the same loss
+    // happens on expression / string-value writes (SetValString) too, so it cannot be avoided by
+    // "writing UTF-8".
+    //
+    // The guard therefore flags a character iff it is NOT representable in Windows-1252 -- i.e.
+    // above U+00FF AND not one of the 27 extra printable code points 1252 maps into 0x80-0x9F. The
+    // previous guard used a plain "> U+00FF" (ISO-8859-1) test and so FALSE-flagged U+2013/U+2014/
+    // U+2026/U+20AC/U+2122/curly-quotes as lost when they actually round-trip fine.
+
+    /// <summary>The 27 Unicode code points above U+00FF that Windows-1252 maps into its 0x80-0x9F
+    /// range (so they DO survive TestStand's comment/string encoding, unlike other &gt; U+00FF chars):
+    /// Euro, curly quotes, en/em dash, ellipsis, bullet, dagger, per-mille, trademark, OElig, etc.</summary>
+    // Code points (as integers — ASCII-only source, no glyph literals, so the set is byte-exact
+    // regardless of how the .cs file is decoded) that Windows-1252 maps into its 0x80-0x9F block.
+    private static readonly HashSet<int> Cp1252Extras = new()
+    {
+        0x20AC,        // 0x80 Euro sign
+        0x201A,        // 0x82 single low-9 quotation mark
+        0x0192,        // 0x83 latin small letter f with hook (florin)
+        0x201E,        // 0x84 double low-9 quotation mark
+        0x2026,        // 0x85 horizontal ellipsis
+        0x2020, 0x2021,// 0x86/87 dagger / double dagger
+        0x02C6,        // 0x88 modifier letter circumflex accent
+        0x2030,        // 0x89 per mille sign
+        0x0160,        // 0x8A latin capital letter S with caron
+        0x2039,        // 0x8B single left-pointing angle quotation mark
+        0x0152,        // 0x8C latin capital ligature OE
+        0x017D,        // 0x8E latin capital letter Z with caron
+        0x2018, 0x2019,// 0x91/92 left/right single quotation mark
+        0x201C, 0x201D,// 0x93/94 left/right double quotation mark
+        0x2022,        // 0x95 bullet
+        0x2013, 0x2014,// 0x96/97 en dash / em dash
+        0x02DC,        // 0x98 small tilde
+        0x2122,        // 0x99 trade mark sign
+        0x0161,        // 0x9A latin small letter s with caron
+        0x203A,        // 0x9B single right-pointing angle quotation mark
+        0x0153,        // 0x9C latin small ligature oe
+        0x017E,        // 0x9E latin small letter z with caron
+        0x0178,        // 0x9F latin capital letter Y with diaeresis
+    };
+
+    /// <summary>True when <paramref name="ch"/> is representable in Windows-1252 (so it survives a
+    /// comment/description/string round-trip): any code point &lt;= U+00FF, plus the 27 extras 1252
+    /// maps into 0x80-0x9F (en/em dash, ellipsis, bullet, Euro, trademark, curly quotes, ...).</summary>
+    public static bool IsWindows1252Representable(char ch) => ch <= 0xFF || Cp1252Extras.Contains(ch);
 
     /// <summary>Returns the distinct characters in <paramref name="text"/> that TestStand's
-    /// Latin-1 comment encoding cannot represent and would replace with '?'. Empty when safe.</summary>
+    /// Windows-1252 comment/string encoding cannot represent and would replace with '?'. Empty when
+    /// safe. (Name kept for back-compat; the check is Windows-1252-accurate, not plain ISO Latin-1.)</summary>
     public static IReadOnlyList<char> FindNonLatin1Characters(string? text)
     {
         var offending = new List<char>();
@@ -30,14 +76,16 @@ public static class InputGuards
         var seen = new HashSet<char>();
         foreach (var ch in text!)
         {
-            if (ch <= 0xFF) continue;            // representable in Latin-1
-            if (seen.Add(ch)) offending.Add(ch); // distinct, first-seen order
+            if (IsWindows1252Representable(ch)) continue; // survives the 1252 round-trip
+            if (seen.Add(ch)) offending.Add(ch);          // distinct, first-seen order
         }
         return offending;
     }
 
     /// <summary>Builds a human-readable warning when <paramref name="text"/> contains characters
-    /// that TestStand's Latin-1 comment encoding would replace with '?'. Null when the text is safe.</summary>
+    /// that TestStand's Windows-1252 comment/string encoding would replace with '?'. Null when the
+    /// text is safe. Characters representable in Windows-1252 (en/em dash, ellipsis, bullet, Euro,
+    /// trademark, curly quotes, umlauts, accents, ...) are NOT flagged -- they survive the round-trip.</summary>
     public static string? DescribeLatin1Loss(string? text, string fieldLabel = "text")
     {
         var bad = FindNonLatin1Characters(text);
@@ -45,14 +93,16 @@ public static class InputGuards
 
         var sb = new StringBuilder();
         sb.Append("WARNING: the ").Append(fieldLabel)
-          .Append(" contains character(s) outside Latin-1 that TestStand stores as '?': ");
+          .Append(" contains character(s) outside Windows-1252 that TestStand stores as '?': ");
         for (int i = 0; i < bad.Count; i++)
         {
             if (i > 0) sb.Append(' ');
             sb.Append('\'').Append(bad[i]).Append("' (U+")
               .Append(((int)bad[i]).ToString("X4")).Append(')');
         }
-        sb.Append(". Use ASCII equivalents (e.g. -> for the arrow, - for a dash, ... for an ellipsis, * for a bullet).");
+        sb.Append(". Use an ASCII/Windows-1252 equivalent (e.g. '->' for a U+2192 arrow, '[x]' for a "
+                + "checkmark). Note: en/em dashes, ellipsis, bullet, Euro, trademark and curly quotes "
+                + "ARE supported and need no substitution.");
         return sb.ToString();
     }
 

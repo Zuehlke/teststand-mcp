@@ -131,7 +131,10 @@ public class TestStandToolRegistry
             "FORBIDDEN unless exceptional: 'Goto', 'Label' — legacy only, not for if/else or loops. " +
             "When a step's concrete type is unclear, default to 'SequenceCall' (may stay unlinked) " +
             "rather than 'Statement'. " +
-            "Adapters: 'LabVIEW', 'CVI', 'C++/DLL', 'DotNet', 'Python', 'ActiveX', 'None' (default).",
+            "Adapters: 'LabVIEW', 'CVI', 'C++/DLL', 'DotNet', 'Python', 'ActiveX', 'Sequence', 'None' " +
+            "(default). Use adapter='Sequence' to make a NON-SequenceCall step (e.g. an 'Action') call " +
+            "a subsequence — then configure it with configure_sequence_call_module. The step KEEPS its " +
+            "type (an Action stays an Action) but calls the subsequence via the Sequence Adapter.",
             s => s
                 .AddRequired("sequence_file_path", "string", "Path to the sequence file")
                 .AddRequired("sequence_name", "string", "Name of the sequence")
@@ -139,7 +142,7 @@ public class TestStandToolRegistry
                 .AddRequired("step_type", "string", "Step type. Use 'NI_Flow_If'/'NI_Flow_Else'/'NI_Flow_End' for branching, never 'Goto'/'Label'.")
                 .AddRequired("step_name", "string", "Name for the new step")
                 .AddOptional("index", "integer", "Insert position (default: append at end)", -1)
-                .AddOptional("adapter", "string", "Adapter name: 'LabVIEW', 'CVI', 'C++/DLL', 'DotNet', 'Python', 'ActiveX', 'None' (default)"),
+                .AddOptional("adapter", "string", "Adapter name: 'LabVIEW', 'CVI', 'C++/DLL', 'DotNet', 'Python', 'ActiveX', 'Sequence', 'None' (default). 'Sequence' on an Action step = an Action that calls a subsequence."),
             InsertStepAsync);
 
         Register("insert_steps_bulk",
@@ -172,7 +175,8 @@ public class TestStandToolRegistry
                         .AddRequired("step_type", "string",
                             "Step type, e.g. 'SequenceCall', 'NI_Flow_If', 'NI_Flow_End', 'NI_Wait', 'Statement'.")
                         .AddOptional("adapter", "string",
-                            "Adapter: 'LabVIEW', 'CVI', 'C++/DLL', 'DotNet', 'Python', 'ActiveX', 'None' (default)")
+                            "Adapter: 'LabVIEW', 'CVI', 'C++/DLL', 'DotNet', 'Python', 'ActiveX', 'Sequence', 'None' (default). " +
+                            "'Sequence' on a non-SequenceCall step (e.g. 'Action') makes it call a subsequence via the Sequence Adapter.")
                         .AddOptional("comment", "string", "Step comment/description (kept short)")
                         .AddOptional("expression", "string",
                             "Step expression (e.g. an NI_Flow_If condition). For NI_Flow_For it is the loop-continue test (ConditionExpr), e.g. 'Locals.i < 10'.")
@@ -296,6 +300,17 @@ public class TestStandToolRegistry
                 .AddRequired("comment", "string", "Comment text to set"),
             SetParameterCommentAsync);
 
+        Register("set_file_global_comment",
+            "Set the comment/description of a FILE GLOBAL (or a nested container member via a dotted " +
+            "path, e.g. 'MyCont.Field'). The FileGlobals counterpart of set_local_variable_comment " +
+            "(which is Locals-only) and set_parameter_comment; writes to the file globals' " +
+            "authored-defaults container (the same one set_file_global writes values to).",
+            s => s
+                .AddRequired("sequence_file_path", "string", "Path to the sequence file")
+                .AddRequired("variable_name", "string", "File global name, or a dotted path to a nested member")
+                .AddRequired("comment", "string", "Comment text to set"),
+            SetFileGlobalCommentAsync);
+
         Register("get_local_variables",
             "Get all local variables of a sequence with their names, types and current values.",
             s => s
@@ -390,7 +405,9 @@ public class TestStandToolRegistry
             "the optional 'value' is applied. Examples: (1) Result.TimeoutOccurred as boolean; " +
             "(2) TS.SData.ActualArgs.SetPoint as named_type/SequenceArgument, then set its Expr " +
             "via set_step_property; (3) TS.SData.ViCall.Parms with array_elements/5, then fill " +
-            "each Parms[i].Label/ArgVal via set_step_property.",
+            "each Parms[i].Label/ArgVal via set_step_property. value_type 'enum' creates the member " +
+            "as an instance of a named enum typedef (+type_name = the enum, e.g. 'Color'; value = its " +
+            "ordinal number or symbolic name) so it gets its real enum type, not an anonymous container.",
             s => s
                 .AddRequired("sequence_file_path", "string", "Path to the sequence file")
                 .AddRequired("sequence_name", "string", "Name of the sequence")
@@ -401,16 +418,17 @@ public class TestStandToolRegistry
                     "'TS.ErrorDialogOptions'). For 'array_elements' this addresses the existing array.")
                 .AddRequired("value_type", "string",
                     "Type to create: number/boolean/string/container/reference, 'named_type' " +
-                    "(+type_name), or 'array_elements' (+num_elements).",
+                    "(+type_name), 'enum' (+type_name), or 'array_elements' (+num_elements).",
                     new[] { "number", "boolean", "string", "container", "reference",
-                            "named_type", "array_elements" })
+                            "named_type", "enum", "array_elements" })
                 .AddOptional("type_name", "string",
                     "TestStand type name for value_type='named_type' (e.g. 'SequenceArgument', " +
-                    "'Error', 'ErrorDialogOptions', 'NI_CustomResult').")
+                    "'Error', 'ErrorDialogOptions', 'NI_CustomResult') or the enum type for 'enum'.")
                 .AddOptional("num_elements", "number",
                     "Element count for value_type='array_elements' (SetNumElements).")
                 .AddOptional("value", "string",
-                    "Optional scalar value to assign after creation (number/boolean/string only).")
+                    "Optional scalar value to assign after creation (number/boolean/string, or for " +
+                    "'enum' the ordinal number or symbolic name).")
                 .AddOptional("unescape", "boolean",
                     "Decode \\r \\n \\t \\\\ \\uXXXX escapes in 'value' (default false).", false)
                 .AddOptional("save", "boolean", "Save the file after writing (default true).", true),
@@ -833,6 +851,44 @@ public class TestStandToolRegistry
                 .AddOptional("type_names", "array", "Specific type names to copy; omit to copy all embedded types.")
                 .AddOptional("save", "boolean", "Save the destination file after copying (default true).", true),
             CopyTypeDefsAsync);
+
+        Register("copy_file_attributes",
+            "Copy the file-level name/value ATTRIBUTES from one sequence file into another. TestStand " +
+            "attributes are a SEPARATE namespace from subproperties (reached via the file-root " +
+            "PropertyObjectFile's Attributes), invisible to get_property_tree and not reproduced by " +
+            "copy_typedefs / copy_step_module. Copies whatever the ENGINE exposes on the loaded file; " +
+            "each subtree is flag-preservingly cloned before it is attached. Pass explicit top-level " +
+            "'attribute_names' or omit to copy all. Returns {copiedCount, copied[], warnings[]}. " +
+            "IMPORTANT LIMITATION: the Sequence Analyzer's ignored-message list (NI.Analyzer." +
+            "IgnoredMessages, shown by FileDiffer under 'File Properties > Attributes > NI') is NOT " +
+            "loaded into the in-memory object by the TestStand engine API at all — only FileDiffer's " +
+            "raw disk reader sees it — so this tool CANNOT read or reproduce it, and a rebuild will " +
+            "retain that one 'Attributes' diff. That residual is cosmetic (a stale analyzer artifact) " +
+            "and is expected; see diff_sequence_files.",
+            s => s
+                .AddRequired("source_file_path", "string", "File to copy attributes FROM (e.g. the original)")
+                .AddRequired("dest_file_path", "string", "File to copy the attributes INTO (the rebuild)")
+                .AddOptional("attribute_names", "array", "Top-level attribute names to copy; omit to copy all.")
+                .AddOptional("save", "boolean", "Save the destination file after copying (default true).", true),
+            CopyFileAttributesAsync);
+
+        Register("copy_file_globals",
+            "Copy the FILE GLOBAL variables (the FileGlobalDefaults container) from one sequence file " +
+            "into another via a flag-preserving deep clone — each global with its exact type, value, " +
+            "comment, PropFlags and nested container/enum members (enum ordinals, Object References and " +
+            "typed container members are all preserved, including the FileDiffer's [val]/{val} " +
+            "explicit-vs-default distinction). File globals are NOT part of any sequence, so " +
+            "duplicate_sequence and copy_step_module do NOT carry them — this is the reliable way to " +
+            "reproduce them in a 1:1 rebuild. Run copy_typedefs FIRST so any custom types the globals " +
+            "reference exist in the destination. Pass explicit top-level 'global_names' to copy only " +
+            "those, or omit to copy every file global from the source. Returns {copiedCount, copied[], " +
+            "warnings[]}.",
+            s => s
+                .AddRequired("source_file_path", "string", "File to copy file globals FROM (e.g. the original)")
+                .AddRequired("dest_file_path", "string", "File to copy the file globals INTO (the rebuild)")
+                .AddOptional("global_names", "array", "Top-level file-global names to copy; omit to copy all.")
+                .AddOptional("save", "boolean", "Save the destination file after copying (default true).", true),
+            CopyFileGlobalsAsync);
 
         // Sequence Editor
         Register("launch_sequence_editor",
@@ -1348,16 +1404,19 @@ public class TestStandToolRegistry
             SetStepBatchSyncOptionAsync);
 
         Register("change_step_adapter",
-            "Change the adapter (LabVIEW, CVI, C++/DLL, .NET, Python, ActiveX/COM, None, etc.) of a step.",
+            "Change the adapter (LabVIEW, CVI, C++/DLL, .NET, Python, ActiveX/COM, Sequence, None, etc.) " +
+            "of a step. Changing the ADAPTER keeps the step's TYPE: set it to 'Sequence' on an 'Action' " +
+            "step to make that Action call a subsequence (then configure_sequence_call_module sets the " +
+            "target — it works on any Sequence-Adapter step, not only 'SequenceCall' steps).",
             s => s
                 .AddRequired("file_path", "string", "Path to the sequence file")
                 .AddRequired("sequence_name", "string", "Name of the sequence")
                 .AddRequired("step_group", "string", "Step group: 'Setup', 'Main', or 'Cleanup'")
                 .AddRequired("step_name", "string", "Name of the step")
                 .AddRequired("new_adapter", "string",
-                    "Adapter: 'LabVIEW', 'CVI', 'C++/DLL', 'DotNet', 'Python', 'ActiveX', 'None' " +
+                    "Adapter: 'LabVIEW', 'CVI', 'C++/DLL', 'DotNet', 'Python', 'ActiveX', 'Sequence', 'None' " +
                     "(friendly name or exact key name, e.g. 'Automation Adapter' for ActiveX, " +
-                    "'DLL Flexible Prototype Adapter' for C++/DLL)"),
+                    "'DLL Flexible Prototype Adapter' for C++/DLL, 'Sequence Adapter' for Sequence)"),
             ChangeStepAdapterAsync);
 
         Register("get_step_unique_id",
@@ -1452,22 +1511,39 @@ public class TestStandToolRegistry
         // ── Sequence File Comparison ──────────────────────────────────────────
 
         Register("compare_sequence_files",
-            "Compare two TestStand sequence files and return a structured diff: " +
-            "sequences only in file1, sequences only in file2, and for sequences present " +
-            "in both files: added/removed/modified steps, changed local variables, " +
-            "parameters, and sequence properties.",
+            "Compare two TestStand sequence files. mode='native' (DEFAULT) runs NI's native FileDiffer " +
+            "for an AUTHORITATIVE, field-level diff (identical to diff_sequence_files) — use this to " +
+            "VERIFY a rebuild/clone. mode='structural' runs a fast, in-process COARSE comparison that " +
+            "only sees sequence/step NAMES, a few step properties (RunMode, Pre/Post/Status, Comment, " +
+            "adapter) and the presence of locals/parameters; it does NOT see ActualArgs, container " +
+            "members, parameter defaults/comments or threading, so its result carries fidelity/note " +
+            "fields and a TotalDifferences of 0 does NOT prove the files are identical. Prefer 'native' " +
+            "unless you explicitly want the quick structural overview.",
             s => s
                 .AddRequired("file_path_1", "string", "Path to the first sequence file")
-                .AddRequired("file_path_2", "string", "Path to the second sequence file"),
+                .AddRequired("file_path_2", "string", "Path to the second sequence file")
+                .AddOptional("mode", "string",
+                    "'native' (default, authoritative FileDiffer) or 'structural' (fast, coarse in-process).",
+                    "native", new[] { "native", "structural" }),
             CompareSequenceFilesAsync);
 
         Register("diff_sequence_files",
-            "Run NI TestStand's NATIVE FileDiffer on two sequence files and return its detailed, " +
-            "classified diff — exactly what the Sequence Editor's Diff/Merge view shows. Returns " +
-            "per-file tallies (changes/insertions/deletions) plus a flat list of differences, each " +
-            "with a change type (Insert, Delete, ValueChange, Conflict, Moved), the property-tree " +
-            "path, and the value in each file. More detailed than compare_sequence_files (which is " +
-            "a lighter, in-process structural comparison).",
+            "THE canonical way to VERIFY a rebuild/clone: runs NI TestStand's NATIVE FileDiffer on two " +
+            "sequence files and returns its detailed, classified diff — exactly what the Sequence " +
+            "Editor's Diff/Merge view shows. (compare_sequence_files mode='native' is the SAME diff; " +
+            "prefer THIS tool for verification. Use compare_sequence_files only for its fast, coarse " +
+            "'structural' mode.) Returns per-file tallies (changes/insertions/deletions) plus a flat " +
+            "list of differences, each with a change type (Insert, Delete, ValueChange, Conflict, " +
+            "Moved), the property-tree path, and the value in each file. " +
+            "READING THE VALUES: a value in braces {val} means a TYPE-DEFAULT (the property was NOT " +
+            "explicitly set) while brackets [val] means an EXPLICITLY-SET value — so an enum/member " +
+            "already at its type default should be LEFT UNSET when rebuilding (setting it flips {val}→" +
+            "[val] and creates a spurious diff). " +
+            "KNOWN IRREDUCIBLE RESIDUAL: a 'File Properties > Attributes' Delete (e.g. NI > Analyzer > " +
+            "IgnoredMessages) cannot be closed by any rebuild — the TestStand engine API does not load " +
+            "these file attributes into the in-memory object (only FileDiffer's raw reader sees them), " +
+            "so no tool can read or reproduce them. Treat such an Attributes-only diff as a functional " +
+            "match (identical=false is expected in that case).",
             s => s
                 .AddRequired("file_path_1", "string", "Path to the first (base) sequence file")
                 .AddRequired("file_path_2", "string", "Path to the second sequence file to diff against file 1"),
@@ -1830,14 +1906,25 @@ public class TestStandToolRegistry
         // ── Duplicate Sequence ─────────────────────────────────────────────────
 
         Register("duplicate_sequence",
-            "Duplicate a sequence within the same file or to a different file. " +
-            "Creates a new sequence with the given name containing a copy of the source sequence.",
+            "Deep-clone a whole sequence — EVERY step, code module, local, parameter, the sequence " +
+            "Comment and all settings (RunMode/RecordResults/failure+cleanup options) — within the same " +
+            "file or into a DIFFERENT file (target_file_path). This is a flag-preserving copy (not a " +
+            "name-only shell), so it is the FASTEST and most faithful primitive for a 1:1 cross-file " +
+            "rebuild: it replaces the per-step insert_steps_bulk + copy_step_module dance with ONE call " +
+            "per sequence. For a cross-file clone the referenced data types must already exist in the " +
+            "target (run copy_typedefs FIRST) — the clone carries type references by GUID. " +
+            "FULL 1:1 REBUILD RECIPE: (1) create_sequence_file; (2) copy_typedefs (all types); " +
+            "(3) duplicate_sequence source→target for each sequence, in source order, keeping the same " +
+            "name; (4) delete_sequence the default 'MainSequence'; (5) copy_file_globals (globals are " +
+            "not part of any sequence); (6) copy_file_attributes + set_file_properties (comment/" +
+            "version); (7) save_sequence_file, then verify with diff_sequence_files.",
             s => s
                 .AddRequired("source_file_path", "string", "Path to the source sequence file")
                 .AddRequired("source_sequence_name", "string", "Name of the sequence to copy")
                 .AddRequired("new_sequence_name", "string", "Name for the new duplicate sequence")
                 .AddOptional("target_file_path", "string",
-                    "Path to the target sequence file (default: same as source file)"),
+                    "Path to the target sequence file (default: same as source file). For a different " +
+                    "file, run copy_typedefs first so the clone's type references resolve."),
             DuplicateSequenceAsync);
 
         // ── Array Variable Operations ──────────────────────────────────────────
@@ -1902,8 +1989,17 @@ public class TestStandToolRegistry
             "Targets a sequence's local variable (with sequence_name) or a file global (without). " +
             "It resolves against Locals / FileGlobals ONLY — it NEVER reaches a step's own property; " +
             "use set_step_property (a dotted path relative to the step) for that. Use THIS tool when " +
-            "you need to CREATE the property and/or fix its type (incl. 'container'); to merely set " +
-            "the value of an EXISTING variable, set_local_variable / set_file_global are simpler.",
+            "you need to CREATE the property and/or fix its type (incl. 'container' or 'enum'); to " +
+            "merely set the value of an EXISTING variable, set_local_variable / set_file_global are " +
+            "simpler. " +
+            "value_type 'named_type' (+ type_name) creates the member as a FULL instance of a " +
+            "file-defined type — a container (e.g. 'TFW_DB_TestCasesLimits', 'VisionSensorSbsi_Reply_Payload', " +
+            "'Error') materialises with ALL its fields (like the editor), so afterwards you only set the " +
+            "fields that differ from the default; a named leaf gets its real type too. This is the ONLY " +
+            "way a nested container member gets its named type instead of an anonymous 'Container' " +
+            "(which otherwise causes analyzer 'Expected <Type>, found Container' errors). " +
+            "value_type 'enum' (+ type_name) creates/sets an enum-typed member; pass its value as " +
+            "'ordinal' (numeric, preferred) or 'value' (ordinal number OR symbolic name).",
             s => s
                 .AddRequired("file_path", "string", "Path to the sequence file")
                 .AddOptional("sequence_name", "string",
@@ -1912,9 +2008,14 @@ public class TestStandToolRegistry
                     "Property name or dotted lookup path (e.g. 'MyContainer.Sub')")
                 .AddRequired("value_type", "string",
                     "Value type to create/set",
-                    new[] { "number", "boolean", "string", "container" })
+                    new[] { "number", "boolean", "string", "container", "named_type", "enum" })
                 .AddOptional("value", "string",
-                    "Value to assign (omitted/ignored for 'container')"),
+                    "Value to assign (omitted for 'container'/'named_type'; for 'enum' the ordinal or symbolic name)")
+                .AddOptional("type_name", "string",
+                    "For value_type 'named_type' or 'enum': the file-defined type name (e.g. " +
+                    "'TFW_DB_TestCasesLimits', 'Error', 'Color'). Required when creating.")
+                .AddOptional("ordinal", "integer",
+                    "For value_type 'enum': the numeric enum value (preferred over 'value')."),
             SetPropertyValueAsync);
 
         Register("delete_sub_property",
@@ -2056,12 +2157,15 @@ public class TestStandToolRegistry
             "ParamType/ParamRepresentation/Flags) with unbound args left at UseDef=True — only if the " +
             "target cannot be resolved (headless/missing file) is a bare entry created on demand. Pass " +
             "an empty value to revert to 'use default'. Falls back to the legacy flat Module.Parameters " +
-            "container for other adapters.",
+            "container for other adapters. step_name accepts the same selectors as set_step_* for " +
+            "duplicate-named steps: 'Name#N' (the Nth 1-based occurrence) or '@idx:N' (the 0-based " +
+            "index within the group).",
             s => s
                 .AddRequired("file_path", "string", "Path to the sequence file")
                 .AddRequired("sequence_name", "string", "Name of the sequence")
                 .AddRequired("step_group", "string", "Step group: 'Setup', 'Main', or 'Cleanup'")
-                .AddRequired("step_name", "string", "Name of the step")
+                .AddRequired("step_name", "string",
+                    "Name of the step, or a selector: 'Name#N' (Nth occurrence) / '@idx:N' (0-based group index).")
                 .AddRequired("parameter_name", "string",
                     "Parameter name: VI connector-pane Label ('parent.child' for cluster members) " +
                     "or SequenceCall argument name.")
@@ -2360,7 +2464,9 @@ public class TestStandToolRegistry
 
         Register("configure_dotnet_module",
             "Configure a step's .NET code module: assembly, class and method. " +
-            "Switches the step to the .NET adapter if needed.",
+            "Switches the step to the .NET adapter if needed. After the member is set, the method " +
+            "prototype is loaded (editor 'Load Prototype') so the step's parameter interface is " +
+            "populated — the loaded parameters are returned in the result's 'parameters' list.",
             s => s
                 .AddRequired("file_path", "string", "Path to the sequence file")
                 .AddRequired("sequence_name", "string", "Name of the sequence")
@@ -2369,11 +2475,17 @@ public class TestStandToolRegistry
                 .AddRequired("assembly_path", "string", "Path to the .NET assembly (DLL)")
                 .AddRequired("class_name", "string", "Fully-qualified class name")
                 .AddRequired("method_name", "string", "Name of the method to call")
-                .AddOptional("save", "boolean", "Save the file (default true)", true),
+                .AddOptional("save", "boolean", "Save the file (default true)", true)
+                .AddOptional("load_prototype", "boolean",
+                    "Load the method prototype afterwards to populate the parameter interface " +
+                    "(default true). Set false to configure now and load later (e.g. assembly not " +
+                    "available yet); then call load_module_prototype once it is reachable.", true),
             ConfigureDotNetModuleAsync);
 
         Register("configure_dll_module",
-            "Configure a step's C/DLL code module: DLL path and function name (C/CVI adapter).",
+            "Configure a step's C/DLL code module: DLL path and function name (C/CVI adapter). " +
+            "After the function is set, the prototype is loaded (editor 'Load Prototype') so the " +
+            "parameter interface is populated — returned in the result's 'parameters' list.",
             s => s
                 .AddRequired("file_path", "string", "Path to the sequence file")
                 .AddRequired("sequence_name", "string", "Name of the sequence")
@@ -2381,11 +2493,18 @@ public class TestStandToolRegistry
                 .AddRequired("step_name", "string", "Name of the step")
                 .AddRequired("dll_path", "string", "Path to the DLL")
                 .AddRequired("function_name", "string", "Exported function name to call")
-                .AddOptional("save", "boolean", "Save the file (default true)", true),
+                .AddOptional("save", "boolean", "Save the file (default true)", true)
+                .AddOptional("load_prototype", "boolean",
+                    "Load the function prototype afterwards to populate the parameter interface " +
+                    "(default true). Set false to configure now and load later; then call " +
+                    "load_module_prototype once the DLL/prototype is reachable.", true),
             ConfigureDllModuleAsync);
 
         Register("configure_labview_module",
-            "Configure a step's LabVIEW code module: the VI path (LabVIEW adapter). " +
+            "Configure a step's LabVIEW code module: the VI path (LabVIEW adapter). After the VI " +
+            "path is set, the VI's connector pane is loaded (editor 'Load Prototype') so the " +
+            "parameter interface is populated — returned in the result's 'parameters' list (this " +
+            "needs the VI to be loadable: LabVIEW available, not an unloadable .lvlibp headless). " +
             "Do NOT use on a None-adapter LabVIEW UTILITY step (e.g. NI_LV_RunVIAsynchronously, " +
             "'Run VI Asynchronously') — its VI config lives in the step's own properties and " +
             "switching to the LabVIEW adapter corrupts it; this tool now REFUSES such steps. Use " +
@@ -2396,11 +2515,17 @@ public class TestStandToolRegistry
                 .AddRequired("step_group", "string", "Step group: 'Setup', 'Main', or 'Cleanup'")
                 .AddRequired("step_name", "string", "Name of the step")
                 .AddRequired("vi_path", "string", "Path to the VI")
-                .AddOptional("save", "boolean", "Save the file (default true)", true),
+                .AddOptional("save", "boolean", "Save the file (default true)", true)
+                .AddOptional("load_prototype", "boolean",
+                    "Load the VI connector pane afterwards to populate the parameter interface " +
+                    "(default true). Set false to set the VI path now and load later (e.g. the VI " +
+                    "is not available yet); then call load_module_prototype once it is reachable.", true),
             ConfigureLabViewModuleAsync);
 
         Register("configure_python_module",
-            "Configure a step's Python code module: module path and function name (Python adapter).",
+            "Configure a step's Python code module: module path and function name (Python adapter). " +
+            "After the function is set, the prototype is loaded (editor 'Load Prototype') so the " +
+            "parameter interface is populated — returned in the result's 'parameters' list.",
             s => s
                 .AddRequired("file_path", "string", "Path to the sequence file")
                 .AddRequired("sequence_name", "string", "Name of the sequence")
@@ -2408,11 +2533,18 @@ public class TestStandToolRegistry
                 .AddRequired("step_name", "string", "Name of the step")
                 .AddRequired("module_path", "string", "Path to the Python module (.py)")
                 .AddRequired("function_name", "string", "Name of the function to call")
-                .AddOptional("save", "boolean", "Save the file (default true)", true),
+                .AddOptional("save", "boolean", "Save the file (default true)", true)
+                .AddOptional("load_prototype", "boolean",
+                    "Load the function prototype afterwards to populate the parameter interface " +
+                    "(default true). Set false to configure now and load later; then call " +
+                    "load_module_prototype once the module/function is reachable.", true),
             ConfigurePythonModuleAsync);
 
         Register("configure_sequence_call_module",
-            "Configure a step's SequenceCall module: target sequence and (optional) target file. " +
+            "Configure a step's SequenceCall module: target sequence and (optional) target file. Works " +
+            "on ANY step that uses the Sequence Adapter — not only 'SequenceCall' steps: e.g. an 'Action' " +
+            "step switched to the Sequence adapter (change_step_adapter/insert adapter='Sequence') calls " +
+            "a subsequence while staying an Action step. " +
             "Prefer this typed tool over set_sequence_call_target for new code. After the target is set, " +
             "the callee prototype is loaded (engine 'Load Prototype'): when the target resolves, " +
             "TS.SData.ActualArgs is populated with one correctly-typed SequenceArgument per callee " +
@@ -2436,8 +2568,64 @@ public class TestStandToolRegistry
                 .AddOptional("thread_ref_expr", "string",
                     "Expression to store the new thread/execution reference (SData.AsyncThreadExpr), e.g. 'FileGlobals.ErrorHandlerThread'.")
                 .AddOptional("auto_wait", "boolean",
-                    "Wait for the async subsequence at the end of the current sequence (SData.AutoWaitAsync)."),
+                    "Wait for the async subsequence at the end of the current sequence (SData.AutoWaitAsync).")
+                .AddOptional("load_prototype", "boolean",
+                    "Load the callee's parameter list into ActualArgs afterwards (default true). Set " +
+                    "false to set the target now and load later (e.g. the target sequence does not " +
+                    "exist yet); then call load_module_prototype once it is reachable.", true),
             ConfigureSequenceCallModuleAsync);
+
+        Register("load_module_prototype",
+            "Load (refresh) a step's code-module prototype — the programmatic equivalent of the " +
+            "Sequence Editor's 'Load Prototype' action. It reconciles the step's parameter interface " +
+            "against its CURRENT target and returns the resulting parameters so they become visible. " +
+            "Adapter-agnostic: LabVIEW VI connector pane, DLL/CVI & .NET & ActiveX function prototype, " +
+            "SequenceCall callee argument list. Two main uses: (1) after configuring a module with " +
+            "load_prototype=false, run this once the target is reachable; (2) RE-SYNC a caller after " +
+            "the target's own interface changed — e.g. you edited a subsequence's Parameters, or a " +
+            "DLL/VI/ActiveX signature changed — so the caller's arguments match again. ORDER MATTERS: " +
+            "the target must already be set and reachable (SequenceCall target loaded/on the search " +
+            "path; VI loadable — LabVIEW available, not an unloadable .lvlibp headless), otherwise " +
+            "nothing is updated and 'prototypeLoaded' is false with an explanatory 'note'. Does NOT " +
+            "change the step's adapter. Non-destructive: existing bindings are matched by name and " +
+            "preserved. Read-only alternative that does not reload: get_module_parameters.",
+            s => s
+                .AddRequired("file_path", "string", "Path to the sequence file")
+                .AddRequired("sequence_name", "string", "Name of the sequence containing the step")
+                .AddRequired("step_group", "string", "Step group: 'Setup', 'Main', or 'Cleanup'")
+                .AddRequired("step_name", "string", "Name of the step whose prototype to load")
+                .AddOptional("save", "boolean", "Save the file (default true)", true),
+            LoadModulePrototypeAsync);
+
+        Register("copy_step_module",
+            "Deep-copy a step's whole code-module subtree from a SOURCE step onto a TARGET step, " +
+            "WITHOUT loading LabVIEW. Copies TS.SData (a SequenceCall's ActualArgs, a RunVIAsync's " +
+            "SeqCallStepAdditions incl. its Parameter0..3, an adapter module) PLUS the step-own " +
+            "VIModule with its cached ViCall metadata (Namespace, VI Description, Connector-Pane " +
+            "Checksum and the Parms connector-pane bindings), and aligns the target's adapter. It " +
+            "ALSO clones the AUTHORED step-config subtrees a fresh insert does not fully instantiate " +
+            "— the result-logging hints (TS.AdditionalResultsHints / TS.CustomResults), error-dialog " +
+            "options (TS.ErrorDialogOptions, e.g. the NI_Wait/DQMH pattern) and the NI_Wait timeout " +
+            "flag (Result.TimeoutOccurred), each copied only when present on the source — so it also " +
+            "reproduces a NON-adapter step (e.g. an NI_Wait) faithfully, not just LabVIEW/DLL/.NET/" +
+            "SequenceCall modules. Every subtree is CLONED (flag-preserving) before it is attached, so " +
+            "an attached source object no longer trips 'already has a parent object'. This " +
+            "is the reliable way to reproduce a LabVIEW step whose VI lives in a packed library " +
+            "(.lvlibp) that cannot load headless (Load Prototype fails, so the connector pane can't " +
+            "be regenerated) — the cached metadata is copied verbatim from a source .seq instead. " +
+            "Run copy_typedefs FIRST so the module types exist in the target file. Returns " +
+            "{sourceStep, targetStep, adapter, copiedPaths[], warnings[]}.",
+            s => s
+                .AddRequired("source_file_path", "string", "Path to the SOURCE sequence file")
+                .AddRequired("source_sequence_name", "string", "Source sequence name")
+                .AddRequired("source_step_group", "string", "Source step group: 'Setup', 'Main', or 'Cleanup'")
+                .AddRequired("source_step_name", "string", "Source step name (selectors 'Name#N'/'@idx:N' allowed)")
+                .AddRequired("target_file_path", "string", "Path to the TARGET sequence file")
+                .AddRequired("target_sequence_name", "string", "Target sequence name")
+                .AddRequired("target_step_group", "string", "Target step group: 'Setup', 'Main', or 'Cleanup'")
+                .AddRequired("target_step_name", "string", "Target step name (selectors 'Name#N'/'@idx:N' allowed)")
+                .AddOptional("save", "boolean", "Save the target file (default true)", true),
+            CopyStepModuleAsync);
 
         // ── Sequence Analyzer (detailed) ───────────────────────────────────────
 
@@ -2847,6 +3035,17 @@ public class TestStandToolRegistry
         var comment      = args!.Value.GetRequiredString("comment");
         await _ts.SetParameterCommentAsync(filePath, sequenceName, paramName, comment);
         return Ok($"Comment set on parameter '{paramName}' in sequence '{sequenceName}'");
+    }
+
+    private async Task<CallToolResult> SetFileGlobalCommentAsync(JsonElement? args)
+    {
+        var filePath = args!.Value.GetRequiredString("sequence_file_path");
+        var varName  = args!.Value.GetRequiredString("variable_name");
+        var comment  = args!.Value.GetRequiredString("comment");
+        await _ts.SetFileGlobalCommentAsync(filePath, varName, comment);
+        var msg  = $"Comment set on file global '{varName}'.";
+        var warn = InputGuards.DescribeLatin1Loss(comment, "comment");
+        return Ok(warn == null ? msg : msg + " " + warn);
     }
 
     private async Task<CallToolResult> GetLocalVariablesAsync(JsonElement? args)
@@ -3323,6 +3522,36 @@ public class TestStandToolRegistry
         return OkJson(new { copiedCount = copied.Count, copied });
     }
 
+    private async Task<CallToolResult> CopyFileAttributesAsync(JsonElement? args)
+    {
+        var sourceFile = args!.Value.GetRequiredString("source_file_path");
+        var destFile   = args!.Value.GetRequiredString("dest_file_path");
+        List<string>? names = null;
+        if (args!.Value.TryGetProperty("attribute_names", out var an) && an.ValueKind == JsonValueKind.Array)
+            names = an.EnumerateArray()
+                      .Where(e => e.ValueKind == JsonValueKind.String)
+                      .Select(e => e.GetString()!)
+                      .ToList();
+        var save   = args!.Value.GetBoolOrDefault("save", true);
+        var result = await _ts.CopyFileAttributesAsync(sourceFile, destFile, names, save);
+        return OkJson(result);
+    }
+
+    private async Task<CallToolResult> CopyFileGlobalsAsync(JsonElement? args)
+    {
+        var sourceFile = args!.Value.GetRequiredString("source_file_path");
+        var destFile   = args!.Value.GetRequiredString("dest_file_path");
+        List<string>? names = null;
+        if (args!.Value.TryGetProperty("global_names", out var gn) && gn.ValueKind == JsonValueKind.Array)
+            names = gn.EnumerateArray()
+                      .Where(e => e.ValueKind == JsonValueKind.String)
+                      .Select(e => e.GetString()!)
+                      .ToList();
+        var save   = args!.Value.GetBoolOrDefault("save", true);
+        var result = await _ts.CopyFileGlobalsAsync(sourceFile, destFile, names, save);
+        return OkJson(result);
+    }
+
     // ── Sequence Editor Handlers ──────────────────────────────────────────────
 
     private async Task<CallToolResult> LaunchSequenceEditorAsync(JsonElement? args)
@@ -3423,7 +3652,11 @@ public class TestStandToolRegistry
         var propName  = args!.Value.GetRequiredString("property_name");
         var valueType = args!.Value.GetRequiredString("value_type");
         var value     = args!.Value.GetStringOrNull("value");
-        await _ts.SetPropertyValueAsync(filePath, seqName, propName, valueType, value);
+        var typeName  = args!.Value.GetStringOrNull("type_name");
+        int? ordinal  = args!.Value.TryGetProperty("ordinal", out var ordEl)
+                        && ordEl.ValueKind == System.Text.Json.JsonValueKind.Number
+                            ? ordEl.GetInt32() : (int?)null;
+        await _ts.SetPropertyValueAsync(filePath, seqName, propName, valueType, value, typeName, ordinal);
         return Ok($"Property '{propName}' ({valueType}) set in " +
                   $"{(seqName is null ? "FileGlobals" : $"sequence '{seqName}'")}.");
     }
@@ -3994,8 +4227,18 @@ public class TestStandToolRegistry
     {
         var path1 = args!.Value.GetRequiredString("file_path_1");
         var path2 = args!.Value.GetRequiredString("file_path_2");
-        var diff  = await _ts.CompareSequenceFilesAsync(path1, path2);
-        return OkJson(diff);
+        var mode  = (args?.GetStringOrDefault("mode", "native") ?? "native").Trim().ToLowerInvariant();
+
+        // DEFAULT 'native': delegate to the authoritative FileDiffer so a "looks clean" result is
+        // trustworthy. 'structural': the fast coarse in-process comparison (self-labelled via its
+        // Fidelity/Note fields) for a quick overview.
+        if (mode == "structural")
+        {
+            var diff = await _ts.CompareSequenceFilesAsync(path1, path2);
+            return OkJson(diff);
+        }
+        var report = await _ts.DiffSequenceFilesAsync(path1, path2);
+        return OkJson(report);
     }
 
     private async Task<CallToolResult> DiffSequenceFilesAsync(JsonElement? args)
@@ -4249,7 +4492,8 @@ public class TestStandToolRegistry
             args!.Value.GetRequiredString("assembly_path"),
             args!.Value.GetRequiredString("class_name"),
             args!.Value.GetRequiredString("method_name"),
-            args!.Value.GetBoolOrDefault("save", true));
+            args!.Value.GetBoolOrDefault("save", true),
+            args!.Value.GetBoolOrDefault("load_prototype", true));
         return OkJson(result);
     }
 
@@ -4262,7 +4506,8 @@ public class TestStandToolRegistry
             args!.Value.GetRequiredString("step_name"),
             args!.Value.GetRequiredString("dll_path"),
             args!.Value.GetRequiredString("function_name"),
-            args!.Value.GetBoolOrDefault("save", true));
+            args!.Value.GetBoolOrDefault("save", true),
+            args!.Value.GetBoolOrDefault("load_prototype", true));
         return OkJson(result);
     }
 
@@ -4274,7 +4519,8 @@ public class TestStandToolRegistry
             args!.Value.GetRequiredString("step_group"),
             args!.Value.GetRequiredString("step_name"),
             args!.Value.GetRequiredString("vi_path"),
-            args!.Value.GetBoolOrDefault("save", true));
+            args!.Value.GetBoolOrDefault("save", true),
+            args!.Value.GetBoolOrDefault("load_prototype", true));
         return OkJson(result);
     }
 
@@ -4287,7 +4533,8 @@ public class TestStandToolRegistry
             args!.Value.GetRequiredString("step_name"),
             args!.Value.GetRequiredString("module_path"),
             args!.Value.GetRequiredString("function_name"),
-            args!.Value.GetBoolOrDefault("save", true));
+            args!.Value.GetBoolOrDefault("save", true),
+            args!.Value.GetBoolOrDefault("load_prototype", true));
         return OkJson(result);
     }
 
@@ -4305,7 +4552,34 @@ public class TestStandToolRegistry
             args!.Value.GetBoolOrDefault("save", true),
             args!.Value.GetStringOrNull("execution_mode"),
             args!.Value.GetStringOrNull("thread_ref_expr"),
-            autoWait);
+            autoWait,
+            args!.Value.GetBoolOrDefault("load_prototype", true));
+        return OkJson(result);
+    }
+
+    private async Task<CallToolResult> LoadModulePrototypeAsync(JsonElement? args)
+    {
+        var result = await _ts.LoadModulePrototypeAsync(
+            args!.Value.GetRequiredString("file_path"),
+            args!.Value.GetRequiredString("sequence_name"),
+            args!.Value.GetRequiredString("step_group"),
+            args!.Value.GetRequiredString("step_name"),
+            args!.Value.GetBoolOrDefault("save", true));
+        return OkJson(result);
+    }
+
+    private async Task<CallToolResult> CopyStepModuleAsync(JsonElement? args)
+    {
+        var result = await _ts.CopyStepModuleAsync(
+            args!.Value.GetRequiredString("source_file_path"),
+            args!.Value.GetRequiredString("source_sequence_name"),
+            args!.Value.GetRequiredString("source_step_group"),
+            args!.Value.GetRequiredString("source_step_name"),
+            args!.Value.GetRequiredString("target_file_path"),
+            args!.Value.GetRequiredString("target_sequence_name"),
+            args!.Value.GetRequiredString("target_step_group"),
+            args!.Value.GetRequiredString("target_step_name"),
+            args!.Value.GetBoolOrDefault("save", true));
         return OkJson(result);
     }
 

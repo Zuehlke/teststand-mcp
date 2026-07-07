@@ -170,9 +170,14 @@ public interface ITestStandService : IDisposable
     /// <summary>Returns the property object (and its sub-properties) at the specified path within a sequence file.</summary>
     Task<PropertyObjectInfo> GetPropertyObjectAsync(string filePath,
         string? sequenceName, string propertyName);
-    /// <summary>Sets the typed value of a property within a sequence file or sequence.</summary>
+    /// <summary>Sets the typed value of a property within a sequence file or sequence. For
+    /// valueType "named_type" a member is created as a full instance of the file-defined
+    /// <paramref name="typeName"/> (container fields materialised). For "enum",
+    /// <paramref name="typeName"/> is the enum data type and the value is <paramref name="ordinal"/>
+    /// (preferred) or <paramref name="value"/> (ordinal number or symbolic name).</summary>
     Task SetPropertyValueAsync(string filePath, string? sequenceName,
-        string propertyName, string valueType, string? value);
+        string propertyName, string valueType, string? value, string? typeName = null,
+        int? ordinal = null);
     /// <summary>Deletes a sub-property from a file global or sequence local variable container.</summary>
     Task DeleteSubPropertyAsync(string filePath, string? sequenceName,
         string propertyName);
@@ -188,6 +193,10 @@ public interface ITestStandService : IDisposable
         int maxDepth, bool includeHidden, int maxArrayElements);
     /// <summary>Sets the value of a file-global variable in the given sequence file.</summary>
     Task SetFileGlobalAsync(string sequenceFilePath, string variableName, object value);
+    /// <summary>Sets the comment/description of a file-global variable (or a nested container member
+    /// via a dotted path, e.g. "MyCont.Field"). The FileGlobals counterpart of
+    /// <see cref="SetLocalVariableCommentAsync"/>.</summary>
+    Task SetFileGlobalCommentAsync(string sequenceFilePath, string variableName, string comment);
     /// <summary>Sets the value of a station global variable.</summary>
     Task SetStationGlobalAsync(string variableName, object value);
     /// <summary>Delete a StationGlobal and commit the change to disk. The delete counterpart
@@ -277,6 +286,29 @@ public interface ITestStandService : IDisposable
     /// already present in the destination are left untouched. Returns the names actually copied.</summary>
     Task<List<string>> CopyTypeDefsAsync(string sourceFilePath, string destFilePath,
         IReadOnlyList<string>? typeNames = null, bool save = true);
+
+    /// <summary>Copies the file-level name/value ATTRIBUTES (a separate namespace from subproperties,
+    /// reached via the file-root <c>PropertyObjectFile.Attributes</c>) from a SOURCE sequence file onto
+    /// a DESTINATION file. Copies whatever the ENGINE exposes on the loaded file; each subtree is
+    /// flag-preservingly cloned before it is attached. Pass explicit <paramref name="attributeNames"/>
+    /// (top-level names) or null to copy all. LIMITATION: the Sequence Analyzer's ignored-message list
+    /// (<c>NI.Analyzer.IgnoredMessages</c>) is NOT loaded into the in-memory object by the TestStand
+    /// engine API — only FileDiffer's raw disk reader sees it — so it CANNOT be read or reproduced here;
+    /// a rebuild retains that one cosmetic 'Attributes' diff. Returns the attribute names copied.</summary>
+    Task<Dictionary<string, object>> CopyFileAttributesAsync(string sourceFilePath, string destFilePath,
+        IReadOnlyList<string>? attributeNames = null, bool save = true);
+
+    /// <summary>Copies the FILE GLOBAL variables (the <c>FileGlobalDefaults</c> container — every file
+    /// global with its exact type, value, comment, PropFlags and nested container/enum members) from a
+    /// SOURCE sequence file onto a DESTINATION file via a flag-preserving deep clone. File globals are
+    /// NOT part of any sequence, so duplicate_sequence / copy_step_module do not carry them — this is the
+    /// reliable way to reproduce them in a 1:1 rebuild (including enum ordinals, Object References and
+    /// typed container members, with the FileDiffer's [val]/{val} explicit-vs-default distinction
+    /// preserved). Referenced data types must already exist in the destination (run copy_typedefs first).
+    /// Pass explicit <paramref name="globalNames"/> to copy only those top-level globals, or null to
+    /// replace the destination's entire file-globals set with the source's. Returns the names copied.</summary>
+    Task<Dictionary<string, object>> CopyFileGlobalsAsync(string sourceFilePath, string destFilePath,
+        IReadOnlyList<string>? globalNames = null, bool save = true);
 
     // Engine Info & Control
     /// <summary>Returns the filesystem paths used by the TestStand engine.</summary>
@@ -709,24 +741,32 @@ public interface ITestStandService : IDisposable
         bool regex = false, string elements = "all", bool save = true);
 
     // ── Typed Adapter / Code-Module Configuration ───────────────────────────
-    /// <summary>Configures a step to call a .NET method by specifying the assembly, class, and method.</summary>
+    /// <summary>Configures a step to call a .NET method by specifying the assembly, class, and method.
+    /// When <paramref name="loadPrototype"/> is true (default) the method prototype is loaded afterwards
+    /// so the step's parameter interface is populated (editor "Load Prototype").</summary>
     Task<ModuleConfigResult> ConfigureDotNetModuleAsync(string filePath,
         string sequenceName, string stepGroup, string stepName, string assemblyPath,
-        string className, string methodName, bool save = true);
-    /// <summary>Configures a step to call a native DLL function.</summary>
+        string className, string methodName, bool save = true, bool loadPrototype = true);
+    /// <summary>Configures a step to call a native DLL function. When <paramref name="loadPrototype"/>
+    /// is true (default) the function prototype is loaded afterwards to populate the parameters.</summary>
     Task<ModuleConfigResult> ConfigureDllModuleAsync(string filePath,
         string sequenceName, string stepGroup, string stepName, string dllPath,
-        string functionName, bool save = true);
-    /// <summary>Configures a step to call a LabVIEW VI.</summary>
+        string functionName, bool save = true, bool loadPrototype = true);
+    /// <summary>Configures a step to call a LabVIEW VI. When <paramref name="loadPrototype"/> is true
+    /// (default) the VI's connector pane is loaded afterwards to populate the parameter interface —
+    /// this requires the VI to be loadable (LabVIEW available / not an unloadable .lvlibp).</summary>
     Task<ModuleConfigResult> ConfigureLabViewModuleAsync(string filePath,
         string sequenceName, string stepGroup, string stepName, string viPath,
-        bool save = true);
-    /// <summary>Configures a step to call a Python function.</summary>
+        bool save = true, bool loadPrototype = true);
+    /// <summary>Configures a step to call a Python function. When <paramref name="loadPrototype"/> is
+    /// true (default) the prototype is loaded afterwards to populate the parameters.</summary>
     Task<ModuleConfigResult> ConfigurePythonModuleAsync(string filePath,
         string sequenceName, string stepGroup, string stepName, string modulePath,
-        string functionName, bool save = true);
-    /// <summary>Configures a SequenceCall step to call the specified target sequence. Optionally sets
-    /// the threading/async options: <paramref name="executionMode"/> ('UseCurrentThread' / 'NewThread' /
+        string functionName, bool save = true, bool loadPrototype = true);
+    /// <summary>Configures a SequenceCall step to call the specified target sequence. When
+    /// <paramref name="loadPrototype"/> is true (default) the callee's parameter list is loaded into
+    /// TS.SData.ActualArgs afterwards (editor "Load Prototype"). Optionally sets the threading/async
+    /// options: <paramref name="executionMode"/> ('UseCurrentThread' / 'NewThread' /
     /// 'NewExecution' → SData.ThreadOpt), <paramref name="threadRefExpr"/> (SData.AsyncThreadExpr — an
     /// expression to store the new thread/execution reference, e.g. FileGlobals.X) and
     /// <paramref name="autoWait"/> (SData.AutoWaitAsync — wait for the async subsequence at end of the
@@ -734,7 +774,27 @@ public interface ITestStandService : IDisposable
     Task<ModuleConfigResult> ConfigureSequenceCallModuleAsync(string filePath,
         string sequenceName, string stepGroup, string stepName,
         string targetSequenceName, string targetSequenceFile = "", bool save = true,
-        string? executionMode = null, string? threadRefExpr = null, bool? autoWait = null);
+        string? executionMode = null, string? threadRefExpr = null, bool? autoWait = null,
+        bool loadPrototype = true);
+    /// <summary>Loads (refreshes) a step's code-module prototype — the programmatic equivalent of the
+    /// Sequence Editor's "Load Prototype" action — so the step's parameter interface reflects the
+    /// current target. Adapter-agnostic: works for LabVIEW VIs, DLL/CVI functions, .NET/ActiveX calls
+    /// and SequenceCalls. Use it after the target's own interface changed (e.g. a subsequence's
+    /// Parameters were edited) to re-sync the caller. Does NOT change the step's adapter.</summary>
+    Task<LoadPrototypeResult> LoadModulePrototypeAsync(string filePath,
+        string sequenceName, string stepGroup, string stepName, bool save = true);
+    /// <summary>Deep-copies a step's whole code-module subtree (TS.SData — incl. a SequenceCall's
+    /// ActualArgs / a RunVIAsync's SeqCallStepAdditions — plus the step-own VIModule with its
+    /// ViCall metadata: Namespace, VI Description, Connector-Pane Checksum and Parms) from a SOURCE
+    /// step onto a TARGET step, and aligns the target's adapter. This is the reliable way to
+    /// reproduce LabVIEW module metadata for VIs in a packed library (.lvlibp) that cannot be loaded
+    /// headless (Load Prototype fails), so the connector pane cannot be regenerated — the cached
+    /// metadata is copied verbatim instead. The module types must exist in the target file (use
+    /// copy_typedefs first). Does NOT load LabVIEW.</summary>
+    Task<Dictionary<string, object>> CopyStepModuleAsync(
+        string sourceFilePath, string sourceSequenceName, string sourceStepGroup, string sourceStepName,
+        string targetFilePath, string targetSequenceName, string targetStepGroup, string targetStepName,
+        bool save = true);
 
     // ── Sequence Analyzer (detailed) ─────────────────────────────────────────
     /// <summary>Runs the Sequence Analyzer and returns a detailed result filtered by minimum
@@ -1265,6 +1325,7 @@ public sealed class TestStandService : ITestStandService
             seq.InsertStep(step, insertAt, (NiStepGroups)sgValue);
 
             InitStepDescriptionField(step);
+            ApplyBlankLabelIconIfNameless(step, stepName, internalType);
 
             SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
             _loadedSequenceFiles[filePath] = sf;
@@ -1327,6 +1388,26 @@ public sealed class TestStandService : ITestStandService
             try { step.SetValString("TS.Description", 0x8, " "); } catch (Exception) { /* best-effort: initialize TS.Description via alternate flags — intentionally ignored */ }
     }
 
+    // A Label step with an EMPTY name is a blank spacer line in the Sequence Editor. TestStand
+    // blanks its icon there: TS.Icon = "ni_blank.ico" (instead of the default "label.ico") plus a
+    // step flag (0x4000000). A tools-inserted nameless label otherwise keeps "label.ico" and shows
+    // a visible icon. Mirror the editor so a nameless label looks like an editor-made spacer.
+    private const int StepFlag_BlankLabelIcon = 0x4000000;
+    private void ApplyBlankLabelIconIfNameless(dynamic step, string? stepName, string internalType)
+    {
+        if (!string.Equals(internalType, "Label", StringComparison.OrdinalIgnoreCase)) return;
+        if (!string.IsNullOrWhiteSpace(stepName)) return; // named label keeps its normal icon
+        try
+        {
+            NiPropertyObject stepPo = ((NiStep)(object)step).AsPropertyObject();
+            try { stepPo.SetValString("TS.Icon", 0, "ni_blank.ico"); }
+            catch (Exception ex) { _logger.LogDebug(ex, "Blank-label: could not set TS.Icon."); }
+            try { stepPo.SetFlags("", 0, stepPo.GetFlags("", 0) | StepFlag_BlankLabelIcon); }
+            catch (Exception ex) { _logger.LogDebug(ex, "Blank-label: could not set the blank-icon step flag."); }
+        }
+        catch (Exception ex) { _logger.LogDebug(ex, "Blank-label icon convention skipped."); }
+    }
+
     /// <inheritdoc/>
     public async Task<BulkInsertResult> InsertStepsBulkAsync(string filePath,
         string sequenceName, string stepGroup, List<BulkStepSpec> steps, bool save = true)
@@ -1351,7 +1432,11 @@ public sealed class TestStandService : ITestStandService
 
             foreach (var spec in steps)
             {
-                if (string.IsNullOrWhiteSpace(spec.Name) || string.IsNullOrWhiteSpace(spec.StepType))
+                // A Label MAY be nameless (a blank spacer line) — allow an empty name for it; every
+                // other step type still requires a name. A missing step type is always a skip.
+                bool isLabelType = string.Equals(spec.StepType, "Label", StringComparison.OrdinalIgnoreCase);
+                if (string.IsNullOrWhiteSpace(spec.StepType) ||
+                    (string.IsNullOrWhiteSpace(spec.Name) && !isLabelType))
                 {
                     result.Warnings.Add($"Skipped step with empty name or type ('{spec.Name}').");
                     continue;
@@ -1367,6 +1452,7 @@ public sealed class TestStandService : ITestStandService
                 int insertAt = (int)seq.GetNumSteps((NiStepGroups)sgValue);
                 seq.InsertStep(step, insertAt, (NiStepGroups)sgValue);
                 InitStepDescriptionField(step);
+                ApplyBlankLabelIconIfNameless(step, spec.Name, internalType);
 
                 // Optional comment
                 if (!string.IsNullOrEmpty(spec.Comment))
@@ -1968,13 +2054,17 @@ public sealed class TestStandService : ITestStandService
 
     /// <inheritdoc/>
     public async Task SetPropertyValueAsync(string filePath, string? sequenceName,
-        string propertyName, string valueType, string? value)
+        string propertyName, string valueType, string? value, string? typeName = null,
+        int? ordinal = null)
     {
         EnsureConnected();
         await Task.Run(() =>
         {
             var sf   = GetOrLoadSeqFile(filePath);
             var root = ResolveValueContainer(sf, sequenceName);
+            string vtl = valueType.Trim().ToLowerInvariant();
+            bool isEnum      = vtl == "enum";
+            bool isNamedType = vtl is "named_type" or "namedtype" or "type";
 
             // Create the property if it does not exist yet. NewSubProperty takes a simple
             // name, so split a dotted path into its parent container and the leaf name.
@@ -1986,12 +2076,30 @@ public sealed class TestStandService : ITestStandService
                 NiPropertyObject parent = string.IsNullOrEmpty(parentPath)
                     ? root
                     : (NiPropertyObject)(object)root.GetPropertyObject(parentPath, 0);
-                parent.NewSubProperty(leaf, (NiPropValueTypes)MapPropValueType(valueType),
-                    false, "", 0);
+
+                if (isEnum || isNamedType)
+                {
+                    // A member of a file-defined type (an enum, or a named container/leaf such as
+                    // TFW_DB_TestCasesLimits / VisionSensorSbsi_Reply_Payload / Error): instantiate it
+                    // as a FULL typed instance (materialising the type's fields, like the editor), so
+                    // it carries the right type instead of an anonymous 'Container', and afterwards only
+                    // the non-default field values need setting. type_name is required.
+                    if (string.IsNullOrWhiteSpace(typeName))
+                        throw new ArgumentException(
+                            $"value_type='{valueType}' requires type_name (a data type defined in the file).");
+                    InstantiateNamedTypeMember(parent, leaf, typeName!.Trim());
+                }
+                else
+                {
+                    parent.NewSubProperty(leaf, (NiPropValueTypes)MapPropValueType(valueType),
+                        false, "", 0);
+                }
             }
 
-            switch (valueType.ToLowerInvariant())
+            switch (vtl)
             {
+                case "named_type": case "namedtype": case "type":
+                    break; // typed container/leaf — fields materialised on creation, no scalar to set here
                 case "container":
                 case "reference": case "object reference":
                 case "objectreference": case "objref":
@@ -2016,6 +2124,33 @@ public sealed class TestStandService : ITestStandService
                     try { root.SetValNumber(propertyName, 0, numVal); }
                     catch { root.SetValNumber(propertyName,
                         (int)NiPropOptions.PropOption_CoerceToEnum, numVal); }
+                    break;
+                case "enum":
+                    // Set the enum by its SYMBOLIC enumerator NAME whenever possible. Setting by name
+                    // (SetValString+CoerceToEnum) stores an EXPLICITLY-SET value — the FileDiffer's
+                    // "[val]", matching an editor-authored enum — and preserves the symbolic name.
+                    // Setting by raw ORDINAL (SetValNumber+CoerceToEnum) instead stores a default-
+                    // flagged "{val}" whose symbolic name reads back empty until reload, which shows
+                    // up as a spurious ValueChange in a 1:1 rebuild diff even when the ordinal is
+                    // identical. So when an ordinal is supplied (explicitly or parsed from 'value'),
+                    // resolve it back to its enumerator name from the type definition and set by name;
+                    // fall back to the numeric set only when the ordinal has no matching enumerator.
+                    double? enumVal = ordinal
+                        ?? (value != null && double.TryParse(value, System.Globalization.NumberStyles.Any,
+                                System.Globalization.CultureInfo.InvariantCulture, out var enumOrd)
+                            ? enumOrd : (double?)null);
+                    string? enumName = (enumVal.HasValue && !string.IsNullOrWhiteSpace(typeName))
+                        ? ResolveEnumeratorName(sf, typeName!, enumVal.Value, filePath)
+                        : null;
+                    if (enumName != null)
+                        root.SetValString(propertyName,
+                            (int)NiPropOptions.PropOption_CoerceToEnum, enumName);
+                    else if (enumVal.HasValue)
+                        root.SetValNumber(propertyName,
+                            (int)NiPropOptions.PropOption_CoerceToEnum, enumVal.Value);
+                    else if (value != null)
+                        root.SetValString(propertyName,
+                            (int)NiPropOptions.PropOption_CoerceToEnum, value);
                     break;
                 default: // string (or enum-by-label)
                     try { root.SetValString(propertyName, 0, value ?? ""); }
@@ -2042,6 +2177,31 @@ public sealed class TestStandService : ITestStandService
             SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
             _loadedSequenceFiles[filePath] = sf;
         });
+    }
+
+    /// <summary>
+    /// Creates <paramref name="leaf"/> under <paramref name="parent"/> as a FULL instance of the
+    /// file/engine-defined type <paramref name="typeName"/> — the same as the editor's "insert a
+    /// variable of type X": <c>Engine.NewPropertyObject(PropValType_NamedType, typeName)</c>
+    /// materialises the type's whole structure (all container fields, an enum's type binding), then
+    /// <c>SetPropertyObject(PropOption_InsertIfMissing)</c> hangs it at the target. This is why a
+    /// named container member (TFW_DB_TestCasesLimits, VisionSensorSbsi_Reply_Payload, Error) comes
+    /// out correctly TYPED with its fields present, instead of an anonymous 'Container'. Falls back
+    /// to NewSubProperty if the standalone instance cannot be built.
+    /// </summary>
+    private void InstantiateNamedTypeMember(NiPropertyObject parent, string leaf, string typeName)
+    {
+        try
+        {
+            NiPropertyObject typed = (NiPropertyObject)(object)_engine!.NewPropertyObject(
+                NiPropValueTypes.PropValType_NamedType, false, typeName, 0);
+            parent.SetPropertyObject(leaf, 0x1 /* PropOption_InsertIfMissing */, typed);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "NewPropertyObject('{Type}') failed; falling back to NewSubProperty.", typeName);
+            parent.NewSubProperty(leaf, NiPropValueTypes.PropValType_NamedType, false, typeName, 0);
+        }
     }
 
     // Resolves the value container for the structured-property tools: a sequence's Locals
@@ -2079,6 +2239,10 @@ public sealed class TestStandService : ITestStandService
         try { _ = (double)prop.GetValNumber("", 0);  return "Number";  } catch (Exception) { /* best-effort: probe for number kind — intentionally ignored */ }
         try { _ = (bool)  prop.GetValBoolean("", 0); return "Boolean"; } catch (Exception) { /* best-effort: probe for boolean kind — intentionally ignored */ }
         try { _ = (string)prop.GetValString("", 0);  return "String";  } catch (Exception) { /* best-effort: probe for string kind — intentionally ignored */ }
+        // Enum leaf: plain reads all throw; a coerced read succeeds (mirrors TryReadEnumValue).
+        try { _ = (double)prop.GetValNumber("", PropOption_CoerceToNumber);
+              _ = (string)prop.GetValString("", PropOption_CoerceToString); return "Enum"; }
+        catch (Exception) { /* not an enum */ }
         return "Unknown";
     }
 
@@ -2256,6 +2420,10 @@ public sealed class TestStandService : ITestStandService
         try { node.Value = po.GetValNumber("", 0);  node.ValueType = "Number";  return node; } catch { }
         try { node.Value = po.GetValBoolean("", 0); node.ValueType = "Boolean"; return node; } catch { }
         try { node.Value = po.GetValString("", 0);  node.ValueType = "String";  return node; } catch { }
+        // Enum leaf: plain reads all throw; read {ordinal, symbolicName} via coercion so a Locals /
+        // FileGlobals enum default is not reported as Empty/0.
+        var enumVal = TryReadEnumValue(po);
+        if (enumVal != null) { node.Value = enumVal; node.ValueType = "Enum"; return node; }
         node.ValueType = "Empty";
         return node;
     }
@@ -2286,23 +2454,44 @@ public sealed class TestStandService : ITestStandService
             try { fg = GetFileGlobals(sf); }
             catch (Exception ex) { throw new InvalidOperationException("FileGlobals access failed: " + ex.Message, ex); }
 
-            // Infer property type from value
-            int propType = value switch
+            string valStr = value?.ToString() ?? "";
+
+            // Determine the target property type. If the FileGlobal ALREADY exists, PRESERVE its
+            // authored type — the value arrives from the tool as a string, and the old logic then
+            // mis-typed "true"/"false" as a String, so a Boolean default was silently written as a
+            // string and never persisted as a real Boolean (this is the reported bug). For a NEW
+            // global, infer from the literal, treating "true"/"false" as Boolean. Writes to
+            // FileGlobalsDefaultValues (see GetFileGlobals), same container set_property_value uses.
+            int propType;
+            if (PropertyExists(fg, variableName))
             {
-                bool   => 2,
-                double => 3,
-                float  => 3,
-                int    => 3,
-                long   => 3,
-                _      => double.TryParse(value?.ToString(),
-                              System.Globalization.NumberStyles.Any,
-                              System.Globalization.CultureInfo.InvariantCulture, out _) ? 3 : 1
-            };
-
-            if (!PropertyExists(fg, variableName))
+                NiPropertyObject existing =
+                    (NiPropertyObject)(object)fg.GetPropertyObject(variableName, 0);
+                propType = InferValueKind(existing, out _, out _) switch
+                {
+                    "Boolean" => 2,
+                    "Number"  => 3,
+                    _         => 1,   // String / Enum / Container → string path (coerces enums)
+                };
+            }
+            else
+            {
+                propType = value switch
+                {
+                    bool   => 2,
+                    double => 3,
+                    float  => 3,
+                    int    => 3,
+                    long   => 3,
+                    _      => (valStr.Equals("true",  StringComparison.OrdinalIgnoreCase) ||
+                               valStr.Equals("false", StringComparison.OrdinalIgnoreCase)) ? 2
+                            : double.TryParse(valStr, System.Globalization.NumberStyles.Any,
+                                  System.Globalization.CultureInfo.InvariantCulture, out _) ? 3 : 1
+                };
                 fg.NewSubProperty(variableName, (NiPropValueTypes)propType, false, "", 0);
+            }
 
-            SetPropertyValueByType(fg, variableName, value?.ToString() ?? "", propType);
+            SetPropertyValueByType(fg, variableName, valStr, propType);
             SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, sequenceFilePath);
         });
     }
@@ -2866,6 +3055,29 @@ public sealed class TestStandService : ITestStandService
     }
 
     /// <inheritdoc/>
+    public async Task SetFileGlobalCommentAsync(string sequenceFilePath, string variableName,
+        string comment)
+    {
+        EnsureConnected();
+        await Task.Run(() =>
+        {
+            var sf = _loadedSequenceFiles.TryGetValue(sequenceFilePath, out var cached)
+                ? cached
+                : _engine!.GetSequenceFileEx(sequenceFilePath, 0, (NiConflictHandler)4);
+
+            // GetFileGlobals targets FileGlobalsDefaultValues (the authored-defaults container, same
+            // one set_file_global writes). GetPropertyObject resolves a dotted lookup path, so a
+            // nested container member (e.g. "MyCont.Field") gets its comment set too.
+            NiPropertyObject fg = GetFileGlobals(sf);
+            var prop = (NiPropertyObject)(object)fg.GetPropertyObject(variableName, 0);
+            prop.Comment = comment;
+
+            SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, sequenceFilePath);
+            _loadedSequenceFiles[sequenceFilePath] = sf;
+        });
+    }
+
+    /// <inheritdoc/>
     public async Task SetParameterCommentAsync(string filePath, string sequenceName,
         string parameterName, string comment)
     {
@@ -3079,29 +3291,80 @@ public sealed class TestStandService : ITestStandService
             // values like VI descriptions with embedded CRs are reproducible byte-exact.
             if (unescape) value = UnescapeValue(value);
 
-            // Explicit value_type wins; otherwise auto-detect from the literal (number / true|false
-            // / string) — same coercion as SetRuntimeVariableAsync / SetPropertyAsync.
+            // Convenience resolver for two step attributes not addressable by their bare name:
+            //  • 'Icon'  → the step's icon file, which lives at 'TS.Icon' (e.g. 'ni_blank.ico').
+            //  • 'Flags' → the step's flag BITFIELD, set via SetFlags on the step root (NOT a named
+            //    property; a bare 'Flags' path otherwise errors "Unknown variable or property name").
+            //    Accepts a decimal or 0x-hex value (e.g. '0x4000000' to blank a nameless Label's icon).
+            if (string.Equals(propertyPath, "Icon", StringComparison.OrdinalIgnoreCase))
+            {
+                propertyPath = "TS.Icon";
+            }
+            else if (string.Equals(propertyPath, "Flags", StringComparison.OrdinalIgnoreCase))
+            {
+                string fv = value.Trim();
+                long raw = fv.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
+                    ? Convert.ToInt64(fv.Substring(2), 16)
+                    : long.Parse(fv, System.Globalization.NumberStyles.Any,
+                                 System.Globalization.CultureInfo.InvariantCulture);
+                stepPo.SetFlags("", 0, unchecked((int)raw));
+                if (save) SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
+                _loadedSequenceFiles[filePath] = sf;
+                var fi = new StepPropertyValue { StepName = stepName, PropertyPath = "Flags", ValueType = "Flags" };
+                try { fi.Value = stepPo.GetFlags("", 0); } catch (Exception ex) { _logger.LogDebug(ex, "GetFlags read-back failed."); }
+                return fi;
+            }
+
+            // Explicit value_type wins; otherwise auto-detect. We FIRST honour the TARGET
+            // property's existing kind so a literal is never coerced to the wrong type — e.g.
+            // writing "False"/"True" into a String expression property (TS.SData.ActualArgs.<arg>.Expr,
+            // any *.Expr / *Expression slot) must stay a String, not become a Boolean (which throws
+            // "Expected Boolean, found String"). Only when the target's type can't be read do we fall
+            // back to the literal heuristic (number / true|false / string).
             string kind    = (valueType ?? "").Trim().ToLowerInvariant();
             bool asNumber  = kind is "number" or "double" or "float" or "int" or "integer";
             bool asBoolean = kind is "boolean" or "bool";
             bool asString  = kind is "string";
             if (!asNumber && !asBoolean && !asString)
             {
-                if (double.TryParse(value, System.Globalization.NumberStyles.Any,
+                string existingKind = "";
+                try
+                {
+                    NiPropertyObject existing =
+                        (NiPropertyObject)(object)stepPo.GetPropertyObject(propertyPath, 0);
+                    existingKind = InferValueKind(existing, out _, out _);
+                }
+                catch (Exception ex) { _logger.LogDebug(ex, "Auto-detect: target property '{Path}' not readable yet.", propertyPath); }
+
+                if (existingKind == "String" || existingKind == "Enum") asString = true;
+                else if (existingKind == "Boolean") asBoolean = true;
+                else if (existingKind == "Number") asNumber = true;
+                else if (double.TryParse(value, System.Globalization.NumberStyles.Any,
                         System.Globalization.CultureInfo.InvariantCulture, out _)) asNumber = true;
                 else if (value.Equals("true", StringComparison.OrdinalIgnoreCase)
                       || value.Equals("false", StringComparison.OrdinalIgnoreCase)) asBoolean = true;
                 else asString = true;
             }
 
+            int toEnum = (int)NiPropOptions.PropOption_CoerceToEnum;
             if (asNumber)
-                stepPo.SetValNumber(propertyPath, 0, double.Parse(value,
-                    System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture));
+            {
+                var numVal = double.Parse(value, System.Globalization.NumberStyles.Any,
+                    System.Globalization.CultureInfo.InvariantCulture);
+                // A numeric ordinal targeting an enum-typed prop needs the coerce (preserves the enum type).
+                try { stepPo.SetValNumber(propertyPath, 0, numVal); }
+                catch { stepPo.SetValNumber(propertyPath, toEnum, numVal); }
+            }
             else if (asBoolean)
                 stepPo.SetValBoolean(propertyPath, 0,
                     value.Equals("true", StringComparison.OrdinalIgnoreCase) || value == "1");
             else
-                stepPo.SetValString(propertyPath, 0, value);
+            {
+                // Plain string set; retry coercing so an enum-by-label ("MyEnum.ValueName" or a bare
+                // enumerator) can be written without retyping the target away from its enum type.
+                try { stepPo.SetValString(propertyPath, 0, value); }
+                catch { stepPo.SetValString(propertyPath, toEnum, value); }
+            }
 
             if (save) SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
             _loadedSequenceFiles[filePath] = sf;
@@ -3235,7 +3498,7 @@ public sealed class TestStandService : ITestStandService
                 }
                 catch { exists = false; }
 
-                bool retype = exists && vt is "namedtype" or "named_type" or "type"
+                bool retype = exists && vt is "namedtype" or "named_type" or "type" or "enum"
                     && !string.IsNullOrWhiteSpace(typeName)
                     && existingTypeDisp != typeName
                     && !existingTypeDisp.StartsWith(typeName + " ", StringComparison.Ordinal);
@@ -3266,12 +3529,16 @@ public sealed class TestStandService : ITestStandService
                             => ((int)NiPropValueTypes.PropValType_Container, ""),
                         "reference" or "object reference" or "objectreference" or "objref"
                             => ((int)NiPropValueTypes.PropValType_Reference, ""),
-                        "namedtype" or "named_type" or "type" or ""
+                        // An enum instance IS a named-type instance whose type is the enum typedef;
+                        // create it via the named enum type, then set its ordinal/name below.
+                        "namedtype" or "named_type" or "type" or "enum" or ""
                             when !string.IsNullOrWhiteSpace(typeName)
                             => ((int)NiPropValueTypes.PropValType_NamedType, typeName!),
+                        "enum" => throw new ArgumentException(
+                            "value_type='enum' requires type_name (the enum data type, e.g. 'Color')."),
                         _ => throw new ArgumentException(
                             $"Unsupported value_type '{valueType}'. Use number/boolean/string/" +
-                            "container/reference, 'named_type' with type_name, or 'array_elements'.")
+                            "container/reference, 'named_type' or 'enum' with type_name, or 'array_elements'.")
                     };
                     try
                     {
@@ -3307,6 +3574,17 @@ public sealed class TestStandService : ITestStandService
                         case "string" or "expression":
                             stepPo.SetValString(propertyPath, 0, v);
                             break;
+                        case "enum":
+                            // value may be the numeric ordinal OR the symbolic enumerator name;
+                            // coerce so the property keeps its enum type (a plain set would throw).
+                            if (double.TryParse(v, System.Globalization.NumberStyles.Any,
+                                    System.Globalization.CultureInfo.InvariantCulture, out var ord))
+                                stepPo.SetValNumber(propertyPath,
+                                    (int)NiPropOptions.PropOption_CoerceToEnum, ord);
+                            else
+                                stepPo.SetValString(propertyPath,
+                                    (int)NiPropOptions.PropOption_CoerceToEnum, v);
+                            break;
                         // container/reference/named types have no scalar value to assign here.
                     }
                 }
@@ -3320,7 +3598,7 @@ public sealed class TestStandService : ITestStandService
             info.ValueType = InferValueKind(prop, out bool isArray, out int numElem);
             info.IsArray   = isArray;
             if (isArray) info.NumElements = numElem;
-            if (info.ValueType is "Number" or "Boolean" or "String")
+            if (info.ValueType is "Number" or "Boolean" or "String" or "Enum")
                 info.Value = TryGetValue(prop);
             return info;
         });
@@ -4167,43 +4445,80 @@ public sealed class TestStandService : ITestStandService
         EnsureConnected();
         return await Task.Run(() =>
         {
-            var srcSf = _loadedSequenceFiles.TryGetValue(sourceFilePath, out var cachedSrc)
-                ? cachedSrc
-                : _engine!.GetSequenceFileEx(sourceFilePath, 0, (NiConflictHandler)4);
+            var srcSf = (NiSequenceFile)(object)GetOrLoadSeqFile(sourceFilePath);
 
             string destPath = targetFilePath ?? sourceFilePath;
             var dstSf = string.Equals(destPath, sourceFilePath, StringComparison.OrdinalIgnoreCase)
                 ? srcSf
-                : (_loadedSequenceFiles.TryGetValue(destPath, out var cachedDst)
-                    ? cachedDst
-                    : _engine!.GetSequenceFileEx(destPath, 0, (NiConflictHandler)4));
+                : (NiSequenceFile)(object)GetOrLoadSeqFile(destPath);
 
-            // Get source sequence
-            dynamic srcSeq = srcSf.GetSequenceByName(sourceSequenceName);
+            NiSequence srcSeq = srcSf.GetSequenceByName(sourceSequenceName);
 
-            // Create a new sequence from the source using CopySequence if available,
-            // or fall back to creating a new one and copying properties manually.
-            dynamic newSeq;
-            try
-            {
-                // Try CopySequence API (TestStand 2016+)
-                newSeq = ((dynamic)srcSf).CopySequence(srcSeq);
-            }
-            catch
-            {
-                newSeq = _engine!.NewSequence();
-            }
+            // Deep-clone the ENTIRE sequence — every step, local, parameter, the sequence Comment
+            // and its settings (RecordResults, failure/cleanup options, …). The SequenceFile API
+            // has NO CopySequence method in TS2026, so the previous `srcSf.CopySequence(srcSeq)`
+            // call ALWAYS threw and was silently swallowed, falling back to an EMPTY NewSequence():
+            // the "duplicate" came out as a name-only shell (no steps/locals, comment dropped,
+            // RecordResults reset to the default True). The reliable copy primitive is a
+            // flag-preserving PropertyObject clone (PropOption_CopyAllFlags = 0x20000000), the same
+            // mechanism copy_step_module / copy_file_attributes use. For a cross-file duplicate the
+            // referenced data types must already exist in the destination (run copy_typedefs first);
+            // the clone carries type references by GUID, which resolve against the destination's
+            // TypeUsageList.
+            NiSequence newSeq = CloneSequenceDeep(srcSf, srcSeq, sourceSequenceName);
 
             newSeq.Name = newSequenceName;
             dstSf.InsertSequence(newSeq);
 
-            if (!string.IsNullOrEmpty(destPath))
-                dstSf.Save(destPath);
-            if (!_loadedSequenceFiles.ContainsKey(destPath))
-                _loadedSequenceFiles[destPath] = dstSf;
+            SaveSequenceFileWithRetry(dstSf, destPath);
+            _loadedSequenceFiles[destPath] = dstSf;
 
             return newSequenceName;
         });
+    }
+
+    /// <summary>
+    /// Deep-copies a whole sequence into a new, detached <see cref="NiSequence"/> using a
+    /// flag-preserving PropertyObject clone. Tries the sequence's own property object first
+    /// (Clone("") = copy the object itself); if that is rejected, falls back to cloning the
+    /// file-level <c>Data.Seq[idx]</c> array element (which is the same underlying Sequence COM
+    /// object). Throws if neither yields a usable Sequence — we never silently return an empty
+    /// sequence, so a copy failure surfaces instead of producing a name-only shell.
+    /// </summary>
+    private NiSequence CloneSequenceDeep(NiSequenceFile srcSf, NiSequence srcSeq, string srcSeqName)
+    {
+        const int CopyAllFlags = 0x20000000; // PropOption_CopyAllFlags
+
+        // Primary: clone the sequence's own property object.
+        try
+        {
+            NiPropertyObject srcSeqPo = srcSeq.AsPropertyObject();
+            var clone = (NiPropertyObject)(object)srcSeqPo.Clone("", CopyAllFlags);
+            var asSeq = clone as NiSequence ?? (NiSequence)(object)clone;
+            // Sanity: a real clone carries the source's step count.
+            if (asSeq != null) return asSeq;
+        }
+        catch (Exception ex) { _logger.LogDebug(ex, "Clone(\"\") of sequence '{Seq}' failed; trying file-array clone.", srcSeqName); }
+
+        // Fallback: locate the sequence's index in the file's Seq array and clone that element.
+        try
+        {
+            NiPropertyObject srcFilePo = srcSf.AsPropertyObject();
+            int n = Convert.ToInt32((object)srcSf.NumSequences);
+            for (int i = 0; i < n; i++)
+            {
+                string nm;
+                try { nm = (string)srcSf.GetSequence(i).Name; } catch { continue; }
+                if (!string.Equals(nm, srcSeqName, StringComparison.Ordinal)) continue;
+                var clone = (NiPropertyObject)(object)srcFilePo.Clone($"Data.Seq[{i}]", CopyAllFlags);
+                return (NiSequence)(object)clone;
+            }
+        }
+        catch (Exception ex) { _logger.LogError(ex, "File-array clone of sequence '{Seq}' failed.", srcSeqName); }
+
+        throw new InvalidOperationException(
+            $"Could not deep-clone sequence '{srcSeqName}'. Neither PropertyObject.Clone(\"\") nor " +
+            "the Data.Seq[idx] array clone produced a usable Sequence object.");
     }
 
     // ── Private Helpers ───────────────────────────────────────────────────────
@@ -4568,7 +4883,26 @@ public sealed class TestStandService : ITestStandService
         catch (Exception ex) { _logger.LogDebug(ex, "Failed to read property value as boolean."); }
         try { return (string)prop.GetValString("", 0); }
         catch (Exception ex) { _logger.LogDebug(ex, "Failed to read property value as string."); }
-        return null;
+        // Enum leaf: the three plain reads above all throw ("Expected type X. Found type <Enum>");
+        // read it via coercion → {ordinal, symbolicName} so an authored enum value is not lost.
+        return TryReadEnumValue(prop);
+    }
+
+    /// <summary>
+    /// Reads an ENUM-typed leaf's current value via coercion (a plain GetVal* read throws on enums).
+    /// Returns <see cref="EnumLeafValue"/> {ordinal, symbolicName}, or null when the property is not
+    /// an enum (or is genuinely empty). Only meaningful AFTER the plain number/boolean/string reads
+    /// failed — a plain Number/String leaf would be caught by those first.
+    /// </summary>
+    private EnumLeafValue? TryReadEnumValue(dynamic prop)
+    {
+        try
+        {
+            double ord = (double)prop.GetValNumber("", PropOption_CoerceToNumber);
+            string sym = (string)prop.GetValString("", PropOption_CoerceToString);
+            return new EnumLeafValue { Ordinal = (int)Math.Round(ord), SymbolicName = sym };
+        }
+        catch (Exception ex) { _logger.LogDebug(ex, "Not an enum leaf (coerced read failed)."); return null; }
     }
 
     private T? GetEngineProperty<T>(string propName)
@@ -4664,6 +4998,19 @@ public sealed class TestStandService : ITestStandService
     /// </summary>
     private static dynamic ResolveStepInGroup(dynamic seq, int group, string stepName)
     {
+        // Positional selector '@idx:N' — the 0-based step index within the group. Lets callers
+        // address a specific step among duplicate-named ones (e.g. three "Call Log" steps) without
+        // renaming. Shared by every by-name step tool (set_step_*, set_module_parameter, ...).
+        if (stepName.StartsWith("@idx:", StringComparison.OrdinalIgnoreCase) &&
+            int.TryParse(stepName.Substring(5), out int atIdx))
+        {
+            int total = (int)seq.GetNumSteps((object)group);
+            if (atIdx < 0 || atIdx >= total)
+                throw new KeyNotFoundException(
+                    $"@idx:{atIdx} is out of range — the group has {total} step(s) (valid 0..{total - 1}).");
+            return seq.GetStep(atIdx, (object)group);
+        }
+
         int hash = stepName.LastIndexOf('#');
         if (hash > 0 && int.TryParse(stepName.Substring(hash + 1), out int occurrence) && occurrence >= 1)
         {
@@ -5147,6 +5494,186 @@ public sealed class TestStandService : ITestStandService
                 _loadedSequenceFiles[destFilePath] = dst;
             }
             return copied;
+        });
+    }
+
+    /// <inheritdoc/>
+    public async Task<Dictionary<string, object>> CopyFileAttributesAsync(string sourceFilePath,
+        string destFilePath, IReadOnlyList<string>? attributeNames = null, bool save = true)
+    {
+        EnsureConnected();
+        return await Task.Run(() =>
+        {
+            var src = (NiSequenceFile)(object)GetOrLoadSeqFile(sourceFilePath);
+            var dst = (NiSequenceFile)(object)GetOrLoadSeqFile(destFilePath);
+
+            // The file's name/value attributes (e.g. NI.Analyzer.IgnoredMessages) hang off the file's
+            // ROOT object — which is the PropertyObjectFile (AsPropertyObjectFile), NOT the content
+            // PropertyObject returned by AsPropertyObject(). PropertyObjectFile derives from
+            // PropertyObject, so it also exposes .Attributes; the analyzer stores its ignored-message
+            // list there. Using AsPropertyObject() reaches a DIFFERENT object whose attribute container
+            // is empty — which is why this tool used to find nothing to copy. Cast the file-root object
+            // to PropertyObject (the underlying COM object implements both interfaces).
+            NiPropertyObject srcFileObj = (NiPropertyObject)(object)src.AsPropertyObjectFile();
+            NiPropertyObject dstFileObj = (NiPropertyObject)(object)dst.AsPropertyObjectFile();
+
+            var copied   = new List<string>();
+            var warnings = new List<string>();
+            var result   = new Dictionary<string, object>();
+
+            // NOTE: do NOT gate on PropertyObject.HasAttributes. On TS2026 it returns a FALSE NEGATIVE
+            // for a file that genuinely carries attributes (e.g. NI.Analyzer.IgnoredMessages) — the same
+            // typed-COM binding quirk that makes Execution.GetStates misbehave — so the tool used to skip
+            // real attributes and report "no attributes to copy". Instead, reach the attribute-root
+            // container directly and decide by its actual subproperty count.
+            NiPropertyObject srcAttrs;
+            try { srcAttrs = srcFileObj.Attributes; }   // attribute-root container
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Accessing source file Attributes failed.");
+                result["copiedCount"] = 0;
+                result["copied"]      = copied;
+                result["warnings"]    = new List<string> { "Source file exposes no Attributes container." };
+                return result;
+            }
+
+            int srcAttrCount = 0;
+            try { srcAttrCount = srcAttrs.GetNumSubProperties(""); }
+            catch (Exception ex) { _logger.LogDebug(ex, "GetNumSubProperties failed on source attributes."); }
+
+            if (srcAttrCount == 0 && (attributeNames == null || attributeNames.Count == 0))
+            {
+                result["copiedCount"] = 0;
+                result["copied"]      = copied;
+                result["warnings"]    = new List<string> { "Source file has no name/value attributes to copy." };
+                return result;
+            }
+
+            NiPropertyObject dstAttrs = dstFileObj.Attributes;   // created on demand if absent
+
+            // Which top-level attribute names to copy: the explicit list, or every attribute present
+            // on the source when none is given.
+            List<string> names;
+            if (attributeNames != null && attributeNames.Count > 0)
+            {
+                names = attributeNames.ToList();
+            }
+            else
+            {
+                names = new List<string>();
+                int n = 0;
+                try { n = srcAttrs.GetNumSubProperties(""); }
+                catch (Exception ex) { _logger.LogDebug(ex, "GetNumSubProperties failed on source attributes."); }
+                for (int i = 0; i < n; i++)
+                {
+                    try { names.Add(((NiPropertyObject)(object)srcAttrs.GetPropertyObjectByOffset(i, 0)).Name); }
+                    catch (Exception ex) { _logger.LogDebug(ex, "Failed to read source attribute name at offset {Idx}.", i); }
+                }
+            }
+
+            foreach (var name in names)
+            {
+                // Existence probe on the source attribute container.
+                try { _ = (NiPropertyObject)(object)srcAttrs.GetPropertyObject(name, 0); }
+                catch { warnings.Add($"Attribute '{name}' not present on the source file — skipped."); continue; }
+                try
+                {
+                    // The object returned by GetPropertyObject still belongs to the source tree, so
+                    // SetPropertyObject would reject it ("already has a parent object"). Clone first
+                    // (PropOption_CopyAllFlags = flag-preserving detached deep copy), then attach.
+                    NiPropertyObject clone = (NiPropertyObject)(object)srcAttrs.Clone(
+                        name, 0x20000000 /* PropOption_CopyAllFlags */);
+                    dstAttrs.SetPropertyObject(name, 0x1 /* PropOption_InsertIfMissing */, clone);
+                    copied.Add(name);
+                }
+                catch (Exception ex) { warnings.Add($"Could not copy attribute '{name}': {ex.Message}"); }
+            }
+
+            try { ((PropertyObjectFile)(object)dst.AsPropertyObjectFile()).IncChangeCount(); }
+            catch (Exception ex) { _logger.LogDebug(ex, "IncChangeCount failed on destination file."); }
+
+            if (save)
+            {
+                SaveSequenceFileWithRetry(dst, destFilePath);
+                _loadedSequenceFiles[destFilePath] = dst;
+            }
+
+            result["copiedCount"] = copied.Count;
+            result["copied"]      = copied;
+            result["warnings"]    = warnings;
+            return result;
+        });
+    }
+
+    /// <inheritdoc/>
+    public async Task<Dictionary<string, object>> CopyFileGlobalsAsync(string sourceFilePath,
+        string destFilePath, IReadOnlyList<string>? globalNames = null, bool save = true)
+    {
+        EnsureConnected();
+        return await Task.Run(() =>
+        {
+            var src = (NiSequenceFile)(object)GetOrLoadSeqFile(sourceFilePath);
+            var dst = (NiSequenceFile)(object)GetOrLoadSeqFile(destFilePath);
+
+            // The file globals live in the file's FileGlobalsDefaultValues container — the SAME
+            // accessor get_file_globals (GetFileGlobals) and set_file_global use. Reaching them via
+            // the file-root property path "Data.FileGlobalDefaults" resolves a named member (so the
+            // explicit-names path worked) but reports 0 direct sub-properties, which silently emptied
+            // the copy-all enumeration below. Use the typed accessor so both paths agree.
+            NiPropertyObject srcFg = GetFileGlobals(src);
+            NiPropertyObject dstFg = GetFileGlobals(dst);
+
+            var copied   = new List<string>();
+            var warnings = new List<string>();
+            var result   = new Dictionary<string, object>();
+
+            // Which globals to copy: the explicit list, or every global present on the source.
+            List<string> names;
+            if (globalNames != null && globalNames.Count > 0)
+            {
+                names = globalNames.ToList();
+            }
+            else
+            {
+                // Enumerate via MapVariables — the SAME reflection-based reader get_file_globals uses.
+                // An early-bound srcFg.GetNumSubProperties("") returns 0 on the FileGlobalsDefaultValues
+                // container here (a COM early-binding quirk), which is what silently emptied this branch;
+                // MapVariables reads the members reliably through late binding.
+                names = MapVariables(srcFg).Select(v => v.Name).ToList();
+            }
+
+            foreach (var name in names)
+            {
+                // Existence probe on the source globals container.
+                try { _ = (NiPropertyObject)(object)srcFg.GetPropertyObject(name, 0); }
+                catch { warnings.Add($"File global '{name}' not present on the source file — skipped."); continue; }
+                try
+                {
+                    // The object from GetPropertyObject still belongs to the source tree, so
+                    // SetPropertyObject would reject it ("already has a parent object"). Clone first
+                    // (PropOption_CopyAllFlags = flag-preserving detached deep copy — carries the type,
+                    // value, comment, PropFlags and nested members), then attach to the destination.
+                    NiPropertyObject clone = (NiPropertyObject)(object)srcFg.Clone(
+                        name, 0x20000000 /* PropOption_CopyAllFlags */);
+                    dstFg.SetPropertyObject(name, 0x1 /* PropOption_InsertIfMissing */, clone);
+                    copied.Add(name);
+                }
+                catch (Exception ex) { warnings.Add($"Could not copy file global '{name}': {ex.Message}"); }
+            }
+
+            try { ((PropertyObjectFile)(object)dst.AsPropertyObjectFile()).IncChangeCount(); }
+            catch (Exception ex) { _logger.LogDebug(ex, "IncChangeCount failed on destination file."); }
+
+            if (save)
+            {
+                SaveSequenceFileWithRetry(dst, destFilePath);
+                _loadedSequenceFiles[destFilePath] = dst;
+            }
+
+            result["copiedCount"] = copied.Count;
+            result["copied"]      = copied;
+            result["warnings"]    = warnings;
+            return result;
         });
     }
 
@@ -7201,7 +7728,7 @@ public sealed class TestStandService : ITestStandService
     /// <inheritdoc/>
     public Task<ModuleConfigResult> ConfigureDotNetModuleAsync(string filePath,
         string sequenceName, string stepGroup, string stepName, string assemblyPath,
-        string className, string methodName, bool save = true)
+        string className, string methodName, bool save = true, bool loadPrototype = true)
         => ConfigureModuleAsync(filePath, sequenceName, stepGroup, stepName, "DotNet", save,
             mod =>
             {
@@ -7215,12 +7742,13 @@ public sealed class TestStandService : ITestStandService
                     TrySetModuleProp(mod, "MemberName", methodName))
                     applied["methodName"] = methodName;
                 return applied;
-            });
+            },
+            loadPrototype: loadPrototype);
 
     /// <inheritdoc/>
     public Task<ModuleConfigResult> ConfigureDllModuleAsync(string filePath,
         string sequenceName, string stepGroup, string stepName, string dllPath,
-        string functionName, bool save = true)
+        string functionName, bool save = true, bool loadPrototype = true)
         => ConfigureModuleAsync(filePath, sequenceName, stepGroup, stepName, "CVI", save,
             mod =>
             {
@@ -7236,12 +7764,13 @@ public sealed class TestStandService : ITestStandService
                     TrySetModuleProp(mod, "FunctionName", functionName))
                     applied["functionName"] = functionName;
                 return applied;
-            });
+            },
+            loadPrototype: loadPrototype);
 
     /// <inheritdoc/>
     public Task<ModuleConfigResult> ConfigureLabViewModuleAsync(string filePath,
         string sequenceName, string stepGroup, string stepName, string viPath,
-        bool save = true)
+        bool save = true, bool loadPrototype = true)
         => ConfigureModuleAsync(filePath, sequenceName, stepGroup, stepName, "LabVIEW", save,
             mod =>
             {
@@ -7266,12 +7795,13 @@ public sealed class TestStandService : ITestStandService
                         "configure_labview_module would switch its adapter to LabVIEW and corrupt its " +
                         "configuration. Use set_step_property instead (e.g. property_path " +
                         "'VIModule.ViCall.VIPath' for the VI, 'RemoteHost'/'PortNumber'/'Timeout').");
-            });
+            },
+            loadPrototype: loadPrototype);
 
     /// <inheritdoc/>
     public Task<ModuleConfigResult> ConfigurePythonModuleAsync(string filePath,
         string sequenceName, string stepGroup, string stepName, string modulePath,
-        string functionName, bool save = true)
+        string functionName, bool save = true, bool loadPrototype = true)
         => ConfigureModuleAsync(filePath, sequenceName, stepGroup, stepName, "Python", save,
             mod =>
             {
@@ -7282,13 +7812,15 @@ public sealed class TestStandService : ITestStandService
                     TrySetModuleProp(mod, "FunctionName", functionName))
                     applied["functionName"] = functionName;
                 return applied;
-            });
+            },
+            loadPrototype: loadPrototype);
 
     /// <inheritdoc/>
     public Task<ModuleConfigResult> ConfigureSequenceCallModuleAsync(string filePath,
         string sequenceName, string stepGroup, string stepName,
         string targetSequenceName, string targetSequenceFile = "", bool save = true,
-        string? executionMode = null, string? threadRefExpr = null, bool? autoWait = null)
+        string? executionMode = null, string? threadRefExpr = null, bool? autoWait = null,
+        bool loadPrototype = true)
         => ConfigureModuleAsync(filePath, sequenceName, stepGroup, stepName, "SequenceCall", save,
             mod =>
             {
@@ -7303,8 +7835,8 @@ public sealed class TestStandService : ITestStandService
                     mod.SequenceFilePath = rel;
                     applied["targetSequenceFile"] = rel;
                 }
-                // Populate ActualArgs/Prototype from the callee (editor "Load Prototype").
-                TryLoadModulePrototype(mod, stepName);
+                // NOTE: the callee prototype is loaded centrally by ConfigureModuleAsync AFTER this
+                // 'apply' runs (so the target is set first) — see TryLoadModulePrototype there.
 
                 // Optional threading / async options. These live on the SequenceCall module's own
                 // PropertyObject (TS.SData): ThreadOpt (0 = run in the calling thread, 1 = new thread,
@@ -7344,7 +7876,8 @@ public sealed class TestStandService : ITestStandService
                     }
                 }
                 return applied;
-            });
+            },
+            loadPrototype: loadPrototype);
 
     /// <summary>
     /// Shared driver for the typed adapter-configuration tools: resolves the step,
@@ -7354,7 +7887,7 @@ public sealed class TestStandService : ITestStandService
     private async Task<ModuleConfigResult> ConfigureModuleAsync(string filePath,
         string sequenceName, string stepGroup, string stepName, string adapterKey,
         bool save, Func<dynamic, Dictionary<string, object>> apply,
-        Action<dynamic>? preAdapterGuard = null)
+        Action<dynamic>? preAdapterGuard = null, bool loadPrototype = true)
     {
         EnsureConnected();
         return await Task.Run(() =>
@@ -7379,6 +7912,21 @@ public sealed class TestStandService : ITestStandService
             dynamic mod = step.Module;
             var applied = apply(mod);
 
+            // Load the code-module prototype so the step's parameter interface is populated from the
+            // just-configured target — the programmatic equivalent of the editor's "Load Prototype":
+            // a LabVIEW VI's connector pane, a DLL/.NET/ActiveX function prototype, a SequenceCall's
+            // callee argument list. This MUST run AFTER 'apply' set the target/VI path (order matters —
+            // without it the interface stays empty). Non-destructive: existing bindings are matched by
+            // name and preserved. It is a logged no-op when the target is not resolvable (unlinked
+            // placeholder, missing/not-loaded file, or a VI in an unloadable .lvlibp headless).
+            if (loadPrototype)
+                TryLoadModulePrototype(mod, stepName);
+
+            // Read the resulting interface back so the caller can SEE the parameters that were loaded.
+            var parameters = new List<ModuleParameterInfo>();
+            try { parameters = ReadModuleParameters(((NiStep)(object)step).AsPropertyObject(), stepName); }
+            catch (Exception ex) { _logger.LogDebug(ex, "Failed to read module parameters after configuring '{Step}'.", stepName); }
+
             if (save)
             {
                 SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
@@ -7391,9 +7939,10 @@ public sealed class TestStandService : ITestStandService
             string actualKey = TryGetString(step, "AdapterKeyName");
             return new ModuleConfigResult
             {
-                StepName       = stepName,
-                Adapter        = string.IsNullOrEmpty(actualKey) ? resolvedKey : actualKey,
-                AppliedSettings = applied
+                StepName        = stepName,
+                Adapter         = string.IsNullOrEmpty(actualKey) ? resolvedKey : actualKey,
+                AppliedSettings = applied,
+                Parameters      = parameters
             };
         });
     }
@@ -7425,7 +7974,7 @@ public sealed class TestStandService : ITestStandService
     /// unlinked placeholder, an unresolved external file, or a not-yet-loaded target — so target
     /// assignment always succeeds.
     /// </summary>
-    private void TryLoadModulePrototype(dynamic moduleObj, string stepName)
+    private bool TryLoadModulePrototype(dynamic moduleObj, string stepName)
     {
         try
         {
@@ -7435,7 +7984,7 @@ public sealed class TestStandService : ITestStandService
         {
             _logger.LogDebug(ex,
                 "LoadPrototype skipped for step '{Step}' (target/module not resolvable).", stepName);
-            return;
+            return false;
         }
 
         // After a prototype load every actual argument is freshly created with UseDef=False and
@@ -7461,6 +8010,7 @@ public sealed class TestStandService : ITestStandService
             }
         }
         catch (Exception ex) { _logger.LogDebug(ex, "No ActualArgs to normalize on step '{Step}'.", stepName); }
+        return true;
     }
 
     // ── Sequence Analyzer (detailed) ──────────────────────────────────────────
@@ -9921,6 +10471,29 @@ public sealed class TestStandService : ITestStandService
         return result;
     }
 
+    /// <summary>
+    /// Maps a numeric enum ordinal back to its symbolic enumerator NAME using the enum type's
+    /// definition in <paramref name="sf"/>'s type usage list. Returns null when the type is not an
+    /// enum, is missing, or no enumerator has that value (a bare/combined ordinal). Used so an
+    /// enum value supplied as an ordinal can still be written by name — which stores it as an
+    /// explicitly-set value (FileDiffer "[val]") rather than a default-flagged "{val}".
+    /// </summary>
+    private string? ResolveEnumeratorName(dynamic sf, string typeName, double value, string filePath)
+    {
+        try
+        {
+            NiTypeUsageList tul = GetTypeUsageList(sf);
+            NiPropertyObject enumType = ResolveEnumType(tul, typeName, filePath);
+            foreach (var e in ReadEnumerators(enumType))
+                if (e.Value == value) return e.Name;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "ResolveEnumeratorName failed for {Type}={Value}.", typeName, value);
+        }
+        return null;
+    }
+
     // The file's type usage list (where custom data types — including enums — are stored).
     private static NiTypeUsageList GetTypeUsageList(dynamic sf) =>
         ((PropertyObjectFile)(object)sf.AsPropertyObjectFile()).TypeUsageList;
@@ -10114,91 +10687,105 @@ public sealed class TestStandService : ITestStandService
             int sgVal = ParseStepGroup(stepGroup);
             var step  = ResolveStepInGroup(seq, sgVal, stepName);
 
-            var result = new List<ModuleParameterInfo>();
             NiPropertyObject stepPo = ((NiStep)(object)step).AsPropertyObject();
+            return ReadModuleParameters(stepPo, stepName);
+        });
+    }
 
-            // 1) LabVIEW (G Flexible VI) connector-pane bindings: TS.SData.ViCall.Parms —
-            //    an ARRAY of VIParameter containers (Label/ArgVal/Direction, clusters nest
-            //    via ArrayClusterEls). 2) The same shape on utility steps that embed their VI
-            //    call at the step root (NI_LV_RunVIAsynchronously → VIModule.ViCall.Parms).
-            foreach (var parmsPath in new[] { "TS.SData.ViCall.Parms", "VIModule.ViCall.Parms" })
+    /// <summary>
+    /// Reads a step's code-module interface (parameters/arguments) from its PropertyObject, in the
+    /// same precedence order as get_module_parameters: LabVIEW connector-pane bindings
+    /// (TS.SData.ViCall.Parms — cluster members flattened as 'parent.child'), the step-root VIModule
+    /// of utility steps (NI_LV_RunVIAsynchronously), SequenceCall actual arguments
+    /// (TS.SData.ActualArgs) and finally the legacy flat Module.Parameters container
+    /// (DLL / .NET / Python / ActiveX). Returns the first non-empty source. Shared by
+    /// get_module_parameters and the "Load Prototype" paths so they report an identical interface.
+    /// </summary>
+    private List<ModuleParameterInfo> ReadModuleParameters(NiPropertyObject stepPo, string stepName)
+    {
+        var result = new List<ModuleParameterInfo>();
+
+        // 1) LabVIEW (G Flexible VI) connector-pane bindings: TS.SData.ViCall.Parms —
+        //    an ARRAY of VIParameter containers (Label/ArgVal/Direction, clusters nest
+        //    via ArrayClusterEls). 2) The same shape on utility steps that embed their VI
+        //    call at the step root (NI_LV_RunVIAsynchronously → VIModule.ViCall.Parms).
+        foreach (var parmsPath in new[] { "TS.SData.ViCall.Parms", "VIModule.ViCall.Parms" })
+        {
+            try
+            {
+                NiPropertyObject parms =
+                    (NiPropertyObject)(object)stepPo.GetPropertyObject(parmsPath, 0);
+                CollectViCallParms(parms, "", result);
+                if (result.Count > 0) return result;
+            }
+            catch (Exception ex) { _logger.LogDebug(ex, "No VI parms at '{Path}'.", parmsPath); }
+        }
+
+        // 3) SequenceCall arguments: TS.SData.ActualArgs — named SequenceArgument
+        //    containers whose Expr is the bound expression (UseDef=true → default used).
+        try
+        {
+            NiPropertyObject args =
+                (NiPropertyObject)(object)stepPo.GetPropertyObject("TS.SData.ActualArgs", 0);
+            int n = args.GetNumSubProperties("");
+            for (int i = 0; i < n; i++)
             {
                 try
                 {
-                    NiPropertyObject parms =
-                        (NiPropertyObject)(object)stepPo.GetPropertyObject(parmsPath, 0);
-                    CollectViCallParms(parms, "", result);
-                    if (result.Count > 0) return result;
-                }
-                catch (Exception ex) { _logger.LogDebug(ex, "No VI parms at '{Path}'.", parmsPath); }
-            }
-
-            // 3) SequenceCall arguments: TS.SData.ActualArgs — named SequenceArgument
-            //    containers whose Expr is the bound expression (UseDef=true → default used).
-            try
-            {
-                NiPropertyObject args =
-                    (NiPropertyObject)(object)stepPo.GetPropertyObject("TS.SData.ActualArgs", 0);
-                int n = args.GetNumSubProperties("");
-                for (int i = 0; i < n; i++)
-                {
+                    NiPropertyObject a = args.GetNthSubProperty("", i, 0);
+                    var pi = new ModuleParameterInfo
+                    {
+                        Name = a.Name,
+                        Type = "SequenceArgument",
+                    };
+                    try { pi.Value = a.GetValString("Expr", 0); } catch { }
                     try
                     {
-                        NiPropertyObject a = args.GetNthSubProperty("", i, 0);
-                        var pi = new ModuleParameterInfo
-                        {
-                            Name = a.Name,
-                            Type = "SequenceArgument",
-                        };
-                        try { pi.Value = a.GetValString("Expr", 0); } catch { }
-                        try
-                        {
-                            if (a.GetValBoolean("UseDef", 0) && string.IsNullOrEmpty(pi.Value))
-                                pi.Value = null; // default used, nothing bound
-                        }
-                        catch { }
-                        try { pi.DataType = a.GetTypeDisplayString("", 0); } catch { }
-                        result.Add(pi);
+                        if (a.GetValBoolean("UseDef", 0) && string.IsNullOrEmpty(pi.Value))
+                            pi.Value = null; // default used, nothing bound
                     }
-                    catch (Exception ex) { _logger.LogDebug(ex, "Failed to read ActualArgs entry {Index}.", i); }
+                    catch { }
+                    try { pi.DataType = a.GetTypeDisplayString("", 0); } catch { }
+                    result.Add(pi);
                 }
-                if (result.Count > 0) return result;
+                catch (Exception ex) { _logger.LogDebug(ex, "Failed to read ActualArgs entry {Index}.", i); }
             }
-            catch (Exception ex) { _logger.LogDebug(ex, "No SequenceCall ActualArgs on step '{Step}'.", stepName); }
+            if (result.Count > 0) return result;
+        }
+        catch (Exception ex) { _logger.LogDebug(ex, "No SequenceCall ActualArgs on step '{Step}'.", stepName); }
 
-            // 4) Legacy adapters that expose a flat Module.Parameters container.
-            try
+        // 4) Legacy adapters that expose a flat Module.Parameters container.
+        try
+        {
+            NiPropertyObject moduleParams;
+            try { moduleParams = (NiPropertyObject)(object)stepPo.GetPropertyObject("TS.Module.Parameters", 0); }
+            catch { moduleParams = (NiPropertyObject)(object)stepPo.GetPropertyObject("Module.Parameters", 0); }
+
+            int count = moduleParams.GetNumSubProperties("");
+            for (int i = 0; i < count; i++)
             {
-                NiPropertyObject moduleParams;
-                try { moduleParams = (NiPropertyObject)(object)stepPo.GetPropertyObject("TS.Module.Parameters", 0); }
-                catch { moduleParams = (NiPropertyObject)(object)stepPo.GetPropertyObject("Module.Parameters", 0); }
-
-                int count = moduleParams.GetNumSubProperties("");
-                for (int i = 0; i < count; i++)
+                try
                 {
+                    NiPropertyObject param = moduleParams.GetNthSubProperty("", i, 0);
+                    var pi = new ModuleParameterInfo { Name = param.Name };
+                    try { pi.DataType = param.GetTypeDisplayString("", 0); } catch { }
                     try
                     {
-                        NiPropertyObject param = moduleParams.GetNthSubProperty("", i, 0);
-                        var pi = new ModuleParameterInfo { Name = param.Name };
-                        try { pi.DataType = param.GetTypeDisplayString("", 0); } catch { }
-                        try
-                        {
-                            int flags2 = param.GetFlags("", 0);
-                            pi.Direction = (flags2 & 4) != 0 ? "InOut"
-                                         : (flags2 & 2) != 0 ? "Output"
-                                         : "Input";
-                        }
-                        catch { pi.Direction = "Input"; }
-                        pi.Value = TryGetValue(param)?.ToString();
-                        result.Add(pi);
+                        int flags2 = param.GetFlags("", 0);
+                        pi.Direction = (flags2 & 4) != 0 ? "InOut"
+                                     : (flags2 & 2) != 0 ? "Output"
+                                     : "Input";
                     }
-                    catch (Exception ex) { _logger.LogDebug(ex, "Failed to read module parameter at index {Index}.", i); }
+                    catch { pi.Direction = "Input"; }
+                    pi.Value = TryGetValue(param)?.ToString();
+                    result.Add(pi);
                 }
+                catch (Exception ex) { _logger.LogDebug(ex, "Failed to read module parameter at index {Index}.", i); }
             }
-            catch (Exception ex) { _logger.LogDebug(ex, "Failed to enumerate module parameters for step '{Step}'.", stepName); }
+        }
+        catch (Exception ex) { _logger.LogDebug(ex, "Failed to enumerate module parameters for step '{Step}'.", stepName); }
 
-            return result;
-        });
+        return result;
     }
 
     /// <summary>
@@ -10274,6 +10861,58 @@ public sealed class TestStandService : ITestStandService
             catch { return null; }
         }
         return null;
+    }
+
+    /// <inheritdoc/>
+    public async Task<LoadPrototypeResult> LoadModulePrototypeAsync(string filePath,
+        string sequenceName, string stepGroup, string stepName, bool save = true)
+    {
+        EnsureConnected();
+        return await Task.Run(() =>
+        {
+            var sf    = GetOrLoadSeqFile(filePath);
+            var seq   = sf.GetSequenceByName(sequenceName);
+            int sgVal = ParseStepGroup(stepGroup);
+            var step  = ResolveStepInGroup(seq, sgVal, stepName);
+
+            string adapterKey = TryGetString(step, "AdapterKeyName");
+            dynamic mod       = step.Module;
+
+            // Editor "Load Prototype": reconcile the module's argument list against the current
+            // target. Returns false (logged) when the target/module cannot be resolved — an unlinked
+            // SequenceCall placeholder, a missing/not-loaded target file, or a VI/DLL that cannot load
+            // headless. Non-destructive: existing bindings are matched by name and preserved.
+            bool loaded = TryLoadModulePrototype(mod, stepName);
+
+            NiPropertyObject stepPo = ((NiStep)(object)step).AsPropertyObject();
+            var parameters = ReadModuleParameters(stepPo, stepName);
+
+            string? note = null;
+            if (!loaded)
+                note = "LoadPrototype could not resolve the target/module. Nothing was updated. " +
+                       "Ensure the target is set first (order matters) and reachable: for a " +
+                       "SequenceCall the target sequence/file must be loaded or on the search path; " +
+                       "for LabVIEW the VI must be loadable (LabVIEW available, not an unloadable " +
+                       ".lvlibp headless).";
+            else if (parameters.Count == 0)
+                note = "Prototype loaded, but the interface has no parameters — either the target " +
+                       "genuinely has none, or its interface could not be read headless.";
+
+            if (save)
+            {
+                SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
+                _loadedSequenceFiles[filePath] = sf;
+            }
+
+            return new LoadPrototypeResult
+            {
+                StepName        = stepName,
+                Adapter         = adapterKey,
+                PrototypeLoaded = loaded,
+                Note            = note,
+                Parameters      = parameters
+            };
+        });
     }
 
     /// <inheritdoc/>
@@ -10745,6 +11384,93 @@ public sealed class TestStandService : ITestStandService
                 _loadedSequenceFiles[filePath] = seqFile;
             }
             return applied;
+        });
+    }
+
+    /// <inheritdoc/>
+    public async Task<Dictionary<string, object>> CopyStepModuleAsync(
+        string sourceFilePath, string sourceSequenceName, string sourceStepGroup, string sourceStepName,
+        string targetFilePath, string targetSequenceName, string targetStepGroup, string targetStepName,
+        bool save = true)
+    {
+        EnsureConnected();
+        return await Task.Run(() =>
+        {
+            var srcSf = (NiSequenceFile)(object)GetOrLoadSeqFile(sourceFilePath);
+            var tgtSf = (NiSequenceFile)(object)GetOrLoadSeqFile(targetFilePath);
+            NiSequence srcSeq = srcSf.GetSequenceByName(sourceSequenceName);
+            NiSequence tgtSeq = tgtSf.GetSequenceByName(targetSequenceName);
+            NiStep srcStep = (NiStep)(object)ResolveStepInGroup(srcSeq, ParseStepGroup(sourceStepGroup), sourceStepName);
+            NiStep tgtStep = (NiStep)(object)ResolveStepInGroup(tgtSeq, ParseStepGroup(targetStepGroup), targetStepName);
+            NiPropertyObject srcPo = srcStep.AsPropertyObject();
+            NiPropertyObject tgtPo = tgtStep.AsPropertyObject();
+
+            var copied   = new List<string>();
+            var warnings = new List<string>();
+            var result   = new Dictionary<string, object>();
+
+            // 1) Align the adapter FIRST (so the target owns the right-shaped module container);
+            //    ChangeAdapter would otherwise reset the module we are about to copy.
+            string srcAdapter = TryGetString(srcStep, "AdapterKeyName");
+            string tgtAdapter = TryGetString(tgtStep, "AdapterKeyName");
+            if (!string.IsNullOrEmpty(srcAdapter) &&
+                !string.Equals(srcAdapter, tgtAdapter, StringComparison.OrdinalIgnoreCase))
+            {
+                try { ((dynamic)tgtStep).ChangeAdapter((object)srcAdapter); result["adapterChangedTo"] = srcAdapter; }
+                catch (Exception ex) { warnings.Add($"Could not change target adapter to '{srcAdapter}': {ex.Message}"); }
+            }
+
+            // 2) Deep-copy each module-bearing subtree present on the source, carrying the ViCall metadata
+            //    (Namespace/VIDescription/Checksum/Parms) and ActualArgs — no LabVIEW load. The module types
+            //    must already exist in the target file (copy_typedefs).
+            //    Beyond the code module we also clone the AUTHORED step-config subtrees that the step-type
+            //    template carries but a freshly-inserted step does not always instantiate: the result-logging
+            //    hints (TS.AdditionalResultsHints / TS.CustomResults), the error-dialog options that steps like
+            //    NI_Wait/MessagePopup and the DQMH pattern author (TS.ErrorDialogOptions), and the NI_Wait
+            //    timeout-result flag (Result.TimeoutOccurred). Each path is probed on the source and cloned
+            //    only if present, so it is a harmless no-op for a step type that lacks it. This makes
+            //    copy_step_module reproduce non-adapter step config (e.g. an NI_Wait) faithfully, not just the
+            //    LabVIEW/DLL/.NET/SequenceCall module.
+            //    IMPORTANT: the object returned by GetPropertyObject still BELONGS to the source tree, and
+            //    SetPropertyObject refuses an object that "already has a parent object. You must first clone
+            //    the item". So CLONE the subtree first (PropOption_CopyAllFlags = a flag-preserving deep copy
+            //    that returns a detached, independent object) and attach the clone to the target.
+            foreach (var path in new[] { "TS.SData", "VIModule",
+                                         "TS.AdditionalResultsHints", "TS.CustomResults",
+                                         "TS.ErrorDialogOptions", "Result.TimeoutOccurred" })
+            {
+                // Existence probe on the source step (GetPropertyObject throws if the path is absent).
+                try { _ = (NiPropertyObject)(object)srcPo.GetPropertyObject(path, 0); }
+                catch { continue; } // not present on the source step
+                try
+                {
+                    NiPropertyObject srcClone = (NiPropertyObject)(object)srcPo.Clone(
+                        path, 0x20000000 /* PropOption_CopyAllFlags */);
+                    tgtPo.SetPropertyObject(path, 0x1 /* PropOption_InsertIfMissing */, srcClone);
+                    copied.Add(path);
+                    // Mirror the node's own PropFlags too (e.g. the 0x200000 module marker on VIModule),
+                    // in case the container flag differs from what CopyAllFlags carried on the leaf.
+                    try { tgtPo.SetFlags(path, 0, srcPo.GetFlags(path, 0)); }
+                    catch (Exception ex) { _logger.LogDebug(ex, "Flag mirror skipped for '{Path}'.", path); }
+                }
+                catch (Exception ex) { warnings.Add($"Could not copy '{path}': {ex.Message}"); }
+            }
+
+            if (copied.Count == 0)
+                warnings.Add("No module subtree (TS.SData / VIModule) was found on the source step.");
+
+            if (save)
+            {
+                SaveSequenceFileWithRetry(tgtSf, targetFilePath);
+                _loadedSequenceFiles[targetFilePath] = tgtSf;
+            }
+
+            result["sourceStep"]  = sourceStepName;
+            result["targetStep"]  = targetStepName;
+            result["adapter"]     = string.IsNullOrEmpty(srcAdapter) ? "" : srcAdapter;
+            result["copiedPaths"] = copied;
+            result["warnings"]    = warnings;
+            return result;
         });
     }
 

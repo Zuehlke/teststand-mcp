@@ -291,6 +291,22 @@ public class PropertyNode
     public List<PropertyNode>? Children { get; set; }
 }
 
+/// <summary>
+/// The value of an ENUM-typed leaf as read from the file: its underlying number
+/// (<see cref="Ordinal"/>) and its enumerator name (<see cref="SymbolicName"/>). Returned in the
+/// <c>Value</c> of the property readers (get_file_globals / get_property_object / get_property_tree)
+/// with ValueType/DataType "Enum" — a plain option-0 read yields neither (TestStand rejects it with
+/// "Expected type Number/String. Found type &lt;Enum&gt;"), so an inventory-based clone would
+/// otherwise silently lose the enum value.
+/// </summary>
+public class EnumLeafValue
+{
+    /// <summary>The enum's underlying numeric value (its ordinal constant).</summary>
+    public int Ordinal { get; set; }
+    /// <summary>The enum's symbolic enumerator name (e.g. "Volts").</summary>
+    public string SymbolicName { get; set; } = "";
+}
+
 /// <summary>Description of a sequence parameter.</summary>
 public class ParameterInfo
 {
@@ -943,6 +959,17 @@ public class SequenceFileDiff
     public string File1 { get; set; } = "";
     /// <summary>Path of the second file.</summary>
     public string File2 { get; set; } = "";
+    /// <summary>Comparison fidelity: always "coarse-structural" for this in-process comparison.
+    /// It is NOT field-exact — it only sees sequence/step NAMES, a handful of step properties
+    /// (RunMode, Pre/Post/Status expressions, Comment, adapter, Module.Expression), and the
+    /// presence of locals/parameters. It does NOT see ActualArgs, container members, per-parameter
+    /// defaults/comments, threading options, etc. Use mode='native' (or diff_sequence_files) for an
+    /// authoritative, field-level diff. TotalDifferences==0 here does NOT mean the files are identical.</summary>
+    public string Fidelity { get; set; } = "coarse-structural";
+    /// <summary>Human-readable caveat mirroring <see cref="Fidelity"/>, so a caller reading only the
+    /// JSON is not misled by a low TotalDifferences.</summary>
+    public string Note { get; set; } =
+        "Coarse structural comparison only — use mode='native' or diff_sequence_files for a field-level diff.";
     /// <summary>Total number of differences found.</summary>
     public int TotalDifferences { get; set; }
     /// <summary>Sequences present only in the first file.</summary>
@@ -1188,6 +1215,27 @@ public class ModuleConfigResult
     public string Adapter { get; set; } = "";
     /// <summary>Settings that were applied.</summary>
     public Dictionary<string, object> AppliedSettings { get; init; } = new();
+    /// <summary>The module interface (parameters/arguments) after the "Load Prototype" step ran —
+    /// the connector pane of a LabVIEW VI, the argument list of a SequenceCall's target, the
+    /// prototype of a DLL/.NET/ActiveX call. Empty when load_prototype was disabled or when the
+    /// target could not be resolved headless (e.g. a VI in an unloadable .lvlibp).</summary>
+    public List<ModuleParameterInfo> Parameters { get; init; } = new();
+}
+
+/// <summary>Result of loading a step's code-module prototype (the Sequence Editor's
+/// "Load Prototype" action) so its parameter interface is populated/refreshed.</summary>
+public class LoadPrototypeResult
+{
+    /// <summary>Step whose prototype was (re)loaded.</summary>
+    public string StepName { get; set; } = "";
+    /// <summary>The step's adapter (e.g. 'LabVIEW', 'DotNet', 'CVI', 'SequenceCall', 'Automation').</summary>
+    public string Adapter { get; set; } = "";
+    /// <summary>True when Module.LoadPrototype succeeded (the target/module was resolvable).</summary>
+    public bool PrototypeLoaded { get; set; }
+    /// <summary>Advisory note when nothing (or nothing useful) could be loaded; null on a clean load.</summary>
+    public string? Note { get; set; }
+    /// <summary>The resulting module interface parameters/arguments after the load.</summary>
+    public List<ModuleParameterInfo> Parameters { get; init; } = new();
 }
 
 // ── Thread Models ────────────────────────────────────────────────────────────
