@@ -417,10 +417,76 @@ max+1. (`T22`.)
   after the target's own interface changed** — e.g. a subsequence's Parameters were edited, or a
   DLL/VI/ActiveX signature changed — so the caller's arguments match again. Does NOT change the
   adapter; non-destructive (existing bindings matched by name). Returns `{stepName, adapter,
-  prototypeLoaded, note, parameters[]}` — `prototypeLoaded:false` + a `note` when the target could
-  not be resolved. (New tool NAME → needs a fresh MCP session to appear in the catalog after rebuild.)
+  prototypeLoaded, note, executionMode, workerOutcome, parameters[]}` — `prototypeLoaded:false` + a
+  `note` when the target could not be resolved. (New tool NAME → needs a fresh MCP session to appear
+  in the catalog after rebuild.)
+  - **ASYNC + ExecServer-routed worker by default (2026-07-09; see [[teststand-loadprototype-lvlibp-crash-isolation]]).**
+    A LabVIEW load attaches to/starts LabVIEW — the SAME slow work the editor's "Reload Prototype"
+    does — and can exceed the MCP transport's ~60s window (`-32001`). So a LabVIEW load runs
+    **asynchronously by default**: `load_module_prototype` returns immediately with `{jobId,
+    status:"running"}`; poll **`get_prototype_load_status(job_id)`** until `status:"completed"`.
+  - **ROOT CAUSE + the real fix (from the NuGet `…Interop.AdapterAPI`).** Headless, with no explicit
+    server, the LabVIEW adapter's **AutoDetect** resolves a LabVIEW **Run-Time** (`lvrt.dll`) that
+    can't be bound in-process → the delay-load SEH `0xC06D007E`. The editor works because it uses the
+    running LabVIEW **development** environment (**ExecServer**, ActiveX — no RTE delay-load). So before
+    the load we now **route the adapter to the ExecServer** and connect: `GetAdapterByKeyName(key)` →
+    **cast to the typed `LabVIEWAdapter`** (the `Initialize`/`Get`/`SetServerInfo` methods live on THAT
+    interface, NOT the generic `Adapter` dispinterface — which is why an earlier late-bound
+    `dynamic adapter.Initialize()` silently no-op'd) → `SetServerInfo(ExecServerDeferred,"LabVIEW")` +
+    `Initialize()`, restored afterward. Configurable via **`labview_server`**: `deferred` (default,
+    running ADE launched on first use), `exec` (connect now), `rte` (legacy AutoDetect), `auto` (leave
+    config untouched).
+  - **Crash-safe worker is the DEFAULT (`isolate:true`) and can now bind LabVIEW too.** ExecServer uses
+    **ActiveX, which works CROSS-PROCESS**, so the isolated worker (`--load-prototype-worker` child, own
+    engine) attaches to the running LabVIEW just like an in-process load — giving **crash-safety AND a
+    real load together**. A process-fatal native fault (`0xC06D007E`, escapes managed `try/catch`) kills
+    only the worker → the tool returns cleanly (`prototypeLoaded:false`, `executionMode:"worker"`,
+    `workerOutcome:"crashed"`/`"timeout"`), server lives. `isolate:false` runs in-process (also
+    ExecServer-routed, faster, but a native fault is NOT contained). For a genuinely unloadable `.lvlibp`,
+    `copy_step_module` remains the headless fallback.
+  - **SILENT worker death — no WER box AND no NI Error Reporter dialog.** `SetErrorMode` alone only
+    hides the OS fault box; NI's green "…encountered a problem and needs to close" reporter is an
+    IN-PROCESS unhandled-exception hook. The worker installs layered guards up front (in
+    `LoadPrototypeWorker.InstallSilentDeathGuards`): the decisive one is a **vectored exception handler**
+    (`AddVectoredExceptionHandler(first=1)`) that, on the MSVC delay-load SEH family (`0xC06Dxxxx` —
+    high word `0xC06D`, so it never fires on ordinary handled C++/CLR exceptions `0xE06D…`/`0xE0434352`),
+    calls `TerminateProcess` DURING first-chance dispatch — before any frame-based/unhandled handler,
+    i.e. before NI's hook can start the dialog. Plus `SetErrorMode`, `WerSetFlags(NO_UI)` +
+    `WerAddExcludedApplication`, CRT `_set_abort_behavior(0,…)`, and a `SetUnhandledExceptionFilter`
+    backstop for other fatal faults. Verified: a raised `0xC06D007E` dies in ~4s (not a timeout) with
+    ZERO lingering `WerFault.exe`/NIER processes, and the real load still returns `not-loaded` cleanly
+    (the VEH does not false-fire on the handled path). Test hook: env `TESTSTAND_MCP_LP_SIMULATE_CRASH`
+    = `raise` (RaiseException → exercises the VEH) or `1` (direct TerminateProcess). The worker is
+    bounded by `timeout_seconds` (default 120; on expiry its process tree is killed →
+    `workerOutcome:"timeout"`); on success it SAVES to disk and the parent reloads it.
+  - **Params & result.** `async` (default true for LabVIEW / false otherwise), `isolate` (default
+    true), `labview_server` (default `deferred`), `timeout_seconds` (default 120). Non-LabVIEW adapters (SequenceCall/.NET/DLL·CVI/ActiveX)
+    always run fast, **in-process, synchronously** — no behaviour change, no regression. Result carries
+    `executionMode` (`in-process`|`worker`), `workerOutcome`, `jobId`, `status`. NOTE: the auto-load
+    inside the `configure_*_module` tools still runs in-process synchronously — use `load_prototype:false`
+    + `load_module_prototype` (async) or `copy_step_module` for a `.lvlibp` there. New tool NAME
+    `get_prototype_load_status` + the `async` param → need a fresh MCP session after rebuild.
 - With element names mirrored, a full tool-driven rebuild of TFW_DemoModule.seq
   diffs **identical (0 differences)** against the original (`T32`).
+
+### Sequence Analyzer is ASYNC-capable (cold `.lvlibp` timeout fix; 2026-07-09)
+- `analyze_sequence_file` / `run_sequence_analyzer` accept **`async=true`**: the call returns
+  IMMEDIATELY with `{jobId, status:"running"}`; poll **`get_analysis_status(job_id)`** until
+  `status:"completed"` — same structured shape (`totalMessages`, `errorCount`/`warningCount`/
+  `informationCount`, `messages[]`, optional `groups[]`). Use it whenever the file has LabVIEW
+  `.lvlibp` steps on a **cold** module cache: the analyzer's "module is loadable" rule loads every
+  step's code module, and a cold packed-library VI load can exceed the MCP transport's ~60s window
+  (`-32001`). A tool-side timeout can't lift that cap — **async is the only real fix** (mirrors the
+  `load_module_prototype` async-job infra: `AnalyzerJob`/`StartAnalyzerJob`/`GetAnalysisStatusAsync`
+  in `TestStandService`, `_analyzerJobs` retained ~10 min).
+- **No isolated worker needed for the analyzer** — the slow/fault-prone module loads already happen
+  inside **`AnalyzerApp.exe`**, a separate process the analysis spawns. A native `.lvlibp` fault
+  kills that child → the job ends `status:"error"`, never taking the MCP server down. The background
+  job only decouples the RPC response from the analysis duration (same `Task.Run` context the sync
+  path already used). Default is still synchronous (`async=false`) — abwärtskompatibel. Verified
+  `T14.AnalyzeDetailed_Async_ReturnsJobThenSameResultAsSync` (jobId → poll → parity with sync).
+- New tool NAME `get_analysis_status` + the `async` param → **need a fresh MCP session** after the
+  rebuild (the client caches the tool catalog + arg schema at session start).
 
 ### Post-build validation (reference audit)
 - `audit_sequence_references` reads the ACTUAL built sequence — `ConditionExpr` / `ItemExpr` /
@@ -518,3 +584,34 @@ Closes the P1 analyzer errors and the LabVIEW-metadata diffs.
   `SetFlags` (decimal or `0x`-hex, e.g. `0x4000000` to blank a nameless Label's icon). Previously both
   errored "Unknown variable or property name". (Nameless-Label auto-blanking + bulk empty-name Label
   landed in wave 1.)
+
+### 1:1-rebuild tool-gap batch — wave 3 (2026-07-09): scope-generic property-tree CRUD
+Closed the last write/delete/flag gap on the **`Parameters.*`** level (and nested submembers under
+any scope). The read side already had `get_property_tree`; these are the symmetric writers. Both are
+**scope-generic** — `scope` ∈ `Parameters | Locals | FileGlobals | StationGlobals | SequenceFile`.
+See memory `teststand-property-node-crud-2026-07-09`.
+- **`set_property_node`** — create/set a node (and optionally its PropFlags) at a dotted
+  `lookup_string` relative to the scope root. Reuses the SAME creation switch as `set_property_value`
+  + `create_step_property` (`number/string/boolean/container/reference/named_type/enum/array_elements`):
+  `named_type` (+`type_name`) instantiates a FULL typed instance (fields materialise, like the editor,
+  via `Engine.NewPropertyObject`+`SetPropertyObject(InsertIfMissing)`) so a container member gets its
+  real type instead of an anonymous `Container`; `enum` (+`type_name`, value via `ordinal` preferred)
+  resolves ordinal→enumerator NAME so it stores explicit `[val]` (matches the editor-authored original,
+  no spurious `{val}` diff); `array_elements` (+`num_elements`) sizes a typed array. Missing
+  intermediate containers auto-create (`create_missing_parents`, default true). `flags` applies raw
+  PropFlags via `SetFlags` (OR semantics — e.g. `132`/`0x84` = `0x04` PassByReference + `0x80`). A value
+  is written only when supplied → a **flags-only** call never clobbers the value (closes the
+  Local/Parameter-submember PropFlags residual, e.g. `Job1.SetJob_Reply_Payload` `0x4` vs `0x0`).
+- **`delete_property_node`** — the missing `delete_sequence_parameter`, generalised. `scope=Parameters`
+  + a top-level name removes a whole parameter (+ its structure); a nested `lookup_string`
+  (e.g. `MDC_cmd.Request.Cmd`) surgically removes one submember. The scope-generic counterpart of
+  `delete_sub_property` (Locals/FileGlobals only). `DeleteSubProperty` accepts a dotted path, so both
+  forms are one call.
+- **Roots per scope:** `Parameters`/`Locals` → `Sequence.Parameters`/`.Locals` (need `sequence_name`);
+  `FileGlobals` → `FileGlobalsDefaultValues`; `StationGlobals` → `Engine.Globals` (commits via
+  `CommitGlobalsToDisk`, `file_path` unused); `SequenceFile` → `AsPropertyObject()`.
+- **Verified end-to-end** rebuilding the anonymous-container parameter `MDC_cmd` of `_MDC_com`
+  (`TFW_MDC_com_Python.seq`): the 3 target diffs (Flags, Request subtree, Response subtree) drop to 0
+  with **zero** newly-introduced diffs; enums reproduce identical (`[Command] (0)` /
+  `[GetKfMdcProtocolVersion] (4629)` / `[GetHousingTemperature] (4630)`). New tool NAMES → need a
+  FRESH MCP session to appear in the catalog after the rebuild.

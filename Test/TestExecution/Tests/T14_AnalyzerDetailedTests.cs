@@ -78,4 +78,46 @@ public class T14_AnalyzerDetailedTests : TestBase
         Assert.That(result.Messages.Count, Is.EqualTo(result.TotalMessages),
             "the flat list is unaffected by the grouping option");
     }
+
+    [Test]
+    public async Task AnalyzeDetailed_Async_ReturnsJobThenSameResultAsSync()
+    {
+        await Ts.CreateSequenceFileAsync(TempSeqFile);
+        await Ts.InsertSequenceAsync(TempSeqFile, "AsyncSeq");
+        await Ts.SaveSequenceFileAsync(TempSeqFile);
+
+        // Baseline: the synchronous result the async path must reproduce exactly.
+        var sync = await Ts.RunSequenceAnalyzerDetailedAsync(TempSeqFile, "Information", "severity");
+
+        // Async: returns IMMEDIATELY with a running handle (no messages yet) — this is the fix for
+        // the ~60s transport timeout: the RPC never blocks on the analysis.
+        var started = await Ts.RunSequenceAnalyzerDetailedAsync(TempSeqFile, "Information", "severity", async: true);
+        Assert.That(started.JobId, Is.Not.Null.And.Not.Empty, "async start must return a job id");
+        Assert.That(started.Status, Is.EqualTo("running"), "async start must report status=running");
+        Assert.That(started.Messages, Is.Empty, "the running handle carries no messages yet");
+
+        // Poll get_analysis_status until the job leaves 'running' (bounded — the analysis itself has
+        // its own 120s AnalyzerApp watchdog; give it generous head-room here).
+        var final = started;
+        for (int i = 0; i < 120 && final.Status == "running"; i++)
+        {
+            await Task.Delay(1000);
+            final = await Ts.GetAnalysisStatusAsync(started.JobId!);
+        }
+
+        Assert.That(final.Status, Is.EqualTo("completed"),
+            $"job must complete (note: {final.Note})");
+        Assert.That(final.JobId, Is.EqualTo(started.JobId));
+        // Result parity with the synchronous run — the whole point of the acceptance criteria.
+        Assert.That(final.TotalMessages, Is.EqualTo(sync.TotalMessages), "async total must match sync");
+        Assert.That(final.ErrorCount, Is.EqualTo(sync.ErrorCount));
+        Assert.That(final.WarningCount, Is.EqualTo(sync.WarningCount));
+        Assert.That(final.InformationCount, Is.EqualTo(sync.InformationCount));
+        Assert.That(final.Messages.Count, Is.EqualTo(final.TotalMessages),
+            "counts stay self-consistent after the async round-trip");
+
+        // An unknown/expired job id is a clean KeyNotFoundException, not a crash.
+        Assert.ThrowsAsync<System.Collections.Generic.KeyNotFoundException>(
+            async () => await Ts.GetAnalysisStatusAsync("does-not-exist"));
+    }
 }

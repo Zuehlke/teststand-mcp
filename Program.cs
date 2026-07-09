@@ -38,6 +38,14 @@ internal class Program
 
     static async Task<int> Main(string[] args)
     {
+        // Out-of-process prototype-load worker (spawned by the server itself). Handle it FIRST —
+        // before any console/banner/DI setup — so it stays silent on stdout except for its single
+        // result line, and never allocates a console window. It owns its own short-lived engine,
+        // performs the (possibly process-fatal) native LabVIEW Load Prototype, and hard-exits. See
+        // LoadPrototypeWorker for the rationale (isolating the 0xC06D007E .lvlibp delay-load crash).
+        if (args.Length > 0 && args[0] == "--load-prototype-worker")
+            return await LoadPrototypeWorker.RunAsync(args);
+
         // When launched as an MCP subprocess stdin is redirected — allocate a visible
         // console window so Console.Error output (banner + command panel) is visible.
         if (Console.IsInputRedirected)

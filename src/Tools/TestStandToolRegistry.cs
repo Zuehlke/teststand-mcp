@@ -475,12 +475,20 @@ public class TestStandToolRegistry
             "Use group_by='rule' to group by rule, or group_by='none' for a flat sorted list. " +
             "This is the quick text variant with NO severity filter; for STRUCTURED JSON (typed " +
             "messages, severity counts, optional groups) and a min_severity filter use " +
-            "analyze_sequence_file — the same underlying analyzer.",
+            "analyze_sequence_file — the same underlying analyzer. " +
+            "COLD/LabVIEW NOTE: analyzing a file with LabVIEW .lvlibp steps on a cold module cache " +
+            "can exceed the ~60s MCP transport timeout (-32001) because the analyzer loads each " +
+            "code module. Set async=true to get an immediate 'jobId' + status='running' and poll " +
+            "get_analysis_status(job_id) for the (structured) result.",
             s => s
                 .AddRequired("file_path", "string", "Absolute path to the sequence file to analyze")
                 .AddOptional("group_by", "string",
                     "How to group the output: 'severity' (default), 'rule', or 'none' for a flat list.",
-                    "severity", new[] { "severity", "rule", "none" }),
+                    "severity", new[] { "severity", "rule", "none" })
+                .AddOptional("async", "boolean",
+                    "Run asynchronously: return a 'jobId' immediately and poll get_analysis_status " +
+                    "(which returns the structured result) instead of waiting inline. Use for files " +
+                    "with LabVIEW .lvlibp steps on a cold cache. Default false.", false),
             RunSequenceAnalyzerAsync);
 
         // Executions
@@ -2028,6 +2036,74 @@ public class TestStandToolRegistry
                     "Property name or dotted lookup path to delete"),
             DeleteSubPropertyAsync);
 
+        Register("set_property_node",
+            "Create/set a property-tree node — and optionally its PropFlags — under ANY scope root: " +
+            "Parameters / Locals / FileGlobals / StationGlobals / SequenceFile. This is the " +
+            "scope-generic write counterpart of get_property_tree: set_property_value reaches only " +
+            "Locals/FileGlobals and set_step_property_flags is step-only, so a sequence's " +
+            "Parameters.* nodes (and nested submembers everywhere) had no writer/flag-setter. " +
+            "lookup_string is a dotted path relative to the scope root (e.g. " +
+            "'MDC_cmd.Request.Cmd.CmdEnum'); missing intermediate containers are created " +
+            "automatically (create_missing_parents, default true) as anonymous Containers. " +
+            "value_type: number/string/boolean/container/reference create a plain node; " +
+            "'named_type' (+type_name) instantiates a FULL typed instance (fields materialise, like " +
+            "the editor) so a container member gets its real type instead of an anonymous Container; " +
+            "'enum' (+type_name) creates/sets an enum-typed member (value via 'ordinal' preferred, or " +
+            "'value' = ordinal number OR symbolic name); 'array_elements' (+num_elements) sizes a " +
+            "typed array. 'flags' sets raw PropFlags on the node (OR semantics — e.g. 0x84 = 0x04 " +
+            "PassByReference + 0x80). A value is written only when supplied, so a flags-only call " +
+            "leaves the value untouched. For StationGlobals the change commits to the station .ini " +
+            "(file_path is unused); every other scope saves the sequence file. Returns the read-back " +
+            "node {valueType, value, typeName, flags}.",
+            s => s
+                .AddRequired("file_path", "string",
+                    "Path to the .seq file (unused for scope='StationGlobals').")
+                .AddRequired("scope", "string", "The scope root the node lives under.",
+                    new[] { "Parameters", "Locals", "FileGlobals", "StationGlobals", "SequenceFile" })
+                .AddOptional("sequence_name", "string",
+                    "Owning sequence — required for scope 'Parameters' or 'Locals'.")
+                .AddRequired("lookup_string", "string",
+                    "Dotted path to the node relative to the scope root (e.g. 'MDC_cmd.Request.Cmd').")
+                .AddRequired("value_type", "string", "The kind of node to create/set.",
+                    new[] { "number", "string", "boolean", "container", "reference",
+                            "named_type", "enum", "array_elements" })
+                .AddOptional("type_name", "string",
+                    "For 'named_type'/'enum' (and a named 'array_elements' element type): the " +
+                    "file-defined type name (e.g. 'MDC_com_CmdGeneric', 'CmdEnum').")
+                .AddOptional("value", "string",
+                    "Scalar value to assign (for 'enum' the ordinal number OR the symbolic name). " +
+                    "Omit for container/named_type or a flags-only edit.")
+                .AddOptional("ordinal", "integer",
+                    "For value_type 'enum': the numeric enum value (preferred over 'value').")
+                .AddOptional("num_elements", "integer",
+                    "For value_type 'array_elements': the number of elements to size the array to.")
+                .AddOptional("flags", "integer",
+                    "PropFlags bitfield to OR onto the node (e.g. 132 / 0x84). Omit to leave flags unchanged.")
+                .AddOptional("create_missing_parents", "boolean",
+                    "Auto-create missing intermediate containers along lookup_string (default true).", true)
+                .AddOptional("save", "boolean", "Save the file after the edit (default true).", true),
+            SetPropertyNodeAsync);
+
+        Register("delete_property_node",
+            "Delete a property-tree node under ANY scope root — Parameters / Locals / FileGlobals / " +
+            "StationGlobals / SequenceFile — addressed by a dotted lookup_string. Subsumes the " +
+            "missing delete_sequence_parameter: pass scope='Parameters' + a top-level parameter name " +
+            "to remove a whole parameter (and its structure), or a nested path (e.g. " +
+            "'MDC_cmd.Request.Cmd') to surgically remove a single submember. The scope-generic " +
+            "counterpart of delete_sub_property (which reaches only Locals/FileGlobals). StationGlobals " +
+            "commit to the station .ini (file_path unused); every other scope saves the sequence file.",
+            s => s
+                .AddRequired("file_path", "string",
+                    "Path to the .seq file (unused for scope='StationGlobals').")
+                .AddRequired("scope", "string", "The scope root the node lives under.",
+                    new[] { "Parameters", "Locals", "FileGlobals", "StationGlobals", "SequenceFile" })
+                .AddOptional("sequence_name", "string",
+                    "Owning sequence — required for scope 'Parameters' or 'Locals'.")
+                .AddRequired("lookup_string", "string",
+                    "Dotted path to the node to delete (top-level name OR nested submember).")
+                .AddOptional("save", "boolean", "Save the file after the delete (default true).", true),
+            DeletePropertyNodeAsync);
+
         // ── Data Type Operations ───────────────────────────────────────────────
 
         Register("create_data_type",
@@ -2588,14 +2664,54 @@ public class TestStandToolRegistry
             "path; VI loadable — LabVIEW available, not an unloadable .lvlibp headless), otherwise " +
             "nothing is updated and 'prototypeLoaded' is false with an explanatory 'note'. Does NOT " +
             "change the step's adapter. Non-destructive: existing bindings are matched by name and " +
-            "preserved. Read-only alternative that does not reload: get_module_parameters.",
+            "preserved. Read-only alternative that does not reload: get_module_parameters. " +
+            "LABVIEW: a LabVIEW load attaches to/starts LabVIEW (the same slow work the editor's " +
+            "'Reload Prototype' does), so by default it runs ASYNCHRONOUSLY — this call returns " +
+            "immediately with a 'jobId' and status='running'; poll get_prototype_load_status(job_id) " +
+            "until status='completed'. This avoids the ~60s MCP transport timeout (-32001). The LabVIEW " +
+            "load runs IN-PROCESS by default so it attaches to the SAME running LabVIEW the editor uses " +
+            "(a fresh isolated worker has no such attachment and fails with an immediate MOD_NOT_FOUND). " +
+            "The load is routed to the LabVIEW ExecServer (the running LabVIEW ADE via ActiveX — what " +
+            "the editor uses), which avoids the AutoDetect→Run-Time (lvrt.dll) delay-load that faults " +
+            "headless (0xC06D007E). Because ActiveX works cross-process, this runs by default in a " +
+            "crash-safe ISOLATED WORKER (isolate=true) that can bind LabVIEW too — crash-safety AND a " +
+            "real load together; a native fault there returns workerOutcome='crashed'/'timeout' without " +
+            "taking the server down. isolate=false runs in-process (also ExecServer-routed, but a " +
+            "native fault is NOT contained). async=false runs inline and waits. For a genuinely " +
+            "unloadable .lvlibp, copy_step_module is the headless fallback. Non-LabVIEW adapters always " +
+            "run fast, in-process, synchronously. Result carries executionMode ('in-process'|'worker'), " +
+            "workerOutcome, jobId and status.",
             s => s
                 .AddRequired("file_path", "string", "Path to the sequence file")
                 .AddRequired("sequence_name", "string", "Name of the sequence containing the step")
                 .AddRequired("step_group", "string", "Step group: 'Setup', 'Main', or 'Cleanup'")
                 .AddRequired("step_name", "string", "Name of the step whose prototype to load")
-                .AddOptional("save", "boolean", "Save the file (default true)", true),
+                .AddOptional("save", "boolean", "Save the file (default true).", true)
+                .AddOptional("async", "boolean", "Run asynchronously and return a jobId to poll with " +
+                    "get_prototype_load_status (default TRUE for LabVIEW, false otherwise). Set false " +
+                    "to wait inline for the result (may hit the ~60s transport timeout for a slow load).")
+                .AddOptional("isolate", "boolean", "LabVIEW only: run in a crash-safe isolated worker " +
+                    "process (default TRUE — the worker binds the running LabVIEW via ActiveX AND " +
+                    "contains a native crash). false runs in-process (not crash-contained).")
+                .AddOptional("labview_server", "string", "LabVIEW server routing before the load: " +
+                    "'deferred' (default) = running LabVIEW ADE via ActiveX, launched on first use " +
+                    "(matches the editor; avoids the lvrt.dll delay-load); 'exec' = same but connect " +
+                    "immediately; 'rte' = legacy Run-Time (AutoDetect, may fault headless); 'auto' = " +
+                    "leave the adapter's configured server unchanged.",
+                    "deferred", new[] { "deferred", "exec", "rte", "auto" })
+                .AddOptional("timeout_seconds", "integer", "Worker/async watchdog timeout in seconds " +
+                    "(default 120; min 5). LabVIEW startup can be slow — raise if a real load needs more.", 120),
             LoadModulePrototypeAsync);
+
+        Register("get_prototype_load_status",
+            "Poll an ASYNC LabVIEW prototype-load job started by load_module_prototype (async mode). " +
+            "Returns the same shape as load_module_prototype plus 'status': 'running' (not finished — " +
+            "poll again after a short wait), 'completed' (the result fields prototypeLoaded/parameters/" +
+            "note are final), or 'error' (the job itself faulted; see note). Unknown/expired job_id → " +
+            "error. Finished jobs are retained ~10 minutes.",
+            s => s
+                .AddRequired("job_id", "string", "The jobId returned by load_module_prototype (async)."),
+            GetPrototypeLoadStatusAsync);
 
         Register("copy_step_module",
             "Deep-copy a step's whole code-module subtree from a SOURCE step onto a TARGET step, " +
@@ -2635,7 +2751,14 @@ public class TestStandToolRegistry
             "results (by severity or rule) like the editor's Analysis Results 'Group By' pane. The " +
             "flat 'messages' list and counts are always present; grouping adds a 'groups' array. " +
             "Prefer this for programmatic use; for a quick human-readable TEXT summary (no filter) " +
-            "use run_sequence_analyzer — the same underlying analyzer.",
+            "use run_sequence_analyzer — the same underlying analyzer. " +
+            "COLD/LabVIEW NOTE: the analyzer's 'module is loadable' rule LOADS every step's code " +
+            "module; for a VI in a packed library (.lvlibp) that cold load can take well over a " +
+            "minute and blow the ~60s MCP transport timeout (-32001). Set async=true to run the " +
+            "analysis in the background and get an immediate 'jobId' + status='running'; then poll " +
+            "get_analysis_status(job_id) until status='completed' (same result shape). The analysis " +
+            "already runs in a separate AnalyzerApp.exe process, so a native .lvlibp fault ends the " +
+            "job with status='error' and never takes the server down.",
             s => s
                 .AddRequired("file_path", "string", "Path to the sequence file to analyze")
                 .AddOptional("min_severity", "string",
@@ -2644,8 +2767,26 @@ public class TestStandToolRegistry
                 .AddOptional("group_by", "string",
                     "Group the returned messages: 'severity' (default), 'rule', or 'none' for a " +
                     "flat list only. Grouped results populate the 'groups' array.",
-                    "severity", new[] { "severity", "rule", "none" }),
+                    "severity", new[] { "severity", "rule", "none" })
+                .AddOptional("async", "boolean",
+                    "Run asynchronously: return immediately with a 'jobId' + status='running' and " +
+                    "poll get_analysis_status(job_id) for the final result. Use this for files with " +
+                    "LabVIEW .lvlibp steps on a cold module cache to avoid the ~60s transport timeout. " +
+                    "Default false (waits inline — fine for fast/structural analyses).", false),
             AnalyzeSequenceFileAsync);
+
+        Register("get_analysis_status",
+            "Poll an ASYNC Sequence-Analyzer job started by analyze_sequence_file (async=true) or " +
+            "run_sequence_analyzer (async=true). Returns the SAME structured shape as " +
+            "analyze_sequence_file (filePath, totalMessages, errorCount/warningCount/informationCount, " +
+            "messages[], optional groups[]) plus 'status': 'running' (not finished — poll again after " +
+            "a short wait), 'completed' (the message/count fields are final) or 'error' (the analysis " +
+            "itself faulted; see 'note'). Unknown/expired job_id → error. Finished jobs are retained " +
+            "~10 minutes.",
+            s => s
+                .AddRequired("job_id", "string",
+                    "The jobId returned by analyze_sequence_file / run_sequence_analyzer (async)."),
+            GetAnalysisStatusAsync);
 
         // ── Output & UI Messages ───────────────────────────────────────────────
 
@@ -3070,6 +3211,13 @@ public class TestStandToolRegistry
     {
         var filePath = args!.Value.GetRequiredString("file_path");
         var groupBy  = args!.Value.GetStringOrDefault("group_by", "severity");
+
+        // Async: hand back a running job handle right away (same job/poll infra as
+        // analyze_sequence_file) so a slow cold .lvlibp analysis never trips the transport timeout.
+        // The polled result is the structured AnalyzerResult (via get_analysis_status).
+        if (args!.Value.GetBoolOrDefault("async", false))
+            return OkJson(await _ts.RunSequenceAnalyzerDetailedAsync(filePath, "Information", groupBy, async: true));
+
         var messages = await _ts.RunSequenceAnalyzerAsync(filePath);
         if (messages.Count == 0)
             return Ok("Sequence Analyzer found no issues.");
@@ -3668,6 +3816,40 @@ public class TestStandToolRegistry
         var propName = args!.Value.GetRequiredString("property_name");
         await _ts.DeleteSubPropertyAsync(filePath, seqName, propName);
         return Ok($"Deleted property '{propName}'.");
+    }
+
+    private async Task<CallToolResult> SetPropertyNodeAsync(JsonElement? args)
+    {
+        var filePath   = args!.Value.GetRequiredString("file_path");
+        var scope      = args!.Value.GetRequiredString("scope");
+        var seqName    = args!.Value.GetStringOrNull("sequence_name");
+        var lookup     = args!.Value.GetRequiredString("lookup_string");
+        var valueType  = args!.Value.GetRequiredString("value_type");
+        var typeName   = args!.Value.GetStringOrNull("type_name");
+        var value      = args!.Value.GetStringOrNull("value");
+        int? ordinal   = args!.Value.TryGetProperty("ordinal", out var ordEl)
+                         && ordEl.ValueKind == JsonValueKind.Number ? ordEl.GetInt32() : (int?)null;
+        int? numEl     = args!.Value.TryGetProperty("num_elements", out var neEl)
+                         && neEl.ValueKind == JsonValueKind.Number ? neEl.GetInt32() : (int?)null;
+        int? flags     = args!.Value.TryGetProperty("flags", out var flEl)
+                         && flEl.ValueKind == JsonValueKind.Number ? flEl.GetInt32() : (int?)null;
+        var createPar  = args?.GetBoolOrDefault("create_missing_parents", true) ?? true;
+        var save       = args?.GetBoolOrDefault("save", true) ?? true;
+        var info = await _ts.SetPropertyNodeAsync(filePath, scope, seqName, lookup, valueType,
+            typeName, value, ordinal, numEl, flags, createPar, save);
+        return OkJson(info);
+    }
+
+    private async Task<CallToolResult> DeletePropertyNodeAsync(JsonElement? args)
+    {
+        var filePath = args!.Value.GetRequiredString("file_path");
+        var scope    = args!.Value.GetRequiredString("scope");
+        var seqName  = args!.Value.GetStringOrNull("sequence_name");
+        var lookup   = args!.Value.GetRequiredString("lookup_string");
+        var save     = args?.GetBoolOrDefault("save", true) ?? true;
+        await _ts.DeletePropertyNodeAsync(filePath, scope, seqName, lookup, save);
+        return Ok($"Deleted node '{lookup}' from {scope}" +
+                  (seqName is null ? "." : $" of sequence '{seqName}'."));
     }
 
     private async Task<CallToolResult> ExpandPathMacrosAsync(JsonElement? args)
@@ -4564,7 +4746,18 @@ public class TestStandToolRegistry
             args!.Value.GetRequiredString("sequence_name"),
             args!.Value.GetRequiredString("step_group"),
             args!.Value.GetRequiredString("step_name"),
-            args!.Value.GetBoolOrDefault("save", true));
+            args!.Value.GetBoolOrDefault("save", true),
+            args!.Value.GetBoolOrNull("isolate"),
+            args!.Value.GetIntOrDefault("timeout_seconds", 120),
+            args!.Value.GetBoolOrNull("async"),
+            args!.Value.GetStringOrNull("labview_server"));
+        return OkJson(result);
+    }
+
+    private async Task<CallToolResult> GetPrototypeLoadStatusAsync(JsonElement? args)
+    {
+        var result = await _ts.GetPrototypeLoadStatusAsync(
+            args!.Value.GetRequiredString("job_id"));
         return OkJson(result);
     }
 
@@ -4590,7 +4783,15 @@ public class TestStandToolRegistry
         var filePath    = args!.Value.GetRequiredString("file_path");
         var minSeverity = args!.Value.GetStringOrDefault("min_severity", "Information");
         var groupBy     = args!.Value.GetStringOrDefault("group_by", "severity");
-        var result      = await _ts.RunSequenceAnalyzerDetailedAsync(filePath, minSeverity, groupBy);
+        var async       = args!.Value.GetBoolOrDefault("async", false);
+        var result      = await _ts.RunSequenceAnalyzerDetailedAsync(filePath, minSeverity, groupBy, async);
+        return OkJson(result);
+    }
+
+    private async Task<CallToolResult> GetAnalysisStatusAsync(JsonElement? args)
+    {
+        var result = await _ts.GetAnalysisStatusAsync(
+            args!.Value.GetRequiredString("job_id"));
         return OkJson(result);
     }
 

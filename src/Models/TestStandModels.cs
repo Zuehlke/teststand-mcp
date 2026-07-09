@@ -690,6 +690,16 @@ public class AnalyzerResult
     public string GroupBy { get; set; } = "";
     /// <summary>Messages grouped by <see cref="GroupBy"/>; empty when no grouping was requested.</summary>
     public List<AnalyzerMessageGroup> Groups { get; init; } = new();
+    /// <summary>For an ASYNC analysis (analyze_sequence_file async=true): the job id to poll with
+    /// get_analysis_status. Null for a plain synchronous result.</summary>
+    public string? JobId { get; set; }
+    /// <summary>Async job state: "running" (started — poll again later), "completed" (the message/
+    /// count fields are final) or "error" (the analysis itself faulted; see <see cref="Note"/>).
+    /// Null for a plain synchronous result.</summary>
+    public string? Status { get; set; }
+    /// <summary>Advisory note — e.g. the poll instruction while running, or the failure reason when
+    /// <see cref="Status"/> is "error". Null on a normal synchronous / completed result.</summary>
+    public string? Note { get; set; }
 }
 
 /// <summary>
@@ -1136,6 +1146,33 @@ public class StepPropertyValue
     public int? NumElements { get; set; }
 }
 
+/// <summary>
+/// Read-back of a property-tree node written by set_property_node — the scope-generic
+/// counterpart of <see cref="StepPropertyValue"/> for Parameters / Locals / FileGlobals /
+/// StationGlobals / SequenceFile nodes (which the step-only tools cannot reach).
+/// </summary>
+public class PropertyNodeInfo
+{
+    /// <summary>The scope root the node lives under (Parameters/Locals/FileGlobals/StationGlobals/SequenceFile).</summary>
+    public string Scope { get; set; } = "";
+    /// <summary>The owning sequence (for Parameters/Locals), else null.</summary>
+    public string? SequenceName { get; set; }
+    /// <summary>The dotted path of the node relative to the scope root.</summary>
+    public string LookupString { get; set; } = "";
+    /// <summary>Node kind read back: Number / Boolean / String / Enum / Container / Array / Empty / Unknown.</summary>
+    public string ValueType { get; set; } = "";
+    /// <summary>Scalar value read back (number/boolean/string, or {ordinal,symbolicName} for an enum); null for containers/arrays.</summary>
+    public object? Value { get; set; }
+    /// <summary>The node's TestStand type display string (GetTypeDisplayString), if available.</summary>
+    public string? TypeName { get; set; }
+    /// <summary>The node's raw PropFlags bitfield read back after any flag write.</summary>
+    public int Flags { get; set; }
+    /// <summary>True when the node is an array.</summary>
+    public bool IsArray { get; set; }
+    /// <summary>Number of elements for arrays, else null.</summary>
+    public int? NumElements { get; set; }
+}
+
 // ── Search Models ────────────────────────────────────────────────────────────
 
 /// <summary>A single match from a sequence-content search.</summary>
@@ -1234,6 +1271,19 @@ public class LoadPrototypeResult
     public bool PrototypeLoaded { get; set; }
     /// <summary>Advisory note when nothing (or nothing useful) could be loaded; null on a clean load.</summary>
     public string? Note { get; set; }
+    /// <summary>How the load was executed: "in-process" (fast, non-LabVIEW adapters) or "worker"
+    /// (isolated child process — LabVIEW VIs, whose native connector-pane load can hard-crash the
+    /// host on a delay-load failure and MUST NOT be able to take the server down).</summary>
+    public string ExecutionMode { get; set; } = "in-process";
+    /// <summary>When the isolated worker was used: the outcome — "loaded", "not-loaded",
+    /// "crashed" (native fault in the worker — server survived) or "timeout". Null in-process.</summary>
+    public string? WorkerOutcome { get; set; }
+    /// <summary>For an ASYNC load: the job id to poll with get_prototype_load_status. Null for a
+    /// synchronous (completed) result.</summary>
+    public string? JobId { get; set; }
+    /// <summary>Async job state: "running" (started, poll later), "completed" (finished — the other
+    /// fields are final), or "error" (the job itself faulted). Null for a plain synchronous result.</summary>
+    public string? Status { get; set; }
     /// <summary>The resulting module interface parameters/arguments after the load.</summary>
     public List<ModuleParameterInfo> Parameters { get; init; } = new();
 }
