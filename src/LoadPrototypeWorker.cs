@@ -81,6 +81,7 @@ internal static class LoadPrototypeWorker
         string? grp  = GetArg(args, "--group");
         string? step = GetArg(args, "--step");
         string  lvsrv = GetArg(args, "--lv-server") ?? "deferred";
+        string? searchDirsFile = GetArg(args, "--search-dirs");
 
         // Logger → STDERR only (keeps STDOUT clean for the single result line).
         using var loggerFactory = LoggerFactory.Create(b =>
@@ -105,6 +106,26 @@ internal static class LoadPrototypeWorker
                 WriteResult(false, "", "Worker could not connect to the TestStand engine.", 0);
                 HardExit(0);
             }
+
+            // Apply the parent engine's search directories BEFORE opening/loading, so this fresh worker
+            // engine can resolve relative module paths (e.g. a VI inside a packed library referenced as
+            // "MyLib.lvlibp\...\Foo.vi"). Without these the load fails "Could not find file 'MyLib.lvlibp'".
+            if (searchDirsFile != null && System.IO.File.Exists(searchDirsFile))
+            {
+                try
+                {
+                    using var doc = JsonDocument.Parse(System.IO.File.ReadAllText(searchDirsFile));
+                    foreach (var el in doc.RootElement.EnumerateArray())
+                    {
+                        string? p = el.TryGetProperty("path", out var pp) ? pp.GetString() : null;
+                        bool subs = !el.TryGetProperty("subdirs", out var sp) || sp.ValueKind != JsonValueKind.False;
+                        if (!string.IsNullOrWhiteSpace(p))
+                            await svc.AddSearchDirectoryAsync(p!, -1, subs);
+                    }
+                }
+                catch (Exception ex) { log.LogWarning(ex, "Worker could not apply propagated search directories."); }
+            }
+
             await svc.OpenSequenceFileAsync(file);
 
             // Fault injection (tests only) — emulate the user's native crash so the parent's

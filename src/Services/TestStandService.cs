@@ -9435,6 +9435,60 @@ public sealed class TestStandService : ITestStandService
     }
 
     /// <summary>
+    /// Reconstructs the FULL logon environment (Machine then User, per Windows semantics) onto a child
+    /// <see cref="System.Diagnostics.ProcessStartInfo"/>. A Claude/stdio-launched MCP host can inherit a
+    /// heavily REDUCED environment (empirically ~15 vars vs. ~81 for a normal shell launch) that is
+    /// MISSING the NI/TestStand variables (<c>TESTSTAND</c>, <c>TESTSTANDBIN</c>, <c>NIEXTCCOMPILERSUPP</c>,
+    /// <c>NIDAQMXSWITCHDIR</c>, …) and core folders (<c>ProgramData</c>, <c>ALLUSERSPROFILE</c>,
+    /// <c>PUBLIC</c>, <c>CommonProgramFiles(x86)</c>, …) that a LabVIEW/TestStand native load needs to
+    /// resolve its DLL/license chain. That single discrepancy is why a <c>.lvlibp</c> prototype load
+    /// FAULTS (native delay-load 0xC06D007E ERROR_MOD_NOT_FOUND) when the worker inherits the MCP host's
+    /// stripped env, yet SUCCEEDS when the same exe is launched from a normal PowerShell (full env).
+    /// Composing the child's env from the OS registry removes the discrepancy so the worker sees the
+    /// same environment a real logon session has. Requires <c>UseShellExecute=false</c>. Variables the
+    /// launcher injected (e.g. CLAUDECODE) are preserved; registry values win over the inherited ones.
+    /// </summary>
+    private static void ComposeChildEnvironmentFromRegistry(System.Diagnostics.ProcessStartInfo psi)
+    {
+        static string Expand(string? v) => string.IsNullOrEmpty(v) ? "" : Environment.ExpandEnvironmentVariables(v!);
+
+        void Merge(EnvironmentVariableTarget target)
+        {
+            System.Collections.IDictionary vars;
+            try { vars = Environment.GetEnvironmentVariables(target); }
+            catch { return; }
+            foreach (System.Collections.DictionaryEntry kv in vars)
+            {
+                var key = kv.Key as string;
+                var val = kv.Value?.ToString();
+                if (string.IsNullOrEmpty(key) || val == null) continue;
+                if (string.Equals(key, "PATH", StringComparison.OrdinalIgnoreCase)) continue; // merged below
+                psi.Environment[key!] = Expand(val);   // User (applied 2nd) overrides Machine (1st)
+            }
+        }
+        Merge(EnvironmentVariableTarget.Machine);
+        Merge(EnvironmentVariableTarget.User);
+
+        // PATH = Machine + User (+ anything the parent already had), deduped, order-preserving —
+        // matching how Windows builds a logon PATH.
+        string machine  = Expand(Environment.GetEnvironmentVariable("PATH", EnvironmentVariableTarget.Machine));
+        string user     = Expand(Environment.GetEnvironmentVariable("PATH", EnvironmentVariableTarget.User));
+        string existing = psi.Environment.TryGetValue("PATH", out var ep) ? (ep ?? "") : "";
+        var seen  = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var parts = new List<string>();
+        foreach (var seg in string.Join(";", machine, user, existing).Split(';'))
+        {
+            var s = seg.Trim();
+            if (s.Length == 0) continue;
+            if (seen.Add(s.TrimEnd('\\'))) parts.Add(s);
+        }
+        if (parts.Count > 0) psi.Environment["PATH"] = string.Join(";", parts);
+
+        // Belt-and-suspenders: guarantee the volatile standard folders even if a registry read failed.
+        ApplyTestStandToolChildEnv(psi);
+    }
+
+    /// <summary>
     /// Parses a native FileDiffer report (DifferReport XML) into a <see cref="FileDifferReport"/>:
     /// per-file tallies from the Header, plus a flat list of the leaf changes. The report is a
     /// row/column tree (col0 = node name + BlockLevel, col1 = file-1 value, col2 = file-2 value +
@@ -11771,6 +11825,34 @@ public sealed class TestStandService : ITestStandService
             return ("not-loaded", "Could not launch the isolated worker (own exe path unknown).");
         }
 
+        // Propagate THIS engine's search directories to the worker's fresh engine. The worker owns a
+        // brand-new engine that only reads the station's default SearchDirectories.cfg, so any directory
+        // added at runtime (e.g. add_search_directory pointing at a project's library folder) — needed
+        // to resolve a relative module path like "MyLib.lvlibp\...\Foo.vi" — would be invisible to it.
+        // Without this the worker fails "Could not find file 'MyLib.lvlibp'" before it can even attempt
+        // the load. We serialise the non-empty, enabled search dirs to a temp file and pass it along.
+        string? searchDirsFile = null;
+        try
+        {
+            var sdirs = await GetSearchDirectoriesAsync();
+            var toPropagate = new List<object>();
+            foreach (var d in sdirs)
+                if (!string.IsNullOrWhiteSpace(d.Path) && !d.Disabled)
+                    toPropagate.Add(new { path = d.Path, subdirs = d.SearchSubdirectories });
+            if (toPropagate.Count > 0)
+            {
+                searchDirsFile = System.IO.Path.Combine(System.IO.Path.GetTempPath(),
+                    "ts_mcp_lp_searchdirs_" + Guid.NewGuid().ToString("N") + ".json");
+                System.IO.File.WriteAllText(searchDirsFile,
+                    System.Text.Json.JsonSerializer.Serialize(toPropagate));
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Could not gather search directories to propagate to the worker.");
+            searchDirsFile = null;
+        }
+
         var psi = new System.Diagnostics.ProcessStartInfo
         {
             FileName               = exe,
@@ -11788,7 +11870,21 @@ public sealed class TestStandService : ITestStandService
             "--step",     stepName,
             "--lv-server", labviewServer ?? "deferred" })
             psi.ArgumentList.Add(a);
+        if (searchDirsFile != null)
+        {
+            psi.ArgumentList.Add("--search-dirs");
+            psi.ArgumentList.Add(searchDirsFile);
+        }
 
+        // Give the worker the FULL logon environment. A Claude/stdio-launched MCP host inherits a
+        // stripped env (missing TESTSTAND*/NIEXTCCOMPILERSUPP/ProgramData/PUBLIC/…), which is the root
+        // cause of the native .lvlibp delay-load fault (0xC06D007E) — the load works from a normal
+        // PowerShell launch precisely because that has the complete env. Composing it here makes the
+        // worker independent of however the parent was launched.
+        ComposeChildEnvironmentFromRegistry(psi);
+
+        try
+        {
         return await Task.Run(() =>
         {
             using var proc = new System.Diagnostics.Process { StartInfo = psi };
@@ -11841,6 +11937,15 @@ public sealed class TestStandService : ITestStandService
             _logger.LogWarning("Prototype worker produced no result (exit code 0x{Code:X8}).", code);
             return ("crashed", null);
         });
+        }
+        finally
+        {
+            if (searchDirsFile != null)
+            {
+                try { System.IO.File.Delete(searchDirsFile); }
+                catch (Exception ex) { _logger.LogDebug(ex, "Could not delete temp search-dirs file '{File}'.", searchDirsFile); }
+            }
+        }
     }
 
     // Drops any cached copy of the file (releasing the engine's reference) and re-reads it from disk,
