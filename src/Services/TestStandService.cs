@@ -42,6 +42,8 @@ using NiSearchElements    = NationalInstruments.TestStand.Interop.API.SearchElem
 using NiSearchFilter      = NationalInstruments.TestStand.Interop.API.SearchFilterOptions;
 using NiFindFilePrompt    = NationalInstruments.TestStand.Interop.API.FindFilePromptOptions;
 using NiFindFileSrchList  = NationalInstruments.TestStand.Interop.API.FindFileSearchListOptions;
+using NiLabVIEWAdapter    = NationalInstruments.TestStand.Interop.AdapterAPI.LabVIEWAdapter;
+using NiLabVIEWServerTypes = NationalInstruments.TestStand.Interop.AdapterAPI.LabVIEWServerTypes;
 
 namespace TestStandMCP.Services;
 
@@ -181,6 +183,23 @@ public interface ITestStandService : IDisposable
     /// <summary>Deletes a sub-property from a file global or sequence local variable container.</summary>
     Task DeleteSubPropertyAsync(string filePath, string? sequenceName,
         string propertyName);
+    /// <summary>Creates/sets a property-tree node (and optionally its PropFlags) under any scope
+    /// root — Parameters / Locals / FileGlobals / StationGlobals / SequenceFile — addressed by a
+    /// dotted <paramref name="lookupString"/> relative to that root. The scope-generic counterpart
+    /// of <see cref="SetPropertyValueAsync"/> (Locals/FileGlobals only) and
+    /// <see cref="SetStepPropertyFlagsAsync"/> (step only). Missing intermediate containers are
+    /// created when <paramref name="createMissingParents"/> is true. Reuses the same creation
+    /// switch (scalar / container / reference / named_type / enum / array_elements).</summary>
+    Task<PropertyNodeInfo> SetPropertyNodeAsync(string filePath, string scope,
+        string? sequenceName, string lookupString, string valueType, string? typeName,
+        string? value, int? ordinal, int? numElements, int? flags,
+        bool createMissingParents, bool save);
+    /// <summary>Deletes a property-tree node (a top-level Parameter/variable OR a nested submember)
+    /// under any scope root — Parameters / Locals / FileGlobals / StationGlobals / SequenceFile.
+    /// Subsumes the missing delete_sequence_parameter. The scope-generic counterpart of
+    /// <see cref="DeleteSubPropertyAsync"/> (Locals/FileGlobals only).</summary>
+    Task DeletePropertyNodeAsync(string filePath, string scope, string? sequenceName,
+        string lookupString, bool save);
     /// <summary>Returns all file-global variables defined in the given sequence file.</summary>
     Task<List<VariableInfo>> GetFileGlobalsAsync(string sequenceFilePath);
     /// <summary>Returns all station global variables for the connected engine.</summary>
@@ -782,7 +801,21 @@ public interface ITestStandService : IDisposable
     /// and SequenceCalls. Use it after the target's own interface changed (e.g. a subsequence's
     /// Parameters were edited) to re-sync the caller. Does NOT change the step's adapter.</summary>
     Task<LoadPrototypeResult> LoadModulePrototypeAsync(string filePath,
-        string sequenceName, string stepGroup, string stepName, bool save = true);
+        string sequenceName, string stepGroup, string stepName, bool save = true,
+        bool? isolate = null, int timeoutSeconds = 120, bool? async = null,
+        string? labviewServer = null);
+    /// <summary>Returns the current state of an ASYNC prototype-load job started by
+    /// <see cref="LoadModulePrototypeAsync"/> (async mode). While running, Status="running"; once done,
+    /// Status="completed" and the full result fields are final (or "error" if the job itself faulted).
+    /// Unknown/expired id → throws <see cref="KeyNotFoundException"/>.</summary>
+    Task<LoadPrototypeResult> GetPrototypeLoadStatusAsync(string jobId);
+    /// <summary>The in-process core of the prototype load (the actual native
+    /// <c>Module.LoadPrototype</c> call). Used directly for non-LabVIEW adapters, for the in-process
+    /// LabVIEW path (which attaches to the SAME running LabVIEW the editor uses), and BY the isolated
+    /// worker process. See <see cref="LoadModulePrototypeAsync"/>.</summary>
+    Task<LoadPrototypeResult> LoadPrototypeInProcessAsync(string filePath,
+        string sequenceName, string stepGroup, string stepName, bool save = true,
+        string? labviewServer = null);
     /// <summary>Deep-copies a step's whole code-module subtree (TS.SData — incl. a SequenceCall's
     /// ActualArgs / a RunVIAsync's SeqCallStepAdditions — plus the step-own VIModule with its
     /// ViCall metadata: Namespace, VI Description, Connector-Pane Checksum and Parms) from a SOURCE
@@ -798,9 +831,19 @@ public interface ITestStandService : IDisposable
 
     // ── Sequence Analyzer (detailed) ─────────────────────────────────────────
     /// <summary>Runs the Sequence Analyzer and returns a detailed result filtered by minimum
-    /// severity and optionally grouped (by "severity", "rule", or "none" for a flat list).</summary>
+    /// severity and optionally grouped (by "severity", "rule", or "none" for a flat list). When
+    /// <paramref name="async"/> is true the analysis is started on a background job and the call
+    /// returns IMMEDIATELY with a running handle (JobId + Status="running"); poll the result with
+    /// <see cref="GetAnalysisStatusAsync"/>. Async is the fix for the ~60s MCP transport timeout
+    /// (-32001) that a cold analysis of LabVIEW <c>.lvlibp</c> steps otherwise trips.</summary>
     Task<AnalyzerResult> RunSequenceAnalyzerDetailedAsync(string filePath,
-        string minSeverity = "Information", string groupBy = "severity");
+        string minSeverity = "Information", string groupBy = "severity", bool async = false);
+
+    /// <summary>Polls an ASYNC analysis job started by <see cref="RunSequenceAnalyzerDetailedAsync"/>
+    /// (async=true). Returns the full <see cref="AnalyzerResult"/> plus a Status of "running",
+    /// "completed" or "error". Throws <see cref="KeyNotFoundException"/> for an unknown/expired
+    /// job id. Finished jobs are retained ~10 minutes.</summary>
+    Task<AnalyzerResult> GetAnalysisStatusAsync(string jobId);
 
     // ── Output & UI Messages ─────────────────────────────────────────────────
     /// <summary>Posts a message to the engine output window.</summary>
@@ -2177,6 +2220,299 @@ public sealed class TestStandService : ITestStandService
             SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
             _loadedSequenceFiles[filePath] = sf;
         });
+    }
+
+    /// <inheritdoc/>
+    public async Task<PropertyNodeInfo> SetPropertyNodeAsync(string filePath, string scope,
+        string? sequenceName, string lookupString, string valueType, string? typeName,
+        string? value, int? ordinal, int? numElements, int? flags,
+        bool createMissingParents, bool save)
+    {
+        EnsureConnected();
+        return await Task.Run(() =>
+        {
+            bool     isStation = IsStationGlobalsScope(scope);
+            dynamic? sf        = isStation ? null : GetOrLoadSeqFile(filePath);
+            NiPropertyObject root = ResolveScopeRoot(sf, scope, sequenceName);
+
+            string vtl         = (valueType ?? "").Trim().ToLowerInvariant();
+            bool   isEnum      = vtl == "enum";
+            bool   isNamedType = vtl is "named_type" or "namedtype" or "type";
+            bool   isArrayElems= vtl is "array_elements" or "arrayelements";
+
+            // Split the dotted lookup into its parent container path and the leaf name —
+            // NewSubProperty takes a simple name, while SetVal*/SetFlags/GetPropertyObject
+            // take a lookup path (so operating on parent+leaf works for both).
+            int    last       = lookupString.LastIndexOf('.');
+            string parentPath = last >= 0 ? lookupString.Substring(0, last) : "";
+            string leaf       = last >= 0 ? lookupString.Substring(last + 1) : lookupString;
+
+            NiPropertyObject parent = ResolveOrCreateParent(root, parentPath, createMissingParents);
+            bool leafExists = PropertyExists(parent, leaf);
+
+            if (isArrayElems)
+            {
+                if (numElements is null or < 0)
+                    throw new ArgumentException(
+                        "value_type='array_elements' requires num_elements >= 0.");
+                NiPropertyObject arr;
+                if (leafExists)
+                {
+                    arr = (NiPropertyObject)(object)parent.GetPropertyObject(leaf, 0);
+                }
+                else
+                {
+                    (int elemPvt, string elemTn) = MapArrayElementType(typeName);
+                    try
+                    {
+                        parent.NewSubProperty(leaf, (NiPropValueTypes)elemPvt, true, elemTn, 0);
+                    }
+                    catch when (elemPvt == (int)NiPropValueTypes.PropValType_NamedType)
+                    {
+                        NiPropertyObject typedArr = (NiPropertyObject)(object)
+                            _engine!.NewPropertyObject((NiPropValueTypes)elemPvt, true, elemTn, 0);
+                        parent.SetPropertyObject(leaf, PropOption_InsertIfMissing, typedArr);
+                    }
+                    arr = (NiPropertyObject)(object)parent.GetPropertyObject(leaf, 0);
+                }
+                arr.SetNumElements(numElements.Value, 0);
+            }
+            else
+            {
+                // A named_type/enum request on an EXISTING node of a DIFFERENT type replaces it
+                // with a fresh typed instance (mirrors CreateStepPropertyAsync's retype path).
+                string existingTypeDisp = "";
+                if (leafExists)
+                    try { existingTypeDisp = ((NiPropertyObject)(object)
+                            parent.GetPropertyObject(leaf, 0)).GetTypeDisplayString("", 0); }
+                    catch { }
+
+                bool retype = leafExists && (isNamedType || isEnum)
+                    && !string.IsNullOrWhiteSpace(typeName)
+                    && existingTypeDisp != typeName
+                    && !existingTypeDisp.StartsWith(typeName + " ", StringComparison.Ordinal);
+
+                if (retype)
+                {
+                    NiPropertyObject typedNew = (NiPropertyObject)(object)_engine!.NewPropertyObject(
+                        NiPropValueTypes.PropValType_NamedType, false, typeName!.Trim(), 0);
+                    parent.SetPropertyObject(leaf, 0, typedNew);
+                }
+                else if (!leafExists)
+                {
+                    if (isEnum || isNamedType)
+                    {
+                        // A member of a file-defined type (enum, or a named container/leaf):
+                        // instantiate as a FULL typed instance so its fields materialise and it
+                        // carries its real type instead of an anonymous 'Container'.
+                        if (string.IsNullOrWhiteSpace(typeName))
+                            throw new ArgumentException(
+                                $"value_type='{valueType}' requires type_name (a data type defined in the file).");
+                        InstantiateNamedTypeMember(parent, leaf, typeName!.Trim());
+                    }
+                    else
+                    {
+                        parent.NewSubProperty(leaf,
+                            (NiPropValueTypes)MapPropValueType(vtl), false, "", 0);
+                    }
+                }
+
+                SetLeafValue(parent, leaf, vtl, value, ordinal, typeName, sf, filePath);
+            }
+
+            // Apply PropFlags LAST (OR semantics via SetFlags — turns ON the given bits).
+            if (flags.HasValue)
+                parent.SetFlags(leaf, 0, flags.Value);
+
+            PersistScope(isStation, sf, filePath, save);
+
+            // Read the node back.
+            NiPropertyObject prop = (NiPropertyObject)(object)parent.GetPropertyObject(leaf, 0);
+            var info = new PropertyNodeInfo
+            {
+                Scope = scope, SequenceName = sequenceName, LookupString = lookupString
+            };
+            info.ValueType = InferValueKind(prop, out bool isArray, out int numElem);
+            info.IsArray   = isArray;
+            if (isArray) info.NumElements = numElem;
+            if (info.ValueType is "Number" or "Boolean" or "String" or "Enum")
+                info.Value = TryGetValue(prop);
+            try { info.Flags    = prop.GetFlags("", 0); } catch (Exception ex) { _logger.LogDebug(ex, "GetFlags read-back failed for '{Path}'.", lookupString); }
+            try { info.TypeName = NullIfEmpty(prop.GetTypeDisplayString("", 0)); } catch (Exception ex) { _logger.LogDebug(ex, "GetTypeDisplayString read-back failed for '{Path}'.", lookupString); }
+            return info;
+        });
+    }
+
+    /// <inheritdoc/>
+    public async Task DeletePropertyNodeAsync(string filePath, string scope,
+        string? sequenceName, string lookupString, bool save)
+    {
+        EnsureConnected();
+        await Task.Run(() =>
+        {
+            bool     isStation = IsStationGlobalsScope(scope);
+            dynamic? sf        = isStation ? null : GetOrLoadSeqFile(filePath);
+            NiPropertyObject root = ResolveScopeRoot(sf, scope, sequenceName);
+            // DeleteSubProperty accepts a dotted lookup path, so a top-level Parameter and a
+            // nested submember are removed the same way (the parent of a top-level Parameter is
+            // the 'Parameters' container itself → the whole parameter + its structure go).
+            root.DeleteSubProperty(lookupString, 0);
+            PersistScope(isStation, sf, filePath, save);
+        });
+    }
+
+    private static bool IsStationGlobalsScope(string scope)
+        => string.Equals(scope?.Trim(), "StationGlobals", StringComparison.OrdinalIgnoreCase);
+
+    // Resolves the base PropertyObject for a scope: a sequence's Parameters or Locals (both need
+    // sequence_name), the file's FileGlobals, the engine's StationGlobals, or the whole sequence
+    // file as a property tree (AsPropertyObject). Same roots used by set_property_value /
+    // set_parameter_comment / get_property_tree — unified so the node tools reach ALL of them.
+    private NiPropertyObject ResolveScopeRoot(dynamic? sf, string scope, string? sequenceName)
+    {
+        switch ((scope ?? "").Trim().ToLowerInvariant())
+        {
+            case "parameters":
+                if (string.IsNullOrWhiteSpace(sequenceName))
+                    throw new ArgumentException("scope='Parameters' requires sequence_name.");
+                return (NiPropertyObject)(object)sf!.GetSequenceByName(sequenceName).Parameters;
+            case "locals":
+                if (string.IsNullOrWhiteSpace(sequenceName))
+                    throw new ArgumentException("scope='Locals' requires sequence_name.");
+                return (NiPropertyObject)(object)sf!.GetSequenceByName(sequenceName).Locals;
+            case "fileglobals":
+                return GetFileGlobals(sf!);
+            case "stationglobals":
+                return GetStationGlobals();
+            case "sequencefile":
+                return (NiPropertyObject)(object)((NiSequenceFile)(object)sf!).AsPropertyObject();
+            default:
+                throw new ArgumentException(
+                    $"Unknown scope '{scope}'. Use Parameters/Locals/FileGlobals/StationGlobals/SequenceFile.");
+        }
+    }
+
+    // Navigates to the container that will hold the leaf, creating each missing intermediate
+    // segment as an anonymous Container when createMissing is true (so a deep path like
+    // "MDC_cmd.Request.Cmd" materialises Request+Cmd on the way down).
+    private NiPropertyObject ResolveOrCreateParent(NiPropertyObject root, string parentPath,
+        bool createMissing)
+    {
+        if (string.IsNullOrEmpty(parentPath)) return root;
+        if (PropertyExists(root, parentPath))
+            return (NiPropertyObject)(object)root.GetPropertyObject(parentPath, 0);
+        if (!createMissing)
+            throw new ArgumentException(
+                $"Intermediate node '{parentPath}' does not exist (set create_missing_parents=true to build it).");
+
+        NiPropertyObject cur = root;
+        string acc = "";
+        foreach (var seg in parentPath.Split('.'))
+        {
+            acc = acc.Length == 0 ? seg : acc + "." + seg;
+            if (!PropertyExists(root, acc))
+                cur.NewSubProperty(seg, NiPropValueTypes.PropValType_Container, false, "", 0);
+            cur = (NiPropertyObject)(object)root.GetPropertyObject(acc, 0);
+        }
+        return cur;
+    }
+
+    // The element PropValType + type name for a new array, from an optional element type name
+    // (mirrors CreateStepPropertyAsync's array_elements element-type mapping).
+    private static (int pvt, string typeName) MapArrayElementType(string? typeName) =>
+        (typeName ?? "").Trim().ToLowerInvariant() switch
+        {
+            "" or "container"
+                => ((int)NiPropValueTypes.PropValType_Container, ""),
+            "number" or "double" or "float" or "int" or "integer"
+                => ((int)NiPropValueTypes.PropValType_Number, ""),
+            "boolean" or "bool"
+                => ((int)NiPropValueTypes.PropValType_Boolean, ""),
+            "string" or "expression"
+                => ((int)NiPropValueTypes.PropValType_String, ""),
+            "reference" or "object reference" or "objectreference" or "objref"
+                => ((int)NiPropValueTypes.PropValType_Reference, ""),
+            _   => ((int)NiPropValueTypes.PropValType_NamedType, typeName!.Trim()),
+        };
+
+    // Sets a leaf's scalar/enum value (reusing set_property_value's coercion rules). Only writes
+    // when a value/ordinal is actually supplied, so a flags-only call never clobbers the value.
+    private void SetLeafValue(NiPropertyObject container, string leafPath, string vtl,
+        string? value, int? ordinal, string? typeName, dynamic? sf, string filePath)
+    {
+        switch (vtl)
+        {
+            case "named_type": case "namedtype": case "type":
+            case "container":
+            case "reference": case "object reference":
+            case "objectreference": case "objref":
+                break; // structural — no scalar to assign
+            case "boolean": case "bool":
+                if (value != null)
+                    container.SetValBoolean(leafPath, 0,
+                        value.Equals("true", StringComparison.OrdinalIgnoreCase) || value == "1");
+                break;
+            case "number": case "double": case "float": case "int": case "integer":
+                if (value != null)
+                {
+                    double numVal = double.Parse(value,
+                        System.Globalization.NumberStyles.Any,
+                        System.Globalization.CultureInfo.InvariantCulture);
+                    try { container.SetValNumber(leafPath, 0, numVal); }
+                    catch { container.SetValNumber(leafPath,
+                        (int)NiPropOptions.PropOption_CoerceToEnum, numVal); }
+                }
+                break;
+            case "enum":
+                // Prefer setting by symbolic NAME (stores an explicit "[val]" the FileDiffer matches
+                // and preserves the symbolic name); fall back to the raw ordinal. See the identical
+                // rationale in SetPropertyValueAsync.
+                double? enumVal = ordinal
+                    ?? (value != null && double.TryParse(value, System.Globalization.NumberStyles.Any,
+                            System.Globalization.CultureInfo.InvariantCulture, out var enumOrd)
+                        ? enumOrd : (double?)null);
+                string? enumName = null;
+                if (enumVal.HasValue)
+                {
+                    double ev = enumVal.Value;
+                    if (!string.IsNullOrWhiteSpace(typeName) && sf != null)
+                        enumName = ResolveEnumeratorName(sf, typeName!, ev, filePath);
+                }
+                if (enumName != null)
+                    container.SetValString(leafPath,
+                        (int)NiPropOptions.PropOption_CoerceToEnum, enumName);
+                else if (enumVal.HasValue)
+                    container.SetValNumber(leafPath,
+                        (int)NiPropOptions.PropOption_CoerceToEnum, enumVal.Value);
+                else if (value != null)
+                    container.SetValString(leafPath,
+                        (int)NiPropOptions.PropOption_CoerceToEnum, value);
+                break;
+            default: // string (or enum-by-label)
+                if (value != null)
+                {
+                    try { container.SetValString(leafPath, 0, value); }
+                    catch { container.SetValString(leafPath,
+                        (int)NiPropOptions.PropOption_CoerceToEnum, value); }
+                }
+                break;
+        }
+    }
+
+    // Persists a scope edit: StationGlobals commit to the station .ini via the engine; every other
+    // scope lives in the sequence file, so save it (with the standard retry) and refresh the cache.
+    private void PersistScope(bool isStation, dynamic? sf, string filePath, bool save)
+    {
+        if (isStation)
+        {
+            ((NiEngine)(object)_engine!).CommitGlobalsToDisk();
+            return;
+        }
+        if (save)
+        {
+            SaveSequenceFileWithRetry((NiSequenceFile)(object)sf!, filePath);
+            _loadedSequenceFiles[filePath] = sf!;
+        }
     }
 
     /// <summary>
@@ -8017,10 +8353,28 @@ public sealed class TestStandService : ITestStandService
 
     /// <inheritdoc/>
     public async Task<AnalyzerResult> RunSequenceAnalyzerDetailedAsync(string filePath,
-        string minSeverity = "Information", string groupBy = "severity")
+        string minSeverity = "Information", string groupBy = "severity", bool async = false)
     {
-        var messages = await RunSequenceAnalyzerAsync(filePath);
+        // ASYNC: return a running handle right away so the RPC completes well within the MCP
+        // transport's ~60s window. The analysis (which spawns AnalyzerApp.exe — an out-of-process
+        // child that owns the slow/fault-prone LabVIEW module loads) runs on a background job; the
+        // caller polls get_analysis_status. This is the ONLY real fix for the -32001 timeout: a
+        // tool-side timeout_seconds cannot lift the client's transport cap.
+        if (async)
+        {
+            EnsureConnected(); // surface a genuine "not connected" synchronously, before the job starts
+            return StartAnalyzerJob(filePath, minSeverity, groupBy);
+        }
 
+        var messages = await RunSequenceAnalyzerAsync(filePath);
+        return BuildAnalyzerResult(filePath, messages, minSeverity, groupBy);
+    }
+
+    // Pure shaping of raw analyzer messages into the filtered/grouped result — shared by the
+    // synchronous path and the async job so both produce an identical AnalyzerResult.
+    private static AnalyzerResult BuildAnalyzerResult(string filePath,
+        List<AnalyzerMessage> messages, string minSeverity, string groupBy)
+    {
         int Rank(string s) => s switch
         {
             "Error" => 3, "Warning" => 2, "Information" => 1, _ => 0
@@ -8043,6 +8397,112 @@ public sealed class TestStandService : ITestStandService
                                    ? AnalyzerGrouping.Group(filtered, groupBy)
                                    : new List<AnalyzerMessageGroup>()
         };
+    }
+
+    // ── Async analyzer jobs ────────────────────────────────────────────────────
+    // Mirrors the load_module_prototype async-job infra (PrototypeLoadJob/StartPrototypeLoadJob):
+    // a "running" handle returns immediately, the work runs on a background Task, and the caller
+    // polls get_analysis_status. NOTE: the analyzer needs NO isolated worker of its own — the slow,
+    // possibly-crashing LabVIEW module loads happen inside AnalyzerApp.exe, a SEPARATE process the
+    // analysis already spawns, so a native .lvlibp fault kills that child (surfaced as a job "error"),
+    // never the MCP server. The background Task here is the SAME Task.Run context the synchronous
+    // path already used — it only decouples the RPC response from the analysis duration.
+    private sealed class AnalyzerJob
+    {
+        public string JobId = "";
+        public string Status = "running";      // running | completed | error
+        public AnalyzerResult? Result;
+        public string? Error;
+        public DateTime StartedUtc;
+        public DateTime? FinishedUtc;
+        public string FilePath = "";
+        public string MinSeverity = "Information";
+        public string GroupBy = "severity";
+
+        public AnalyzerResult Snapshot()
+        {
+            if (Status == "completed" && Result != null)
+            {
+                Result.JobId = JobId;
+                Result.Status = "completed";
+                Result.Note = null;
+                return Result;
+            }
+            return new AnalyzerResult
+            {
+                FilePath = FilePath,
+                GroupBy  = AnalyzerGrouping.IsGrouped(GroupBy) ? GroupBy.Trim().ToLowerInvariant() : "",
+                JobId    = JobId,
+                Status   = Status,
+                Note     = Status == "error"
+                    ? "The analysis job faulted: " + (Error ?? "unknown error")
+                    : "Analysis still running — poll get_analysis_status again after a short wait."
+            };
+        }
+    }
+
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, AnalyzerJob>
+        _analyzerJobs = new();
+
+    // Starts the analysis on a background task, tracks it as a job, and returns a "running" handle
+    // immediately so the RPC returns well within the transport timeout.
+    private AnalyzerResult StartAnalyzerJob(string filePath, string minSeverity, string groupBy)
+    {
+        PruneOldAnalyzerJobs();
+        var job = new AnalyzerJob
+        {
+            JobId = Guid.NewGuid().ToString("N"),
+            StartedUtc = DateTime.UtcNow,
+            FilePath = filePath, MinSeverity = minSeverity, GroupBy = groupBy
+        };
+        _analyzerJobs[job.JobId] = job;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var messages = await RunSequenceAnalyzerAsync(filePath);
+                job.Result = BuildAnalyzerResult(filePath, messages, minSeverity, groupBy);
+                job.Status = "completed";
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Async analyzer job {Job} faulted.", job.JobId);
+                job.Error = ex.Message;
+                job.Status = "error";
+            }
+            finally { job.FinishedUtc = DateTime.UtcNow; }
+        });
+
+        return new AnalyzerResult
+        {
+            FilePath = filePath,
+            GroupBy  = AnalyzerGrouping.IsGrouped(groupBy) ? groupBy.Trim().ToLowerInvariant() : "",
+            JobId    = job.JobId,
+            Status   = "running",
+            Note     = "Analysis started asynchronously (a cold analysis of LabVIEW .lvlibp steps can " +
+                       "exceed the ~60s MCP transport timeout — the Sequence Editor does the same slow " +
+                       "module loads). Poll get_analysis_status with job_id='" + job.JobId +
+                       "' until status='completed'."
+        };
+    }
+
+    // Keep the job map from growing unbounded: drop finished jobs older than 10 minutes.
+    private void PruneOldAnalyzerJobs()
+    {
+        var cutoff = DateTime.UtcNow.AddMinutes(-10);
+        foreach (var kv in _analyzerJobs)
+            if (kv.Value.FinishedUtc is DateTime f && f < cutoff)
+                _analyzerJobs.TryRemove(kv.Key, out _);
+    }
+
+    /// <inheritdoc/>
+    public async Task<AnalyzerResult> GetAnalysisStatusAsync(string jobId)
+    {
+        if (!_analyzerJobs.TryGetValue(jobId, out var job))
+            throw new KeyNotFoundException(
+                $"No analysis job '{jobId}' (unknown or expired). Start one with analyze_sequence_file (async=true).");
+        return await Task.FromResult(job.Snapshot());
     }
 
     // ── Output & UI Messages ──────────────────────────────────────────────────
@@ -8972,6 +9432,60 @@ public sealed class TestStandService : ITestStandService
         Ensure("TMP",                     Path.GetTempPath());
         Ensure("TEMP",                    Path.GetTempPath());
         Ensure("NUMBER_OF_PROCESSORS",    Environment.ProcessorCount.ToString());
+    }
+
+    /// <summary>
+    /// Reconstructs the FULL logon environment (Machine then User, per Windows semantics) onto a child
+    /// <see cref="System.Diagnostics.ProcessStartInfo"/>. A Claude/stdio-launched MCP host can inherit a
+    /// heavily REDUCED environment (empirically ~15 vars vs. ~81 for a normal shell launch) that is
+    /// MISSING the NI/TestStand variables (<c>TESTSTAND</c>, <c>TESTSTANDBIN</c>, <c>NIEXTCCOMPILERSUPP</c>,
+    /// <c>NIDAQMXSWITCHDIR</c>, …) and core folders (<c>ProgramData</c>, <c>ALLUSERSPROFILE</c>,
+    /// <c>PUBLIC</c>, <c>CommonProgramFiles(x86)</c>, …) that a LabVIEW/TestStand native load needs to
+    /// resolve its DLL/license chain. That single discrepancy is why a <c>.lvlibp</c> prototype load
+    /// FAULTS (native delay-load 0xC06D007E ERROR_MOD_NOT_FOUND) when the worker inherits the MCP host's
+    /// stripped env, yet SUCCEEDS when the same exe is launched from a normal PowerShell (full env).
+    /// Composing the child's env from the OS registry removes the discrepancy so the worker sees the
+    /// same environment a real logon session has. Requires <c>UseShellExecute=false</c>. Variables the
+    /// launcher injected (e.g. CLAUDECODE) are preserved; registry values win over the inherited ones.
+    /// </summary>
+    private static void ComposeChildEnvironmentFromRegistry(System.Diagnostics.ProcessStartInfo psi)
+    {
+        static string Expand(string? v) => string.IsNullOrEmpty(v) ? "" : Environment.ExpandEnvironmentVariables(v!);
+
+        void Merge(EnvironmentVariableTarget target)
+        {
+            System.Collections.IDictionary vars;
+            try { vars = Environment.GetEnvironmentVariables(target); }
+            catch { return; }
+            foreach (System.Collections.DictionaryEntry kv in vars)
+            {
+                var key = kv.Key as string;
+                var val = kv.Value?.ToString();
+                if (string.IsNullOrEmpty(key) || val == null) continue;
+                if (string.Equals(key, "PATH", StringComparison.OrdinalIgnoreCase)) continue; // merged below
+                psi.Environment[key!] = Expand(val);   // User (applied 2nd) overrides Machine (1st)
+            }
+        }
+        Merge(EnvironmentVariableTarget.Machine);
+        Merge(EnvironmentVariableTarget.User);
+
+        // PATH = Machine + User (+ anything the parent already had), deduped, order-preserving —
+        // matching how Windows builds a logon PATH.
+        string machine  = Expand(Environment.GetEnvironmentVariable("PATH", EnvironmentVariableTarget.Machine));
+        string user     = Expand(Environment.GetEnvironmentVariable("PATH", EnvironmentVariableTarget.User));
+        string existing = psi.Environment.TryGetValue("PATH", out var ep) ? (ep ?? "") : "";
+        var seen  = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var parts = new List<string>();
+        foreach (var seg in string.Join(";", machine, user, existing).Split(';'))
+        {
+            var s = seg.Trim();
+            if (s.Length == 0) continue;
+            if (seen.Add(s.TrimEnd('\\'))) parts.Add(s);
+        }
+        if (parts.Count > 0) psi.Environment["PATH"] = string.Join(";", parts);
+
+        // Belt-and-suspenders: guarantee the volatile standard folders even if a registry read failed.
+        ApplyTestStandToolChildEnv(psi);
     }
 
     /// <summary>
@@ -10865,7 +11379,269 @@ public sealed class TestStandService : ITestStandService
 
     /// <inheritdoc/>
     public async Task<LoadPrototypeResult> LoadModulePrototypeAsync(string filePath,
-        string sequenceName, string stepGroup, string stepName, bool save = true)
+        string sequenceName, string stepGroup, string stepName, bool save = true,
+        bool? isolate = null, int timeoutSeconds = 120, bool? async = null,
+        string? labviewServer = null)
+    {
+        EnsureConnected();
+
+        // Probe the adapter + VI path (safe — no LoadPrototype), then dispatch. LabVIEW ("G …")
+        // adapters resolve the VI connector pane through LabVIEW; the load is SLOW (LabVIEW must
+        // attach/start — the same work the editor's "Reload Prototype" does) and can exceed the MCP
+        // transport's ~60s window (→ -32001) OR hit the native delay-load SEH 0xC06D007E.
+        var (adapterKey, viPath, isLabVIEW) = await Task.Run(() =>
+        {
+            var sf    = GetOrLoadSeqFile(filePath);
+            var seq   = sf.GetSequenceByName(sequenceName);
+            var step  = ResolveStepInGroup(seq, ParseStepGroup(stepGroup), stepName);
+            string ak = TryGetString(step, "AdapterKeyName");
+            return (ak, ReadStepViPath(((NiStep)(object)step).AsPropertyObject()), IsLabVIEWAdapter(ak));
+        });
+        bool isPackedLib = (viPath ?? "").IndexOf(".lvlibp", StringComparison.OrdinalIgnoreCase) >= 0;
+
+        // Non-LabVIEW adapters (SequenceCall/.NET/DLL·CVI/ActiveX) are fast and never delay-load a
+        // LabVIEW runtime → always fast in-process & synchronous (no behaviour change, no regression).
+        if (!isLabVIEW)
+        {
+            var r = await LoadPrototypeInProcessAsync(filePath, sequenceName, stepGroup, stepName, save);
+            r.ExecutionMode = "in-process";
+            return r;
+        }
+
+        // LabVIEW dispatch. The KEY fix: route the adapter to the LabVIEW ExecServer (the running
+        // LabVIEW ADE via ActiveX — what the editor uses) instead of AutoDetect→Run-Time (lvrt.dll),
+        // whose delay-load fails headless with MOD_NOT_FOUND. ExecServer/ActiveX works cross-process,
+        // so the ISOLATED WORKER (default) can bind LabVIEW too — giving crash-safety AND a real load
+        // together. ASYNC by default (job id + poll) so LabVIEW's slow attach never trips the RPC
+        // timeout. isolate=false runs in-process (also ExecServer-routed) but is not crash-contained.
+        string lvServer = string.IsNullOrWhiteSpace(labviewServer) ? "deferred" : labviewServer!.Trim();
+        bool useWorker = isolate ?? true;
+        bool useAsync  = async  ?? true;
+
+        Func<Task<LoadPrototypeResult>> work = () => useWorker
+            ? RunLoadPrototypeViaWorkerAsync(filePath, sequenceName, stepGroup, stepName, save,
+                                             timeoutSeconds, adapterKey, isPackedLib, lvServer)
+            : RunLoadPrototypeInProcessLabVIEWAsync(filePath, sequenceName, stepGroup, stepName,
+                                                    save, adapterKey, isPackedLib, lvServer);
+
+        if (!useAsync)
+            return await work();
+
+        return StartPrototypeLoadJob(work, adapterKey, useWorker ? "worker" : "in-process", stepName);
+    }
+
+    // The in-process LabVIEW path: route/init the LabVIEW adapter to its ExecServer (like the editor)
+    // FIRST, then run the shared in-process core. Adds the packed-lib hint when the load did not resolve.
+    private async Task<LoadPrototypeResult> RunLoadPrototypeInProcessLabVIEWAsync(
+        string filePath, string sequenceName, string stepGroup, string stepName,
+        bool save, string adapterKey, bool isPackedLib, string labviewServer)
+    {
+        var r = await LoadPrototypeInProcessAsync(filePath, sequenceName, stepGroup, stepName, save, labviewServer);
+        r.ExecutionMode = "in-process";
+        if (isPackedLib && !r.PrototypeLoaded) r.Note = AppendPackedLibHint(r.Note);
+        return r;
+    }
+
+    /// <inheritdoc/>
+    public async Task<LoadPrototypeResult> GetPrototypeLoadStatusAsync(string jobId)
+    {
+        if (!_prototypeJobs.TryGetValue(jobId, out var job))
+            throw new KeyNotFoundException(
+                $"No prototype-load job '{jobId}' (unknown or expired). Start one with load_module_prototype.");
+        return await Task.FromResult(job.Snapshot());
+    }
+
+    // ── Async prototype-load jobs ──────────────────────────────────────────────
+    private sealed class PrototypeLoadJob
+    {
+        public string JobId = "";
+        public string Status = "running";      // running | completed | error
+        public LoadPrototypeResult? Result;
+        public string? Error;
+        public DateTime StartedUtc;
+        public DateTime? FinishedUtc;
+        public string Adapter = "";
+        public string ExecutionMode = "";
+        public string StepName = "";
+
+        public LoadPrototypeResult Snapshot()
+        {
+            if (Status == "completed" && Result != null)
+            {
+                Result.JobId = JobId;
+                Result.Status = "completed";
+                return Result;
+            }
+            return new LoadPrototypeResult
+            {
+                StepName = StepName, Adapter = Adapter, ExecutionMode = ExecutionMode,
+                PrototypeLoaded = false, JobId = JobId, Status = Status,
+                Note = Status == "error"
+                    ? "The prototype-load job faulted: " + (Error ?? "unknown error")
+                    : "Prototype load still running — poll get_prototype_load_status again."
+            };
+        }
+    }
+
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, PrototypeLoadJob>
+        _prototypeJobs = new();
+
+    // Starts the work on a background task, tracks it as a job, and returns a "running" handle
+    // immediately so the RPC returns well within the transport timeout.
+    private LoadPrototypeResult StartPrototypeLoadJob(
+        Func<Task<LoadPrototypeResult>> work, string adapterKey, string executionMode, string stepName)
+    {
+        PruneOldPrototypeJobs();
+        var job = new PrototypeLoadJob
+        {
+            JobId = Guid.NewGuid().ToString("N"),
+            StartedUtc = DateTime.UtcNow,
+            Adapter = adapterKey, ExecutionMode = executionMode, StepName = stepName
+        };
+        _prototypeJobs[job.JobId] = job;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var r = await work();
+                job.Result = r;
+                job.Status = "completed";
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Async prototype-load job {Job} faulted.", job.JobId);
+                job.Error = ex.Message;
+                job.Status = "error";
+            }
+            finally { job.FinishedUtc = DateTime.UtcNow; }
+        });
+
+        return new LoadPrototypeResult
+        {
+            StepName = stepName, Adapter = adapterKey, ExecutionMode = executionMode,
+            PrototypeLoaded = false, JobId = job.JobId, Status = "running",
+            Note = "LabVIEW prototype load started asynchronously (LabVIEW attach/load can take a " +
+                   "while — the Sequence Editor does the same work). Poll get_prototype_load_status " +
+                   $"with job_id='{job.JobId}' until status='completed'."
+        };
+    }
+
+    // Keep the job map from growing unbounded: drop finished jobs older than 10 minutes.
+    private void PruneOldPrototypeJobs()
+    {
+        var cutoff = DateTime.UtcNow.AddMinutes(-10);
+        foreach (var kv in _prototypeJobs)
+            if (kv.Value.FinishedUtc is DateTime f && f < cutoff)
+                _prototypeJobs.TryRemove(kv.Key, out _);
+    }
+
+    // Captured previous LabVIEW-adapter server config, so a per-load override can be restored.
+    private sealed class LvServerRestore
+    {
+        public string AdapterKey = "";
+        public NiLabVIEWServerTypes PrevType;
+        public string PrevServer = "";
+        public bool Changed;
+        public string Diag = "";   // compact routing diagnostic surfaced in the result note
+    }
+
+    // Routes the LabVIEW adapter to the requested LabVIEW server and connects to it BEFORE the load —
+    // the fix for the headless .lvlibp fault. The generic Adapter from GetAdapterByKeyName is QI'd to
+    // the typed LabVIEWAdapter interface (the AdapterAPI methods Initialize/Get/SetServerInfo live on
+    // that interface, NOT on the generic Adapter dispinterface — which is why the earlier late-bound
+    // `dynamic adapter.Initialize()` silently no-op'd). server modes:
+    //   "deferred" (default) → ExecServerDeferred, "LabVIEW": the running LabVIEW ADE via ActiveX,
+    //                          launched on first use — matches the editor, no lvrt.dll delay-load.
+    //   "exec"               → ExecServer, "LabVIEW": same, connected immediately.
+    //   "rte"                → RTEServer, "AutoDetect": the legacy run-time path (may fault headless).
+    //   "auto"               → leave the configured server as-is; just Initialize().
+    // Best-effort: any failure is logged and the load falls back to the engine's lazy connect.
+    private LvServerRestore? ConfigureLabVIEWAdapter(string adapterKey, string? mode)
+    {
+        var restore = new LvServerRestore { AdapterKey = adapterKey };
+        try
+        {
+            var adapterObj = _engine!.GetAdapterByKeyName(adapterKey);
+            var lva = (NiLabVIEWAdapter)(object)adapterObj;   // QI to the LabVIEW adapter interface
+            restore.Diag = "cast=ok";
+
+            string m = string.IsNullOrWhiteSpace(mode) ? "deferred" : mode!.Trim().ToLowerInvariant();
+            if (m != "auto")
+            {
+                (NiLabVIEWServerTypes type, string server) target = m switch
+                {
+                    "exec"     => (NiLabVIEWServerTypes.LabVIEWServer_ExecServer,         "LabVIEW"),
+                    "deferred" => (NiLabVIEWServerTypes.LabVIEWServer_ExecServerDeferred, "LabVIEW"),
+                    "rte"      => (NiLabVIEWServerTypes.LabVIEWServer_RTEServer,          "AutoDetect"),
+                    _          => (NiLabVIEWServerTypes.LabVIEWServer_ExecServerDeferred, "LabVIEW"),
+                };
+                try
+                {
+                    lva.GetServerInfo(out restore.PrevType, out restore.PrevServer);
+                    restore.Diag += $"; prev={restore.PrevType}/{restore.PrevServer}";
+                    if (restore.PrevType != target.type ||
+                        !string.Equals(restore.PrevServer, target.server, StringComparison.OrdinalIgnoreCase))
+                    {
+                        lva.SetServerInfo(target.type, target.server);
+                        restore.Changed = true;
+                        restore.Diag += $"; set={target.type}/{target.server}";
+                        _logger.LogInformation("LabVIEW adapter '{Key}' server routed to {Type}/{Server} " +
+                            "for the prototype load (was {PrevType}/{PrevServer}).", adapterKey,
+                            target.type, target.server, restore.PrevType, restore.PrevServer);
+                    }
+                    else restore.Diag += "; already-target";
+                }
+                catch (Exception ex)
+                {
+                    restore.Diag += $"; serverinfo-failed={Short(ex)}";
+                    _logger.LogDebug(ex, "LabVIEW adapter Get/SetServerInfo skipped.");
+                }
+            }
+            else restore.Diag += "; mode=auto";
+
+            try { lva.Initialize(); restore.Diag += "; init=ok"; }
+            catch (Exception ex)
+            {
+                restore.Diag += $"; init-failed={Short(ex)}";
+                _logger.LogDebug(ex, "LabVIEW adapter Initialize() skipped/failed.");
+            }
+        }
+        catch (Exception ex)
+        {
+            restore.Diag = $"cast/adapter-failed={Short(ex)}";
+            _logger.LogInformation(ex, "ConfigureLabVIEWAdapter('{Key}') could not route/attach the " +
+                "LabVIEW adapter (typed cast or server call failed); relying on the engine's lazy " +
+                "connect for the load.", adapterKey);
+        }
+        return restore;
+    }
+
+    // A compact one-line exception tag for the routing diagnostic embedded in the result note.
+    private static string Short(Exception ex)
+        => (ex.GetType().Name + ": " + (ex.Message ?? "")).Replace("\r", " ").Replace("\n", " ")
+           is var s && s.Length > 120 ? s.Substring(0, 120) : s;
+
+    // Restore the adapter's previous server config (only if we changed it) so a per-load override does
+    // not permanently alter the station's LabVIEW Adapter configuration.
+    private void RestoreLabVIEWAdapter(LvServerRestore? restore)
+    {
+        if (restore is not { Changed: true }) return;
+        try
+        {
+            var adapterObj = _engine!.GetAdapterByKeyName(restore.AdapterKey);
+            var lva = (NiLabVIEWAdapter)(object)adapterObj;
+            lva.SetServerInfo(restore.PrevType, restore.PrevServer);
+            _logger.LogDebug("LabVIEW adapter '{Key}' server restored to {Type}/{Server}.",
+                restore.AdapterKey, restore.PrevType, restore.PrevServer);
+        }
+        catch (Exception ex) { _logger.LogDebug(ex, "Restoring LabVIEW adapter server config failed."); }
+    }
+
+    /// <inheritdoc/>
+    public async Task<LoadPrototypeResult> LoadPrototypeInProcessAsync(string filePath,
+        string sequenceName, string stepGroup, string stepName, bool save = true,
+        string? labviewServer = null)
     {
         EnsureConnected();
         return await Task.Run(() =>
@@ -10878,11 +11654,21 @@ public sealed class TestStandService : ITestStandService
             string adapterKey = TryGetString(step, "AdapterKeyName");
             dynamic mod       = step.Module;
 
+            // For a LabVIEW step, route/attach the adapter to its LabVIEW server BEFORE the load — the
+            // decisive fix. Default "deferred"/"exec" = the running LabVIEW ADE (ActiveX, like the
+            // editor), which avoids the AutoDetect→Run-Time (lvrt.dll) delay-load that faults headless.
+            // Restored afterward so the station's adapter config is not permanently changed.
+            LvServerRestore? lvRestore = null;
+            if (IsLabVIEWAdapter(adapterKey))
+                lvRestore = ConfigureLabVIEWAdapter(adapterKey, labviewServer);
+
             // Editor "Load Prototype": reconcile the module's argument list against the current
             // target. Returns false (logged) when the target/module cannot be resolved — an unlinked
             // SequenceCall placeholder, a missing/not-loaded target file, or a VI/DLL that cannot load
             // headless. Non-destructive: existing bindings are matched by name and preserved.
-            bool loaded = TryLoadModulePrototype(mod, stepName);
+            bool loaded;
+            try { loaded = TryLoadModulePrototype(mod, stepName); }
+            finally { RestoreLabVIEWAdapter(lvRestore); }
 
             NiPropertyObject stepPo = ((NiStep)(object)step).AsPropertyObject();
             var parameters = ReadModuleParameters(stepPo, stepName);
@@ -10897,6 +11683,12 @@ public sealed class TestStandService : ITestStandService
             else if (parameters.Count == 0)
                 note = "Prototype loaded, but the interface has no parameters — either the target " +
                        "genuinely has none, or its interface could not be read headless.";
+
+            // Surface the LabVIEW-adapter routing diagnostic (cast/server/init outcome) in the note so
+            // it comes back via stdout regardless of log capture — the key signal for why a headless
+            // .lvlibp load did or did not bind LabVIEW.
+            if (lvRestore != null && !string.IsNullOrEmpty(lvRestore.Diag))
+                note = $"[lv-route: {lvRestore.Diag}] " + (note ?? (loaded ? "Prototype loaded." : ""));
 
             if (save)
             {
@@ -10914,6 +11706,266 @@ public sealed class TestStandService : ITestStandService
             };
         });
     }
+
+    // A LabVIEW step uses the "G Std Prototype Adapter" or "G Flexible VI Adapter" (both key names
+    // start with "G "). These are the only adapters whose prototype load reaches LabVIEW and can
+    // trigger the native .lvlibp delay-load crash.
+    private static bool IsLabVIEWAdapter(string? adapterKey)
+        => !string.IsNullOrEmpty(adapterKey)
+           && (adapterKey.StartsWith("G ", StringComparison.OrdinalIgnoreCase)
+               || adapterKey.IndexOf("LabVIEW", StringComparison.OrdinalIgnoreCase) >= 0);
+
+    // Best-effort read of a step's VI path (to detect a packed library .lvlibp). Tries the common
+    // homes for the VI reference; returns "" if none present. Never calls LoadPrototype.
+    private string ReadStepViPath(NiPropertyObject stepPo)
+    {
+        foreach (var p in new[] {
+            "TS.SData.ViCall.VIPath", "VIModule.ViCall.VIPath",
+            "TS.SData.ViCall.Namespace", "VIModule.ViCall.Namespace" })
+        {
+            try { var v = stepPo.GetValString(p, 0); if (!string.IsNullOrEmpty(v)) return v; }
+            catch (Exception ex) { _logger.LogDebug(ex, "No VI path at '{Path}'.", p); }
+        }
+        return "";
+    }
+
+    private static string AppendPackedLibHint(string? note)
+    {
+        const string hint = "The VI is in a packed library (.lvlibp) whose connector pane cannot be " +
+            "regenerated headless. Use copy_step_module to copy the cached ViCall metadata verbatim " +
+            "from a source .seq instead.";
+        return string.IsNullOrEmpty(note) ? hint : note + " " + hint;
+    }
+
+    // Runs the prototype load in a short-lived child instance of this same executable
+    // (--load-prototype-worker). The child owns its own engine, opens the file, loads the prototype,
+    // saves on success and prints a one-line result. A native delay-load crash kills only the child;
+    // this parent survives. On success the file on disk carries the loaded pane, so we reload it and
+    // read the interface back; on crash/timeout/clean-failure the on-disk file is unchanged.
+    private async Task<LoadPrototypeResult> RunLoadPrototypeViaWorkerAsync(
+        string filePath, string sequenceName, string stepGroup, string stepName,
+        bool save, int timeoutSeconds, string adapterKey, bool isPackedLib, string labviewServer)
+    {
+        var result = new LoadPrototypeResult
+        {
+            StepName = stepName, Adapter = adapterKey, ExecutionMode = "worker"
+        };
+
+        var (outcome, workerNote) = await RunPrototypeWorkerProcessAsync(
+            filePath, sequenceName, stepGroup, stepName, Math.Max(5, timeoutSeconds), labviewServer);
+        result.WorkerOutcome = outcome;
+
+        if (outcome == "loaded")
+        {
+            // The worker saved the loaded pane to disk — drop our stale in-memory copy and re-read.
+            var fresh = await Task.Run(() =>
+            {
+                var sf   = ReloadSequenceFileFromDisk(filePath);
+                var seq  = sf.GetSequenceByName(sequenceName);
+                var step = ResolveStepInGroup(seq, ParseStepGroup(stepGroup), stepName);
+                return ReadModuleParameters(((NiStep)(object)step).AsPropertyObject(), stepName);
+            });
+            result.Parameters.AddRange(fresh);
+            result.PrototypeLoaded = true;
+            result.Note = fresh.Count == 0
+                ? "Prototype loaded in an isolated worker, but the interface has no parameters."
+                : (save ? null
+                        : "Prototype loaded in an isolated worker. NOTE: an isolated LabVIEW load " +
+                          "always persists to disk (that is how the worker returns the loaded pane), " +
+                          "so save=false could not be honored.");
+            return result;
+        }
+
+        // Not loaded / crashed / timed out → the on-disk file is unchanged; read the CURRENT pane so
+        // the caller still sees whatever bindings already exist, and attach an explanatory note.
+        var current = await Task.Run(() =>
+        {
+            try
+            {
+                var sf   = GetOrLoadSeqFile(filePath);
+                var seq  = sf.GetSequenceByName(sequenceName);
+                var step = ResolveStepInGroup(seq, ParseStepGroup(stepGroup), stepName);
+                return ReadModuleParameters(((NiStep)(object)step).AsPropertyObject(), stepName);
+            }
+            catch (Exception ex) { _logger.LogDebug(ex, "Could not read current params after worker '{Outcome}'.", outcome); return new List<ModuleParameterInfo>(); }
+        });
+        result.Parameters.AddRange(current);
+        result.PrototypeLoaded = false;
+        result.Note = outcome switch
+        {
+            "crashed" => "The LabVIEW prototype load crashed the isolated worker process (native " +
+                         "delay-load fault, e.g. 0xC06D007E ERROR_MOD_NOT_FOUND — a LabVIEW runtime/" +
+                         "adapter DLL could not be bound). The main server was protected and stays " +
+                         "alive. Nothing was changed.",
+            "timeout" => $"The LabVIEW prototype load did not finish within {timeoutSeconds}s and the " +
+                         "isolated worker was terminated. The main server stays alive; nothing was " +
+                         "changed. Ensure LabVIEW is reachable, or raise timeout_seconds.",
+            _         => workerNote ??
+                         "LoadPrototype could not resolve the target/module in the isolated worker. " +
+                         "Nothing was changed. For LabVIEW the VI must be loadable (LabVIEW available)."
+        };
+        if (isPackedLib) result.Note = AppendPackedLibHint(result.Note);
+        return result;
+    }
+
+    // Spawns the worker child and interprets its exit. Returns (outcome, note):
+    //   "loaded"     – worker reported the prototype loaded (file saved to disk)
+    //   "not-loaded" – worker ran but the target was unresolvable (clean managed failure)
+    //   "crashed"    – worker died abnormally (native SEH / non-zero exit / no result line)
+    //   "timeout"    – worker exceeded the timeout and was killed (process tree)
+    private async Task<(string outcome, string? note)> RunPrototypeWorkerProcessAsync(
+        string filePath, string sequenceName, string stepGroup, string stepName, int timeoutSeconds,
+        string labviewServer)
+    {
+        string? exe = Environment.ProcessPath;
+        if (string.IsNullOrEmpty(exe) || !System.IO.File.Exists(exe))
+        {
+            _logger.LogWarning("Cannot locate own executable to spawn the prototype worker; " +
+                "falling back to reporting a clean failure.");
+            return ("not-loaded", "Could not launch the isolated worker (own exe path unknown).");
+        }
+
+        // Propagate THIS engine's search directories to the worker's fresh engine. The worker owns a
+        // brand-new engine that only reads the station's default SearchDirectories.cfg, so any directory
+        // added at runtime (e.g. add_search_directory pointing at a project's library folder) — needed
+        // to resolve a relative module path like "MyLib.lvlibp\...\Foo.vi" — would be invisible to it.
+        // Without this the worker fails "Could not find file 'MyLib.lvlibp'" before it can even attempt
+        // the load. We serialise the non-empty, enabled search dirs to a temp file and pass it along.
+        string? searchDirsFile = null;
+        try
+        {
+            var sdirs = await GetSearchDirectoriesAsync();
+            var toPropagate = new List<object>();
+            foreach (var d in sdirs)
+                if (!string.IsNullOrWhiteSpace(d.Path) && !d.Disabled)
+                    toPropagate.Add(new { path = d.Path, subdirs = d.SearchSubdirectories });
+            if (toPropagate.Count > 0)
+            {
+                searchDirsFile = System.IO.Path.Combine(System.IO.Path.GetTempPath(),
+                    "ts_mcp_lp_searchdirs_" + Guid.NewGuid().ToString("N") + ".json");
+                System.IO.File.WriteAllText(searchDirsFile,
+                    System.Text.Json.JsonSerializer.Serialize(toPropagate));
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Could not gather search directories to propagate to the worker.");
+            searchDirsFile = null;
+        }
+
+        var psi = new System.Diagnostics.ProcessStartInfo
+        {
+            FileName               = exe,
+            UseShellExecute        = false,
+            RedirectStandardInput  = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError  = true,
+            CreateNoWindow         = true,
+        };
+        foreach (var a in new[] {
+            "--load-prototype-worker",
+            "--file",     filePath,
+            "--seq",      sequenceName,
+            "--group",    stepGroup,
+            "--step",     stepName,
+            "--lv-server", labviewServer ?? "deferred" })
+            psi.ArgumentList.Add(a);
+        if (searchDirsFile != null)
+        {
+            psi.ArgumentList.Add("--search-dirs");
+            psi.ArgumentList.Add(searchDirsFile);
+        }
+
+        // Give the worker the FULL logon environment. A Claude/stdio-launched MCP host inherits a
+        // stripped env (missing TESTSTAND*/NIEXTCCOMPILERSUPP/ProgramData/PUBLIC/…), which is the root
+        // cause of the native .lvlibp delay-load fault (0xC06D007E) — the load works from a normal
+        // PowerShell launch precisely because that has the complete env. Composing it here makes the
+        // worker independent of however the parent was launched.
+        ComposeChildEnvironmentFromRegistry(psi);
+
+        try
+        {
+        return await Task.Run(() =>
+        {
+            using var proc = new System.Diagnostics.Process { StartInfo = psi };
+            string? resultLine = null;
+            var stdoutSb = new System.Text.StringBuilder();
+            proc.OutputDataReceived += (_, e) =>
+            {
+                if (e.Data == null) return;
+                stdoutSb.AppendLine(e.Data);
+                if (e.Data.StartsWith(WorkerResultSentinel, StringComparison.Ordinal))
+                    resultLine = e.Data.Substring(WorkerResultSentinel.Length).Trim();
+            };
+            proc.ErrorDataReceived += (_, __) => { /* worker logs → drop (kept off our stdout) */ };
+
+            try { proc.Start(); }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to start the prototype worker process.");
+                return ("not-loaded", "Could not start the isolated worker: " + ex.Message);
+            }
+
+            proc.BeginOutputReadLine();
+            proc.BeginErrorReadLine();
+            try { proc.StandardInput.Close(); } catch (Exception ex) { _logger.LogDebug(ex, "Closing worker stdin failed."); }
+
+            if (!proc.WaitForExit(timeoutSeconds * 1000))
+            {
+                _logger.LogWarning("Prototype worker exceeded {Timeout}s — killing its process tree.", timeoutSeconds);
+                try { proc.Kill(entireProcessTree: true); } catch (Exception ex) { _logger.LogDebug(ex, "Killing the worker tree failed."); }
+                try { proc.WaitForExit(5000); } catch (Exception ex) { _logger.LogDebug(ex, "Waiting for killed worker failed."); }
+                return ("timeout", null);
+            }
+            proc.WaitForExit(); // flush async readers
+
+            int code = proc.ExitCode;
+            if (resultLine != null)
+            {
+                try
+                {
+                    using var doc = System.Text.Json.JsonDocument.Parse(resultLine);
+                    var root = doc.RootElement;
+                    bool loaded = root.TryGetProperty("loaded", out var l) && l.ValueKind == System.Text.Json.JsonValueKind.True;
+                    string? note = root.TryGetProperty("note", out var n) && n.ValueKind == System.Text.Json.JsonValueKind.String ? n.GetString() : null;
+                    return (loaded ? "loaded" : "not-loaded", note);
+                }
+                catch (Exception ex) { _logger.LogDebug(ex, "Could not parse worker result line: {Line}", resultLine); }
+            }
+
+            // No result line → the worker died before reporting (native crash) or exited abnormally.
+            _logger.LogWarning("Prototype worker produced no result (exit code 0x{Code:X8}).", code);
+            return ("crashed", null);
+        });
+        }
+        finally
+        {
+            if (searchDirsFile != null)
+            {
+                try { System.IO.File.Delete(searchDirsFile); }
+                catch (Exception ex) { _logger.LogDebug(ex, "Could not delete temp search-dirs file '{File}'.", searchDirsFile); }
+            }
+        }
+    }
+
+    // Drops any cached copy of the file (releasing the engine's reference) and re-reads it from disk,
+    // so changes another process (the prototype worker) saved become visible here.
+    private dynamic ReloadSequenceFileFromDisk(string filePath)
+    {
+        if (_loadedSequenceFiles.TryGetValue(filePath, out var old))
+        {
+            try { _engine!.ReleaseSequenceFileEx(old, 0); } catch (Exception ex) { _logger.LogDebug(ex, "ReleaseSequenceFileEx failed during reload of '{File}'.", filePath); }
+            _loadedSequenceFiles.Remove(filePath);
+            try { System.Runtime.InteropServices.Marshal.ReleaseComObject(old); } catch (Exception ex) { _logger.LogDebug(ex, "ReleaseComObject failed during reload of '{File}'.", filePath); }
+        }
+        var fresh = _engine!.GetSequenceFileEx(filePath, 0, (NiConflictHandler)4);
+        _loadedSequenceFiles[filePath] = fresh;
+        return fresh;
+    }
+
+    /// <summary>Sentinel prefix the worker prints before its one-line JSON result on stdout, so the
+    /// parent can pick the result out from any other child stdout.</summary>
+    internal const string WorkerResultSentinel = "__LPWORKER_RESULT__ ";
 
     /// <inheritdoc/>
     public async Task SetModuleParameterAsync(string filePath, string sequenceName,
