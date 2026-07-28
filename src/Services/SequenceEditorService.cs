@@ -1,7 +1,6 @@
 using System;
 using System.Diagnostics;
 using System.IO;
-using System.Linq;
 using System.Threading.Tasks;
 using TestStandMCP.Models;
 using Microsoft.Extensions.Logging;
@@ -281,32 +280,16 @@ public class SequenceEditorService : ISequenceEditorService
             }
         }
 
-        // 3. Search standard NI installation directories
-        var programDirs = new[]
+        // 3. Search the standard NI installation directories, newest release first. Delegated to
+        //    TestStandInstallLocator: iterating SpecialFolder.ProgramFiles + ProgramFilesX86 here
+        //    would scan the SAME directory twice (WOW64 redirects both to "…(x86)" in this 32-bit
+        //    host) and could never find a 64-bit install.
+        foreach (var root in TestStandInstallLocator.GetProgramFilesRoots())
         {
-            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
-            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86)
-        };
-
-        foreach (var pf in programDirs)
-        {
-            if (string.IsNullOrEmpty(pf)) continue;
-            var niDir = Path.Combine(pf, "National Instruments");
-            if (!Directory.Exists(niDir)) continue;
-
-            try
+            foreach (var bin in TestStandInstallLocator.EnumerateTestStandBins(root))
             {
-                // Prefer newer TestStand versions
-                foreach (var dir in Directory.GetDirectories(niDir, "TestStand*")
-                             .OrderByDescending(d => d))
-                {
-                    var seqEdit = Path.Combine(dir, "Bin", "SeqEdit.exe");
-                    if (File.Exists(seqEdit)) return seqEdit;
-                }
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-            {
-                // Directory not enumerable on this station — skip and try the next root.
+                var seqEdit = Path.Combine(bin, "SeqEdit.exe");
+                if (File.Exists(seqEdit)) return seqEdit;
             }
         }
 

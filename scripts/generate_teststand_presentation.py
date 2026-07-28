@@ -103,10 +103,37 @@ ICON_FILES = {
 DEFAULT_ICON = r"Icons\Generic.ico"
 
 
+def program_files_roots():
+    """The Program Files roots to search for installed software.
+
+    Never hardcodes a drive letter — a station may well have its programs on D:.
+    %ProgramW6432% names the 64-bit root even from a 32-bit interpreter (where
+    %ProgramFiles% is WOW64-redirected to the "(x86)" tree), so it comes first.
+    Deduplicated, because on 64-bit Python several of these are the same path.
+    """
+    roots, seen = [], set()
+    for var in ("ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"):
+        p = (os.environ.get(var) or "").strip()
+        if not p:
+            continue
+        key = os.path.normcase(p.rstrip("\\/"))
+        if key in seen or not os.path.isdir(p):
+            continue
+        seen.add(key)
+        roots.append(p)
+    return roots
+
+
 def find_teststand_components(override=None):
-    """Locate <TestStand>\\Components (icons live below it). Newest install wins."""
+    """Locate <TestStand>\\Components (icons live below it). Newest install wins.
+
+    Order: explicit override / TS_DOC_TESTSTAND_DIR -> %TESTSTAND% (the install root
+    the TestStand installer exports, i.e. the ACTIVE version) -> a TestStand* glob
+    under every Program Files root. Neither a drive nor a release is hardcoded.
+    """
     import glob as _glob
-    for cand in (override, os.environ.get("TS_DOC_TESTSTAND_DIR")):
+    for cand in (override, os.environ.get("TS_DOC_TESTSTAND_DIR"),
+                 os.environ.get("TESTSTAND")):
         if not cand:
             continue
         c = cand if os.path.basename(cand).lower() == "components" \
@@ -114,7 +141,7 @@ def find_teststand_components(override=None):
         if os.path.isdir(c):
             return c
     hits = []
-    for root in (r"C:\Program Files", r"C:\Program Files (x86)"):
+    for root in program_files_roots():
         hits += _glob.glob(os.path.join(root, "National Instruments",
                                         "TestStand*", "Components"))
     return sorted(hits)[-1] if hits else None
