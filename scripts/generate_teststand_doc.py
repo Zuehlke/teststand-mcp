@@ -163,12 +163,42 @@ LABELS = {
     },
 }
 
-BROWSER_CANDIDATES = [
-    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-    r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
-    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-]
+def program_files_roots():
+    """The Program Files roots to search for installed software, newest-API first.
+
+    Never hardcodes a drive letter — a station may well have its programs on D:.
+    %ProgramW6432% names the 64-bit root even from a 32-bit interpreter (where
+    %ProgramFiles% is WOW64-redirected to the "(x86)" tree), so it comes first.
+    Deduplicated, because on 64-bit Python several of these are the same path.
+    """
+    roots, seen = [], set()
+    for var in ("ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"):
+        p = (os.environ.get(var) or "").strip()
+        if not p:
+            continue
+        key = os.path.normcase(p.rstrip("\\/"))
+        if key in seen or not os.path.isdir(p):
+            continue
+        seen.add(key)
+        roots.append(p)
+    return roots
+
+
+# Chromium-based browsers used to rasterise the dependency diagram, in preference
+# order (Edge before Chrome) across every install root, then whatever is on PATH.
+BROWSER_RELATIVE_PATHS = (
+    r"Microsoft\Edge\Application\msedge.exe",
+    r"Google\Chrome\Application\chrome.exe",
+)
+
+
+def browser_candidates():
+    """Absolute paths of the Chromium browsers to try, resolved at call time."""
+    cands = [os.path.join(root, rel)
+             for rel in BROWSER_RELATIVE_PATHS
+             for root in program_files_roots()]
+    cands += [p for p in (shutil.which("msedge"), shutil.which("chrome")) if p]
+    return cands
 
 
 # --------------------------------------------------------------------------
@@ -256,9 +286,15 @@ DEFAULT_ICON = r"Icons\Generic.ico"
 
 
 def find_teststand_components(override=None):
-    """Locate <TestStand>\\Components (icons live below it). Newest install wins."""
+    """Locate <TestStand>\\Components (icons live below it). Newest install wins.
+
+    Order: explicit override / TS_DOC_TESTSTAND_DIR -> %TESTSTAND% (the install root
+    the TestStand installer exports, i.e. the ACTIVE version) -> a TestStand* glob
+    under every Program Files root. Neither a drive nor a release is hardcoded.
+    """
     import glob as _glob
-    for cand in (override, os.environ.get("TS_DOC_TESTSTAND_DIR")):
+    for cand in (override, os.environ.get("TS_DOC_TESTSTAND_DIR"),
+                 os.environ.get("TESTSTAND")):
         if not cand:
             continue
         c = cand if os.path.basename(cand).lower() == "components" \
@@ -266,7 +302,7 @@ def find_teststand_components(override=None):
         if os.path.isdir(c):
             return c
     hits = []
-    for root in (r"C:\Program Files", r"C:\Program Files (x86)"):
+    for root in program_files_roots():
         hits += _glob.glob(os.path.join(root, "National Instruments",
                                         "TestStand*", "Components"))
     return sorted(hits)[-1] if hits else None
@@ -695,10 +731,11 @@ def make_svg(nodes, order, edges, back, W, H, margin, labels, scale=2, route_pad
 
 
 def render_svg_to_png(svg, W, H, png_path, scale=2, browser=None):
-    exe = browser or next((p for p in BROWSER_CANDIDATES if os.path.isfile(p)), None)
+    candidates = browser_candidates()
+    exe = browser or next((p for p in candidates if os.path.isfile(p)), None)
     if not exe:
         raise RuntimeError("No Chromium browser found for diagram rendering. Checked: "
-                           + "; ".join(BROWSER_CANDIDATES))
+                           + "; ".join(candidates))
     tmp = tempfile.mkdtemp(prefix="tsdoc_")
     try:
         html_path = os.path.join(tmp, "diagram.html")

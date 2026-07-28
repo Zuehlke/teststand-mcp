@@ -58,9 +58,18 @@ public class TestStandToolRegistry
     {
         // Engine
         Register("connect_engine",
-            "Connect to the NI TestStand engine. Must be called before any other tool.",
+            "Connect to the NI TestStand engine. Must be called before any other tool. " +
+            "The engine itself is always the one TestStand has registered as ACTIVE (activation goes " +
+            "through the TestStand.Engine ProgID; switching versions is NI's version-selector's job). " +
+            "Use engine_path only as an escape hatch when the NI helper tools must come from a " +
+            "specific installation.",
             s => s.AddOptional("engine_path", "string",
-                "Optional path to TestStand engine DLL. Leave empty for default installation."),
+                "Optional override pinning WHICH TestStand installation's helper tools (FileDiffer.exe " +
+                "for diff_sequence_files, AnalyzerApp.exe for analyze_sequence_file) are launched. " +
+                @"Accepts the engine DLL (…\Bin\teapi.dll), the Bin directory, or the install root " +
+                @"(…\National Instruments\TestStand 2026). Leave empty to resolve automatically " +
+                "(engine Bin -> %TESTSTANDBIN% -> COM registration -> newest install). A path that " +
+                "does not exist is rejected with an error. Does NOT select which engine is loaded."),
             ConnectEngineAsync);
 
         Register("disconnect_engine",

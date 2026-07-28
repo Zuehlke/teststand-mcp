@@ -935,6 +935,9 @@ public sealed class TestStandService : ITestStandService
     private readonly ManualResetEventSlim _engineReady = new(false);
     private volatile bool _engineConnected;
     private Exception? _engineConnectError;
+    // Operator-supplied TestStand Bin directory (connect_engine's engine_path), normalised. Takes
+    // precedence over every automatic candidate when resolving the NI tools — see ResolveTestStandBin.
+    private string? _explicitBinDir;
     // Serializes lazy reconnects from EnsureConnected so two concurrent tool calls never start two
     // engine threads (a second live engine hangs teardown — see teststand-testhost-teardown-hang).
     private readonly object _connectLock = new();
@@ -990,6 +993,25 @@ public sealed class TestStandService : ITestStandService
     /// <inheritdoc/>
     public async Task<bool> ConnectAsync(string? enginePath = null)
     {
+        // An explicit engine_path pins the TestStand INSTALL whose NI tools (FileDiffer.exe,
+        // AnalyzerApp.exe) get launched — the manual escape hatch for a station where the automatic
+        // search picks the wrong one. It is applied even when already connected, so it can be set
+        // after the fact, and a bad path now FAILS LOUDLY instead of being silently dropped.
+        //
+        // It deliberately does NOT choose which engine COM activates: TestStand registers exactly one
+        // active Engine coclass and activation goes through its ProgID (see EngineThreadProc).
+        // Switching the active version is NI's version-selector's job, not ours.
+        if (!string.IsNullOrWhiteSpace(enginePath))
+        {
+            var binDir = TestStandInstallLocator.NormalizeBinDirectory(enginePath)
+                ?? throw new DirectoryNotFoundException(
+                    $"engine_path '{enginePath}' does not exist. Pass the TestStand engine DLL " +
+                    @"(…\Bin\teapi.dll), the Bin directory, or the install root — or omit it to use " +
+                    "the registered installation.");
+            _explicitBinDir = binDir;
+            _logger.LogInformation("engine_path override: NI tools will be resolved from '{Bin}'.", binDir);
+        }
+
         if (_engine != null) return true;
 
         _logger.LogInformation("Connecting to TestStand engine...");
@@ -1006,7 +1028,7 @@ public sealed class TestStandService : ITestStandService
         _engineConnected = false;
         _engineConnectError = null;
 
-        _engineThread = new Thread(() => EngineThreadProc(enginePath))
+        _engineThread = new Thread(EngineThreadProc)
         {
             IsBackground = true,
             Name = "TestStand-Engine",
@@ -1033,8 +1055,14 @@ public sealed class TestStandService : ITestStandService
     /// advances executions — and finally tear the engine down on the same thread. Pumping has to
     /// happen on the engine's creation thread; that is the only thread to which TestStand delivers
     /// execution-progress messages. See memory teststand-execution-needs-waitforendex-pump.
+    /// <para>
+    /// Activation always goes through the <c>TestStand.Engine</c> ProgID, i.e. the ONE engine
+    /// TestStand has registered as active — there is no supported way to activate a different
+    /// installation's engine in-process, so this takes no path argument. <c>connect_engine</c>'s
+    /// <c>engine_path</c> instead pins which install's NI TOOLS are launched (see ConnectAsync).
+    /// </para>
     /// </summary>
-    private void EngineThreadProc(string? enginePath)
+    private void EngineThreadProc()
     {
         try
         {
@@ -4009,8 +4037,8 @@ public sealed class TestStandService : ITestStandService
             }
 
             // Resolve Bin/Public dirs + version for the *connected* engine — no hard-coded release.
-            var (binDir, publicDir, productVersion) = ResolveAnalyzerLocations();
-            return RunAnalysisViaApp(filePath, binDir, publicDir, productVersion, Log, Flush);
+            var (binDir, publicDir, productVersion, probed) = ResolveAnalyzerLocations();
+            return RunAnalysisViaApp(filePath, binDir, publicDir, productVersion, probed, Log, Flush);
         });
     }
 
@@ -4019,6 +4047,7 @@ public sealed class TestStandService : ITestStandService
         string binDir,
         string publicDir,
         string productVersion,
+        string probed,
         Action<string> Log,
         Action Flush)
     {
@@ -4095,7 +4124,9 @@ public sealed class TestStandService : ITestStandService
 
         // ── 3. Run AnalyzerApp.exe ────────────────────────────────────────────
         if (!System.IO.File.Exists(analyzerExe))
-            throw new InvalidOperationException($"AnalyzerApp.exe not found at: {analyzerExe}");
+            throw new InvalidOperationException(
+                $"AnalyzerApp.exe not found at: {analyzerExe}." +
+                (string.IsNullOrEmpty(probed) ? "" : $" Probed: {probed}"));
 
         var psi = new System.Diagnostics.ProcessStartInfo
         {
@@ -4116,24 +4147,12 @@ public sealed class TestStandService : ITestStandService
         // environment, so we must guarantee the child has the system variables the analyzer + lvrt
         // depend on — independent of how TestStandMCP.exe itself was started.
         //
-        // psi.Environment is pre-seeded with this process's environment. Values are derived from the
-        // OS (NOT GetEnvironmentVariable, which returns null when a variable is missing in *this*
-        // process) and set/overwritten. ProgramFiles(x86) is mandatory; the rest harden common
-        // lvrt/Windows lookups. (UseShellExecute=false above is required for psi.Environment to apply.)
-        void Ensure(string key, string? value)
-        {
-            if (!string.IsNullOrEmpty(value)) psi.Environment[key] = value;
-        }
-        Ensure("ProgramFiles(x86)",       Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86));
-        Ensure("ProgramFiles",            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles));
-        Ensure("ProgramData",             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData));
-        Ensure("ALLUSERSPROFILE",         Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData));
-        Ensure("CommonProgramFiles",      Environment.GetFolderPath(Environment.SpecialFolder.CommonProgramFiles));
-        Ensure("CommonProgramFiles(x86)", Environment.GetFolderPath(Environment.SpecialFolder.CommonProgramFilesX86));
-        Ensure("ComSpec",                 Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe"));
-        Ensure("TMP",                     Path.GetTempPath());
-        Ensure("TEMP",                    Path.GetTempPath());
-        Ensure("NUMBER_OF_PROCESSORS",    Environment.ProcessorCount.ToString());
+        // psi.Environment is pre-seeded with this process's environment. ApplyTestStandToolChildEnv
+        // supplies every variable that is MISSING from it, derived from the OS (NOT from
+        // GetEnvironmentVariable, which returns null when a variable is absent in *this* process).
+        // ProgramFiles(x86) is mandatory; the rest harden common lvrt/Windows lookups.
+        // (UseShellExecute=false above is required for psi.Environment to apply.)
+        ApplyTestStandToolChildEnv(psi);
 
         Log($"Child env normalized — ProgramFiles(x86)=" +
             (psi.Environment.TryGetValue("ProgramFiles(x86)", out var pf86) && !string.IsNullOrEmpty(pf86)
@@ -4220,110 +4239,41 @@ public sealed class TestStandService : ITestStandService
     }
 
     /// <summary>
-    /// Resolves the TestStand <c>Bin</c> directory, the TestStand <c>Public</c> directory and the
-    /// product-version string for the *currently connected* engine, so the Sequence Analyzer always
-    /// runs the AnalyzerApp.exe matching the running TestStand — never a hard-coded release. Falls
-    /// back to the TESTSTANDBIN / TESTSTANDPUBLIC environment variables, then to a newest-first scan
-    /// of the National Instruments install root.
+    /// Resolves the TestStand <c>Public</c> directory and the product-version string for the
+    /// *currently connected* engine, plus the <c>Bin</c> directory holding AnalyzerApp.exe, so the
+    /// Sequence Analyzer always runs the build matching the running TestStand — never a hard-coded
+    /// release. <c>Probed</c> lists the candidates that were tried when the Bin lookup failed.
     /// </summary>
-    private (string BinDir, string PublicDir, string ProductVersion) ResolveAnalyzerLocations()
+    private (string BinDir, string PublicDir, string ProductVersion, string Probed) ResolveAnalyzerLocations()
     {
-        string binDir = "";
         string publicDir = "";
         string productVersion = "";
 
-        // 1. Ask the connected engine — this is the exact running version.
+        // Ask the connected engine — this is the exact running version.
         if (_engine != null)
         {
-            binDir = GetEngineProperty<string>("BinDirectory") ?? "";
             productVersion = GetEngineProperty<string>("VersionString") ?? "";
             try { publicDir = (string)((dynamic)_engine!).GetTestStandPath((object)4); } // 4 = TestStandPublic
             catch (Exception ex) { _logger.LogDebug(ex, "Engine GetTestStandPath(TestStandPublic) failed."); }
         }
 
-        // 2. Environment variables exported by the TestStand installer.
-        if (string.IsNullOrEmpty(binDir))
-            binDir = Environment.GetEnvironmentVariable("TESTSTANDBIN") ?? "";
+        // Environment variable exported by the TestStand installer.
         if (string.IsNullOrEmpty(publicDir))
             publicDir = Environment.GetEnvironmentVariable("TESTSTANDPUBLIC") ?? "";
 
-        // 3. COM registration of the Engine coclass — points at the actively registered engine's Bin.
-        if (string.IsNullOrEmpty(binDir) || !File.Exists(Path.Combine(binDir, "AnalyzerApp.exe")))
-        {
-            var fromReg = FindTestStandBinFromRegistry();
-            if (fromReg != null) binDir = fromReg;
-        }
-
-        // 4. Last resort: newest installed TestStand whose Bin holds AnalyzerApp.exe.
-        if (string.IsNullOrEmpty(binDir) || !File.Exists(Path.Combine(binDir, "AnalyzerApp.exe")))
-        {
-            var found = FindNewestTestStandBin();
-            if (found != null) binDir = found;
-        }
-
-        return (binDir, publicDir, productVersion);
+        var (binDir, probed) = ResolveTestStandBin("AnalyzerApp.exe");
+        return (binDir, publicDir, productVersion, probed);
     }
 
     /// <summary>
-    /// Scans the standard National Instruments install roots for the newest installed TestStand
-    /// whose <c>Bin</c> directory contains AnalyzerApp.exe. Returns null when none is found.
+    /// Resolves the TestStand <c>Bin</c> directory that actually CONTAINS <paramref name="requiredExe"/>,
+    /// preferring the connected engine's own Bin. See <see cref="TestStandInstallLocator"/> for the
+    /// full candidate order and the WOW64/registry-view traps it works around.
     /// </summary>
-    private static string? FindNewestTestStandBin()
+    private (string BinDir, string Probed) ResolveTestStandBin(string requiredExe)
     {
-        foreach (var pf in new[]
-        {
-            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
-            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
-        })
-        {
-            if (string.IsNullOrEmpty(pf)) continue;
-            var niDir = Path.Combine(pf, "National Instruments");
-            if (!Directory.Exists(niDir)) continue;
-            try
-            {
-                foreach (var dir in Directory.GetDirectories(niDir, "TestStand*")
-                             .OrderByDescending(d => d, StringComparer.OrdinalIgnoreCase))
-                {
-                    var bin = Path.Combine(dir, "Bin");
-                    if (File.Exists(Path.Combine(bin, "AnalyzerApp.exe"))) return bin;
-                }
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-            {
-                // Install root not enumerable on this station — try the next one.
-            }
-        }
-        return null;
-    }
-
-    /// <summary>
-    /// Reads the registered TestStand engine's Bin directory from the COM registration of the
-    /// Engine coclass (CLSID <c>{B2794EF6-C0B6-11D0-939C-0020AF68E893}</c>). Its
-    /// <c>InprocServer32</c> default value is the full path to the engine DLL, whose directory is
-    /// the TestStand Bin folder. Uses the 32-bit registry view because the TestStand engine is a
-    /// 32-bit (x86) COM server. Returns null when the key is missing or AnalyzerApp.exe is absent.
-    /// </summary>
-    private static string? FindTestStandBinFromRegistry()
-    {
-        const string engineInprocKey =
-            @"CLSID\{B2794EF6-C0B6-11D0-939C-0020AF68E893}\InprocServer32";
-        try
-        {
-            using var hkcr = RegistryKey.OpenBaseKey(RegistryHive.ClassesRoot, RegistryView.Registry32);
-            using var key = hkcr.OpenSubKey(engineInprocKey);
-            // (Default) value = full path to the engine DLL; strip any stray surrounding quotes.
-            var dllPath = (key?.GetValue(null) as string)?.Trim().Trim('"');
-            if (string.IsNullOrEmpty(dllPath)) return null;
-
-            var bin = Path.GetDirectoryName(dllPath);
-            if (!string.IsNullOrEmpty(bin) && File.Exists(Path.Combine(bin, "AnalyzerApp.exe")))
-                return bin;
-        }
-        catch (Exception)
-        {
-            // Registry not readable / key absent on this station — fall through to the directory scan.
-        }
-        return null;
+        string? engineBin = _engine != null ? GetEngineProperty<string>("BinDirectory") : null;
+        return TestStandInstallLocator.Resolve(requiredExe, engineBin, _explicitBinDir);
     }
 
     internal static List<AnalyzerMessage> ParseAnalyzerMessages(string projectXml, Action<string> Log,
@@ -9351,13 +9301,18 @@ public sealed class TestStandService : ITestStandService
             void Log(string msg) { diag.AppendLine(msg); }
             void Flush() { try { System.IO.File.WriteAllText(diagPath, diag.ToString()); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to write differ diagnostics."); } }
 
-            // FileDiffer.exe ships in the connected engine's Bin directory — never hard-code a release.
-            var (binDir, _, _) = ResolveAnalyzerLocations();
+            // FileDiffer.exe ships in the connected engine's Bin directory — never hard-code a
+            // release. Resolve on FileDiffer.exe ITSELF: an engine-only install carries the engine
+            // but not the differ, and probing for a different tool would either reject the correct
+            // Bin or hand back one that does not hold the differ at all.
+            var (binDir, probed) = ResolveTestStandBin("FileDiffer.exe");
             string differExe = !string.IsNullOrEmpty(binDir)
                 ? Path.Combine(binDir, "FileDiffer.exe")
                 : "FileDiffer.exe";
             if (!System.IO.File.Exists(differExe))
-                throw new InvalidOperationException($"FileDiffer.exe not found at: {differExe}");
+                throw new InvalidOperationException(
+                    $"FileDiffer.exe not found at: {differExe}." +
+                    (string.IsNullOrEmpty(probed) ? "" : $" Probed: {probed}"));
 
             string reportPath = Path.Combine(Path.GetTempPath(),
                 "ts_mcp_diff_" + Path.GetFileNameWithoutExtension(filePath1) + "_vs_"
@@ -9413,21 +9368,52 @@ public sealed class TestStandService : ITestStandService
     }
 
     /// <summary>
-    /// Normalises a child <see cref="System.Diagnostics.ProcessStartInfo"/> environment so 32-bit NI
-    /// tools (AnalyzerApp.exe, FileDiffer.exe) and the LabVIEW RTE they may load find the system
-    /// variables they require — notably ProgramFiles(x86), whose absence crashes lvrt.dll with
-    /// 0xC0000409. The MCP host can inherit a heavily reduced environment, so these are set from the
-    /// OS regardless of this process's own environment. Requires UseShellExecute=false.
+    /// Normalises a child <see cref="System.Diagnostics.ProcessStartInfo"/> environment so NI tools
+    /// (AnalyzerApp.exe, FileDiffer.exe) and the LabVIEW RTE they may load find the system variables
+    /// they require — notably ProgramFiles(x86), whose absence crashes lvrt.dll with 0xC0000409. The
+    /// MCP host can inherit a heavily reduced environment, so the values are derived from the OS
+    /// rather than from this process's own (possibly empty) variables.
+    /// Requires <c>UseShellExecute=false</c>.
+    /// <para>
+    /// <b>Fill, never overwrite.</b> This host is x86, so
+    /// <see cref="Environment.SpecialFolder.ProgramFiles"/> and
+    /// <see cref="Environment.SpecialFolder.CommonProgramFiles"/> are WOW64-redirected to the "(x86)"
+    /// paths. Writing those into the 64-bit variable NAMES is correct for a 32-bit child (which is
+    /// what Windows would hand it anyway) but wrong for a 64-bit one — and with an explicit
+    /// environment block Windows performs no redirection of its own to correct it. Since the tools
+    /// may legitimately resolve to a 64-bit install, an already-present value is therefore left
+    /// alone and only genuinely missing variables are supplied. <c>ProgramW6432</c> /
+    /// <c>CommonProgramW6432</c> name the 64-bit roots unambiguously in either bitness and are
+    /// passed through, as 64-bit-aware NI components read them.
+    /// </para>
     /// </summary>
-    private static void ApplyTestStandToolChildEnv(System.Diagnostics.ProcessStartInfo psi)
+    internal static void ApplyTestStandToolChildEnv(System.Diagnostics.ProcessStartInfo psi)
     {
-        void Ensure(string key, string? value) { if (!string.IsNullOrEmpty(value)) psi.Environment[key] = value; }
-        Ensure("ProgramFiles(x86)",       Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86));
+        // Supply only what the child does not already have — see the "fill, never overwrite" note.
+        void Ensure(string key, string? value)
+        {
+            if (string.IsNullOrEmpty(value)) return;
+            if (psi.Environment.TryGetValue(key, out var existing) && !string.IsNullOrEmpty(existing)) return;
+            psi.Environment[key] = value;
+        }
+
+        var pf86  = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+        var cpf86 = Environment.GetFolderPath(Environment.SpecialFolder.CommonProgramFilesX86);
+        // %ProgramW6432% / %CommonProgramW6432% are visible from WOW64 and always name the 64-bit
+        // roots; on a 32-bit-only Windows they are absent and the plain folders are the 64-bit ones.
+        var pf64  = Environment.GetEnvironmentVariable("ProgramW6432")
+                    ?? Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+        var cpf64 = Environment.GetEnvironmentVariable("CommonProgramW6432")
+                    ?? Environment.GetFolderPath(Environment.SpecialFolder.CommonProgramFiles);
+
+        Ensure("ProgramFiles(x86)",       pf86);
+        Ensure("CommonProgramFiles(x86)", cpf86);
+        Ensure("ProgramW6432",            pf64);
+        Ensure("CommonProgramW6432",      cpf64);
         Ensure("ProgramFiles",            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles));
+        Ensure("CommonProgramFiles",      Environment.GetFolderPath(Environment.SpecialFolder.CommonProgramFiles));
         Ensure("ProgramData",             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData));
         Ensure("ALLUSERSPROFILE",         Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData));
-        Ensure("CommonProgramFiles",      Environment.GetFolderPath(Environment.SpecialFolder.CommonProgramFiles));
-        Ensure("CommonProgramFiles(x86)", Environment.GetFolderPath(Environment.SpecialFolder.CommonProgramFilesX86));
         Ensure("ComSpec",                 Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe"));
         Ensure("TMP",                     Path.GetTempPath());
         Ensure("TEMP",                    Path.GetTempPath());
@@ -9484,7 +9470,9 @@ public sealed class TestStandService : ITestStandService
         }
         if (parts.Count > 0) psi.Environment["PATH"] = string.Join(";", parts);
 
-        // Belt-and-suspenders: guarantee the volatile standard folders even if a registry read failed.
+        // Belt-and-suspenders: supply the volatile standard folders (they are not in the registry's
+        // environment keys at all) for whatever is still missing. Fill-only, so the values merged
+        // from the registry above stay authoritative.
         ApplyTestStandToolChildEnv(psi);
     }
 
