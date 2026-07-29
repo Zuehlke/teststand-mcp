@@ -14,9 +14,9 @@ diff_sequence_files(orig, dest, summary_only=true) → verify
 ```
 
 Measured 2026-07-29 on 8 sequences of `TFW_MDC_com_Python.seq` (47 steps, 13 object-oriented Python
-steps, 5 LabVIEW `.lvlibp` steps, 1 cross-file SequenceCall): **3 MCP calls, 0 warnings, and exactly
-ONE FileDiffer difference** (the enum-default marker below). The same rebuild with the granular tools
-took ~700 calls, 3 diff iterations and left 224 differences.
+steps, 5 LabVIEW `.lvlibp` steps, 1 cross-file SequenceCall): **3 MCP calls and ZERO FileDiffer
+differences inside the imported scope** (the only rows left are the 22 sequences not imported). The same
+rebuild with the granular tools took ~700 calls, 3 diff iterations and left 224 differences.
 
 ### NEVER load a LabVIEW prototype to rebuild a pane — CLONE it (measured 2026-07-29)
 An earlier version of this file claimed an in-process `.lvlibp` pane load works in ~5 s and that the
@@ -47,10 +47,14 @@ isolated worker is the broken one. **Both halves are wrong, and following that a
   ONLY THEN steps, so every callee's parameters exist before a caller's prototype is loaded.
 - `warnings[]` names every item that could not be applied. A non-empty list means a partial import —
   read it, do not assume success from the counts.
-- **The defaults are the safe ones — do not "improve" them.** `labview_panes='copy'` and
-  `cross_file_prototypes='copy'` clone from the model's source file; `'load'` exists only for a model
-  with no source file to clone from and carries the process-death risk above. `keep_unused_types=true`
-  re-attaches types the save would drop. All three are locked down by tests in `T35`.
+- **The defaults are the safe ones — do not "improve" them.** `labview_panes='copy'`,
+  `cross_file_prototypes='copy'` and `variables='copy'` all clone from the model's source file;
+  `'load'` exists only for a model with no source file and carries the process-death risk above.
+  `keep_unused_types=true` re-attaches types the save would drop. All are locked down by tests in `T35`.
+- **`variables='model'` is for an EDITED model.** A clone takes the source file's variable state, so it
+  would silently discard changes you made to the model's variables. Use `'model'` then and accept the
+  enum-default marker below. Anything that cannot be cloned falls back to the model automatically and is
+  named in `warnings`.
 - **The outcome is ALSO written to `<dest>.import.json`.** An import can outlive the ~60 s MCP transport
   window (measured 5.5 min before the passes were made cheap); a `-32001` timeout does NOT abort it —
   the server finishes and saves. Read that file for the counts and warnings instead of re-running.
@@ -86,15 +90,22 @@ The worker route for the cross-file cache is also not a real option: it must sta
 open every callee file, and one 3 MB callee (`Easy.Log.seq`) ran it into a 300 s timeout and produced
 nothing. `cross_file_prototypes='copy'` reproduced the same 6 `Prototype` members in about a second.
 
-### Residuals after export/import (the only one left)
-- **1× a named-type instance's ENUM member reads as explicitly-set.** Both instantiation routes
-  (`NewSubProperty(NamedType)` and `Engine.NewPropertyObject`+`SetPropertyObject`) produce `[val]`
-  where the editor produces `{val}`. API limitation, cosmetic. On the reference subset this is the
-  ONLY difference (`_MDC_com > Locals > LogEntry > LogLevel`).
-- CLOSED since 2026-07-29: the cross-file `Prototype` cache (now cloned), the LabVIEW connector panes
-  (now cloned), and a step's authored `TS.AdditionalResultsHints` / `CustomResults` — import pass 6b
-  clones those for EVERY step, so the `NI_Wait` residual is gone and `copy_step_module` is no longer
-  needed by hand for them.
+### Residuals after export/import: NONE (2026-07-29)
+The reference subset (8 sequences, 47 steps, 13 OO-Python, 5 `.lvlibp`, 1 cross-file call) diffs
+**0 differences inside the imported scope** — the only rows left are the 22 sequences deliberately not
+imported. All of these are CLOSED, each by the same mechanism (clone from the source file, never a load):
+- the LabVIEW connector panes (pass 5), the cross-file `Prototype` cache (pass 7), and a step's authored
+  `TS.AdditionalResultsHints` / `CustomResults` / `ErrorDialogOptions` for EVERY step (pass 6b).
+- **A named-type instance's ENUM member reading as explicitly-set** — long recorded here as an
+  irreducible API limitation, which it is NOT. Instantiating the type (`insert_local_variable
+  dataType:"LogEvent"`) materialises the member with its default enumerator NAME written out, so the
+  member reads `[Debug]` where the editor-authored original has `{Debug}` (verified via
+  `get_property_tree`: `symbolicName:"Debug", isDefault:false` vs `symbolicName:"", isDefault:true`).
+  Not writing the value does not help — the import already skips it (`isDefault:true` in the model, and
+  `WriteEnumLeafExplicit` returns early on null ordinal+value). `variables='copy'` clones the variable
+  instead and reproduces the state exactly.
+- Types are unaffected: `copy_typedefs` reproduces every type correctly (0 `types` differences); what
+  the declarative route lost was the type INSTANCE, not the type.
 - **`NI.Analyzer.IgnoredMessages`** is invisible to the engine API (see below), so the rebuild shows a
   few extra analyzer warnings the original suppresses.
 

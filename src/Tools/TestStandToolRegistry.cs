@@ -1775,7 +1775,9 @@ public class TestStandToolRegistry
             "LabVIEW connector panes; (6) the SequenceCall and Python modules; (7) the cross-file " +
             "SequenceCall prototype caches; (8) re-attach any type the save dropped. Steps are " +
             "addressed by group index, so duplicate step names (several 'End'/'If') are unambiguous. " +
-            "NO LABVIEW IS TOUCHED BY DEFAULT. Both fidelity passes that would need a real prototype " +
+            "CLONING FROM THE SOURCE FILE IS THE DEFAULT wherever the declarative route loses state — " +
+            "the connector panes, the cross-file prototype caches and the variables (see 'variables'). " +
+            "NO LABVIEW IS TOUCHED BY DEFAULT: both fidelity passes that would need a real prototype " +
             "load default to CLONING the cached module subtree out of the model's source file instead " +
             "(labview_panes / cross_file_prototypes = 'copy'), because the load is process-fatal: an " +
             "in-process load of a packed-library VI raises the native delay-load fault 0xC06D007E, " +
@@ -1783,9 +1785,10 @@ public class TestStandToolRegistry
             "cannot bind the running LabVIEW and only times out. The clone reproduces the panes " +
             "(Parms with their ArgVal/UseDefaultValues bindings, namespace, VI description, checksum) " +
             "and the Prototype cache exactly, in about a second per step. " +
-            "Returns {sequencesCreated, stepsInserted, variablesCreated, modulesConfigured, " +
-            "panesCopied, crossFilePrototypesCopied, typeDefsCopied, typeDefsForceAttached, " +
-            "typeDefsMissing, labViewPaneMode, crossFilePrototypeMode, outcomePath, warnings[]} — " +
+            "Returns {sequencesCreated, stepsInserted, variablesCreated, variablesCopied, " +
+            "modulesConfigured, panesCopied, crossFilePrototypesCopied, typeDefsCopied, " +
+            "typeDefsForceAttached, typeDefsMissing, variableMode, labViewPaneMode, " +
+            "crossFilePrototypeMode, outcomePath, warnings[]} — " +
             "every item that could not be applied is named in 'warnings' with its sequence/step, so a " +
             "partial import is visible instead of silently incomplete. The same object is ALSO written " +
             "to '<dest>.import.json' (outcomePath), so if the call exceeds the ~60s MCP transport " +
@@ -1819,6 +1822,18 @@ public class TestStandToolRegistry
                     "measured: one 3 MB callee ran it into a 300 s timeout and produced nothing. 'skip' " +
                     "leaves the cache empty; the calls still work.",
                     "copy", new[] { "copy", "load", "skip" })
+                .AddOptional("variables", "string",
+                    "How file globals, parameters and locals are reproduced. 'copy' (DEFAULT) clones each " +
+                    "one from the model's source file, which is the only way to reproduce a type " +
+                    "instance's member that has NO value of its own — instantiating a named type " +
+                    "materialises the member with its default WRITTEN OUT, so the FileDiffer reports " +
+                    "[Debug] where the editor-authored original has {Debug}. 'model' rebuilds them " +
+                    "declaratively from the model's own description: use it when you EDITED the model's " +
+                    "variables, because a clone takes the source file's state and would silently discard " +
+                    "your edits. Falls back to 'model' (with a warning) when the source file is gone. " +
+                    "Either way a variable that cannot be cloned is rebuilt from the model and named in " +
+                    "'warnings'.",
+                    "copy", new[] { "copy", "model" })
                 .AddOptional("keep_unused_types", "boolean",
                     "Re-copy ATTACHED any model type that the save dropped (default true). A type " +
                     "survives only if it is attached or still referenced, so importing a SUBSET of the " +
@@ -5078,7 +5093,8 @@ public class TestStandToolRegistry
             paneMode,
             args!.Value.GetIntOrDefault("prototype_timeout_seconds", 120),
             args!.Value.GetStringOrDefault("cross_file_prototypes", "copy"),
-            args!.Value.GetBoolOrDefault("keep_unused_types", true));
+            args!.Value.GetBoolOrDefault("keep_unused_types", true),
+            args!.Value.GetStringOrDefault("variables", "copy"));
         return OkJson(outcome);
     }
 

@@ -336,6 +336,14 @@ public class ImportOutcome
     public int TypeDefsForceAttached { get; set; }
     /// <summary>Types from the model that are still absent from the destination after the rescue.</summary>
     public int TypeDefsMissing { get; set; }
+    /// <summary>Variables (file globals + parameters + locals) reproduced by CLONING them from the
+    /// model's source file (<c>variables='copy'</c>, the default). The declarative route cannot
+    /// reproduce a type instance's member that has NO value of its own: instantiating the named type
+    /// materialises the member with its default written out, which the FileDiffer reports as
+    /// explicitly-set. A clone carries that state verbatim.</summary>
+    public int VariablesCopied { get; set; }
+    /// <summary>Which route reproduced the variables: copy / model.</summary>
+    public string? VariableMode { get; set; }
     /// <summary>Which route reproduced the LabVIEW connector panes: copy / load / skip.</summary>
     public string? LabViewPaneMode { get; set; }
     /// <summary>Which route reproduced the cross-file prototype caches: copy / load / skip.</summary>

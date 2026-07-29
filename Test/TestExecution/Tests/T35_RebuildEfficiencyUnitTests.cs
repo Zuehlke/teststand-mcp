@@ -452,6 +452,21 @@ public class T35_RebuildEfficiencyUnitTests
     }
 
     [Test]
+    public void ImportSchema_Variables_DefaultToBeingClonedFromTheSourceFile()
+    {
+        // Rebuilding a variable declaratively cannot reproduce a type instance's member that has NO
+        // value of its own: instantiating the named type materialises the member with its default
+        // written out, which TestStand counts as explicitly set (FileDiffer [Debug] vs {Debug}). Only a
+        // flag-preserving clone carries that state, so 'copy' has to stay the default.
+        var prop = ImportSchema().GetProperty("variables");
+
+        Assert.That(prop.GetProperty("default").GetString(), Is.EqualTo("copy"));
+
+        var allowed = prop.GetProperty("enum").EnumerateArray().Select(e => e.GetString()).ToList();
+        Assert.That(allowed, Is.EquivalentTo(new[] { "copy", "model" }));
+    }
+
+    [Test]
     public void ImportSchema_KeepUnusedTypes_DefaultsToKeeping()
     {
         // A type survives a save only if it is attached or still referenced, so importing a SUBSET of

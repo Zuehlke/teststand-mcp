@@ -294,7 +294,7 @@ public interface ITestStandService : IDisposable
     Task<ImportOutcome> ImportSequenceFileAsync(SequenceFileModel model, string destFilePath,
         bool copyTypeDefs = true, bool save = true, string labViewPanes = "copy",
         int prototypeTimeoutSeconds = 120, string crossFilePrototypes = "copy",
-        bool keepUnusedTypes = true);
+        bool keepUnusedTypes = true, string variables = "copy");
 
     // Sequence Analyzer
     /// <summary>Runs the TestStand Sequence Analyzer on the given file and returns any messages.</summary>
@@ -14315,7 +14315,8 @@ public sealed class TestStandService : ITestStandService
     public async Task<ImportOutcome> ImportSequenceFileAsync(SequenceFileModel model,
         string destFilePath, bool copyTypeDefs = true, bool save = true,
         string labViewPanes = "copy", int prototypeTimeoutSeconds = 120,
-        string crossFilePrototypes = "copy", bool keepUnusedTypes = true)
+        string crossFilePrototypes = "copy", bool keepUnusedTypes = true,
+        string variables = "copy")
     {
         EnsureConnected();
         var outcome = new ImportOutcome();
@@ -14329,9 +14330,19 @@ public sealed class TestStandService : ITestStandService
         // source file, so resolve it once and downgrade the modes that depend on it.
         string paneMode  = NormalizeModuleMode(labViewPanes,        nameof(labViewPanes));
         string protoMode = NormalizeModuleMode(crossFilePrototypes, nameof(crossFilePrototypes));
+        string varMode   = NormalizeVariableMode(variables);
         string? sourcePath = FirstExistingPath(model.SourcePath, model.TypeDefsSourcePath);
         if (sourcePath is null)
         {
+            if (varMode == "copy")
+            {
+                varMode = "model";
+                outcome.Warnings.Add(
+                    "variables='copy' needs the file the model was exported from — falling back to " +
+                    "'model'. Variables are rebuilt declaratively, which cannot reproduce a type " +
+                    "instance's member that has NO value of its own (the FileDiffer shows [val] where " +
+                    "the original has {val}).");
+            }
             if (paneMode == "copy")
             {
                 paneMode = "skip";
@@ -14353,6 +14364,7 @@ public sealed class TestStandService : ITestStandService
         }
         outcome.LabViewPaneMode        = paneMode;
         outcome.CrossFilePrototypeMode = protoMode;
+        outcome.VariableMode           = varMode;
 
         // 1) Types first — cloned sequences, typed locals and enum members all resolve against them.
         if (copyTypeDefs && !string.IsNullOrWhiteSpace(model.TypeDefsSourcePath))
@@ -14378,7 +14390,15 @@ public sealed class TestStandService : ITestStandService
             try { await SetFilePropertiesAsync(destFilePath, model.File.Comment, model.File.Version); }
             catch (Exception ex) { outcome.Warnings.Add($"file properties: {ex.Message}"); }
         }
-        foreach (var g in model.FileGlobals)
+        var globalsFromModel = model.FileGlobals;
+        if (varMode == "copy")
+        {
+            var cloned = await CloneVariablesAsync(sourcePath!, destFilePath, "FileGlobals", null,
+                model.FileGlobals, outcome);
+            outcome.VariablesCopied += cloned.Count;
+            globalsFromModel = model.FileGlobals.FindAll(g => !cloned.Contains(g.Name));
+        }
+        foreach (var g in globalsFromModel)
         {
             try
             {
@@ -14428,8 +14448,21 @@ public sealed class TestStandService : ITestStandService
             }
 
             // Parameters BEFORE steps: a SequenceCall's prototype load reads the callee's parameters,
-            // so the interface has to exist before any caller is configured.
-            foreach (var p in seq.Parameters)
+            // so the interface has to exist before any caller is configured. The clone runs at exactly
+            // this point for the same reason.
+            var paramsFromModel = seq.Parameters;
+            var localsFromModel = seq.Locals;
+            if (varMode == "copy")
+            {
+                var clonedP = await CloneVariablesAsync(sourcePath!, destFilePath, "Parameters",
+                    seq.Name, seq.Parameters, outcome);
+                var clonedL = await CloneVariablesAsync(sourcePath!, destFilePath, "Locals",
+                    seq.Name, seq.Locals, outcome);
+                outcome.VariablesCopied += clonedP.Count + clonedL.Count;
+                paramsFromModel = seq.Parameters.FindAll(p => !clonedP.Contains(p.Name));
+                localsFromModel = seq.Locals.FindAll(l => !clonedL.Contains(l.Name));
+            }
+            foreach (var p in paramsFromModel)
             {
                 try
                 {
@@ -14444,7 +14477,7 @@ public sealed class TestStandService : ITestStandService
                 }
                 catch (Exception ex) { outcome.Warnings.Add($"parameter '{seq.Name}.{p.Name}': {ex.Message}"); }
             }
-            foreach (var l in seq.Locals)
+            foreach (var l in localsFromModel)
             {
                 try
                 {
@@ -14844,12 +14877,96 @@ public sealed class TestStandService : ITestStandService
         };
     }
 
+    /// <summary>Validates the variable-reproduction mode: 'copy' clones each variable from the model's
+    /// source file, 'model' rebuilds it declaratively from the model's own description.</summary>
+    private static string NormalizeVariableMode(string? mode)
+    {
+        string m = (mode ?? "copy").Trim().ToLowerInvariant();
+        return m switch
+        {
+            "copy" or "model" => m,
+            "" => "copy",
+            _ => throw new ArgumentException(
+                $"variables must be 'copy' or 'model' (got '{mode}').", nameof(mode)),
+        };
+    }
+
     /// <summary>First of the candidate paths that exists on disk, or null.</summary>
     private static string? FirstExistingPath(params string?[] candidates)
     {
         foreach (var c in candidates)
             if (!string.IsNullOrWhiteSpace(c) && System.IO.File.Exists(c)) return c;
         return null;
+    }
+
+    // CLONES top-level variables from the model's source file into the destination, one per name, into
+    // the very container insert_local_variable/_parameter/_file_global would write to. Returns the names
+    // that actually made it, so the caller can fall back to the declarative path for the rest.
+    //
+    // WHY: the declarative path cannot reproduce "this member has no value of its own". Instantiating a
+    // named type (insert_local_variable dataType:"LogEvent") materialises its members, and an ENUM member
+    // comes out with its default enumerator NAME written — which TestStand counts as explicitly set, so
+    // the FileDiffer shows `[Debug]` where the editor-authored original has `{Debug}`. The import already
+    // avoids WRITING that value (the model records isDefault:true and it is skipped); the marker comes
+    // from the instantiation itself, so no amount of not-writing fixes it. A flag-preserving Clone carries
+    // the state verbatim instead — the same mechanism that reproduces the LabVIEW panes exactly.
+    //
+    // Per-variable rather than replacing the whole Locals/Parameters container: that keeps the
+    // engine-created ResultList untouched and reproduces the model's ORDER, since SetPropertyObject with
+    // InsertIfMissing appends in call order. Requires the types to exist already (pass 1).
+    private async Task<HashSet<string>> CloneVariablesAsync(string sourceFilePath, string destFilePath,
+        string scope, string? sequenceName, List<VarModel> vars, ImportOutcome outcome)
+    {
+        var done = new HashSet<string>(StringComparer.Ordinal);
+        if (vars.Count == 0) return done;
+
+        return await Task.Run(() =>
+        {
+            dynamic srcSf = GetOrLoadSeqFile(sourceFilePath);
+            dynamic dstSf = GetOrLoadSeqFile(destFilePath);
+            NiPropertyObject srcRoot, dstRoot;
+            try
+            {
+                srcRoot = ResolveScopeRoot(srcSf, scope, sequenceName);
+                dstRoot = ResolveScopeRoot(dstSf, scope, sequenceName);
+            }
+            catch (Exception ex)
+            {
+                outcome.Warnings.Add(
+                    $"variables='copy': could not resolve {scope}" +
+                    (sequenceName is null ? "" : $" of '{sequenceName}'") +
+                    $": {ex.Message}. Falling back to rebuilding them from the model.");
+                return done;
+            }
+
+            foreach (var v in vars)
+            {
+                if (string.IsNullOrWhiteSpace(v.Name)) continue;
+                try
+                {
+                    // A live source object still has a parent and SetPropertyObject rejects it, so clone
+                    // first (PropOption_CopyAllFlags = detached, flag-preserving deep copy).
+                    NiPropertyObject clone = (NiPropertyObject)(object)srcRoot.Clone(
+                        v.Name, 0x20000000 /* PropOption_CopyAllFlags */);
+                    dstRoot.SetPropertyObject(v.Name, PropOption_InsertIfMissing, clone);
+                    // Mirror the node's own PropFlags (e.g. 0x4 PassByReference on a parameter) in case
+                    // the container flag differs from what CopyAllFlags carried on the leaf.
+                    try { dstRoot.SetFlags(v.Name, 0, srcRoot.GetFlags(v.Name, 0)); }
+                    catch (Exception ex)
+                    { _logger.LogDebug(ex, "Flag mirror skipped for '{Scope}.{Name}'.", scope, v.Name); }
+                    done.Add(v.Name);
+                }
+                catch (Exception ex)
+                {
+                    outcome.Warnings.Add(
+                        $"variables='copy': {scope}" +
+                        (sequenceName is null ? "" : $" of '{sequenceName}'") +
+                        $" variable '{v.Name}' could not be cloned ({ex.Message}); rebuilt from the model " +
+                        "instead.");
+                }
+            }
+            return done;
+        });
     }
 
     // Writes a variable's value/flags/representation and recurses into its members. The top-level
