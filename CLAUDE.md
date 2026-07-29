@@ -1,6 +1,73 @@
 # TestStandMCP — Behavior Rules for Claude
 
-## Rebuilding a .seq 1:1 (whole-sequence clone) — the FAST, canonical path
+## Rebuilding a .seq 1:1 — `export_sequence_file` + `import_sequence_file` FIRST
+
+For a whole-file reproduction, migration or bulk edit, use the export/import pair. It is the
+**default** path; the granular tools are for surgical single edits.
+
+```
+export_sequence_file(file_path)                    → writes <file>.model.json, returns a summary
+create_sequence_file(dest)
+import_sequence_file(model_path, dest_file_path)   → rebuilds everything, returns counts + warnings[]
+delete_sequence(dest, "MainSequence")              → the model has none
+diff_sequence_files(orig, dest, summary_only=true) → verify
+```
+
+Measured on `TFW_MDC_com_Python.seq` (30 sequences, 131 steps, 13 object-oriented Python steps,
+8 LabVIEW `.lvlibp` steps): **9 MCP calls, 0 import warnings, 9 FileDiffer differences — and ZERO in
+the LabVIEW connector panes.** The same rebuild done with the granular tools took ~700 calls, 3 diff
+iterations and left 224 differences.
+
+**The `.lvlibp` connector pane IS reproducible headless — it is NOT an irreducible residual.** Getting
+there depends on three ordering rules that are easy to get wrong (all measured on this file):
+1. **A SequenceCall `LoadPrototype` disables LabVIEW VI loads for the REST OF THE PROCESS.** After one
+   such load, every LabVIEW pane load fails with "could not resolve the target/module"; the identical
+   call in a process that has not done one succeeds in ~5 s. So: load ALL VI panes BEFORE configuring
+   any SequenceCall. `import_sequence_file` does this in separate passes.
+2. **The VI load must run IN-PROCESS (`isolate:false`).** The crash-isolated worker is a separate
+   process that does not inherit the attachment to the running LabVIEW ADE, tries to start its own and
+   times out every time — 8 steps × 120 s, all failed, while in-process takes ~5 s per step.
+3. **The step must be SAVED to disk before the load** (the worker path reads from disk; a load after a
+   run of `save:false` edits reports the step as out of range, which reads like an unloadable VI).
+
+- The model is written to DISK, not returned inline (a 30-sequence model is ~350 KB) — pass the path
+  straight to import. `inline=true` only for a single sequence.
+- The model round-trips: file comment/version, every type WITH its attach state, file globals, and per
+  sequence its description/result-recording, parameters, locals (nested members, enum ordinal +
+  symbolic name + default state, PropFlags, numeric representation/format, comments) and all steps
+  with their properties and complete module configuration.
+- Import order is fixed and matters: types → file globals → ALL sequences with their interfaces →
+  ONLY THEN steps, so every callee's parameters exist before a caller's prototype is loaded.
+- `warnings[]` names every item that could not be applied. A non-empty list means a partial import —
+  read it, do not assume success from the counts.
+
+**Reading a big diff:** always start `diff_sequence_files(..., summary_only=true)`. Every response
+carries `byCategory` / `byChangeType` / `bySequence` over ALL differences; the individual rows are the
+expensive part (600+ of them blows the tool-result budget). Then drill in with `include_categories` /
+`exclude_categories` / `path_filter` / `change_types` / `max_results` and
+`group_by='category'|'sequence'`. `exclude_categories=['labview_vicall']` hides the block that cannot
+be reproduced headlessly at all.
+
+**Connector-pane BINDINGS need their own writer.** `set_module_parameter` always clears a control's
+`UseDefaultValues` as a side effect, so binding every parameter through it flips that flag wherever the
+source keeps the VI's own default (a remembered expression next to "use default" — the same asymmetry as
+a SequenceCall argument's `UseDef`). Measured: 31 differences became 68 (write everything), 41
+(non-empty only), 39 (flag-aware) — while writing `ViCall.Parms[i].ArgVal` and `UseDefaultValues`
+INDEPENDENTLY gave 9. For 1:1 work set those two properties directly, not via `set_module_parameter`.
+
+### Residuals after export/import (the only ones left; 9 on the reference file)
+- **1× a named-type instance's ENUM member reads as explicitly-set.** Both instantiation routes
+  (`NewSubProperty(NamedType)` and `Engine.NewPropertyObject`+`SetPropertyObject`) produce `[val]`
+  where the editor produces `{val}`. API limitation, cosmetic.
+- **6× a cross-file SequenceCall's cached `Prototype`** keeps the callee's parameter DEFAULTS
+  (`LogProperty {""}`); a prototype load recreates the names but not the values, and preloading the
+  callee file does not change it.
+- **2× a step's authored `TS.AdditionalResultsHints` / `CustomResults` arrays** are not part of the
+  model; use `copy_step_module` when they matter.
+- **`NI.Analyzer.IgnoredMessages`** is invisible to the engine API (see below), so the rebuild shows a
+  few extra analyzer warnings the original suppresses.
+
+## Rebuilding a .seq 1:1 (whole-sequence clone) — the older per-sequence path
 
 To reproduce an existing sequence file (a "rebuild"), prefer the **whole-sequence
 clone** over the per-step insert+configure dance. `duplicate_sequence` deep-clones a
@@ -206,6 +273,55 @@ one another instead of rendering them as siblings.
 
 ---
 
+## Rebuild-efficiency batch (2026-07-29) — behaviour changes to know
+
+Driven by the ~700-call rebuild above. See memory `teststand-rebuild-efficiency-batch-2026-07-29`.
+
+- **`copy_typedefs` now PRESERVES the source's attach state** (`attach='preserve'` is the new DEFAULT;
+  `'all'` is the old behaviour, `'none'` attaches nothing). It used to attach all 59 types where the
+  original embeds 7 — a guaranteed diff and a forced restart of the rebuild.
+- **Enum writes always land as EXPLICITLY SET (`[val]`).** `set_property_value` / `set_property_node` /
+  `create_step_property` resolve an ordinal to its enumerator NAME first — file type list → engine-wide
+  → read back off the property itself — because ONLY the by-name write clears TestStand's type-default
+  flag. Previously an ordinal write silently produced `{val}` whenever the enum type was not yet in the
+  target file's TypeUsageList (41 spurious diffs in one rebuild).
+- **Conversely: do NOT write a value the original leaves at its type default.** `get_property_tree` now
+  reports `isDefault` per enum leaf (derived from the symbolic name reading back EMPTY). Writing a
+  default-valued member — even a redundant `flags=0` write on a type instance — flips `{val}`→`[val]`.
+- **`configure_python_module` is complete.** It now also sets `class_name`,
+  `class_instance_location`, `operation_type`/`operation_scope`, `python_version`,
+  `virtual_env_path`, `use_adapter_interpreter_settings` and the whole `parameters[]` argument list
+  ({name, type, value}) in ONE call. Object-oriented Python steps were previously unreachable
+  (~15 `set_step_property` calls each). NOTE: the analyzer's "Python version cannot be empty" ERROR is
+  about the STATION's Python Adapter configuration, not this step property — it is present on the
+  original file too.
+- **`configure_sequence_call_module` writes the retained `SData.SFPath`** (defaults to the current
+  file's own name) AFTER the prototype load, which blanks it. `stored_file_path` reproduces a STALE
+  path — real files carry paths from before a rename.
+- **Numeric REPRESENTATION and format are settable**: `representation` (`float64`/`int64`/`uint64`) and
+  `number_format` (e.g. `%#.4x`) on `insert_local_variable`, `insert_sequence_parameter` and
+  `set_property_node`; `0x…` literals accepted. This is functional, not cosmetic — a Float64 parameter
+  fed a UInt64 argument is a hard `NI_ExpressionEvaluationError`. Wide integers are also READABLE now
+  (they used to surface as `Empty` because `GetValNumber` rejects them).
+- **`delete_step_property`** removes a step subproperty by dotted path (e.g. one surplus
+  `TS.SData.ActualArgs.<name>`). **`set_step_property_flags`/`set_property_node` take `exact`/
+  `clear_flags`** to ASSIGN a bitfield instead of OR-ing. (`SetFlags` does in fact replace — the older
+  "OR-only" note was wrong.)
+- **A `SequenceArgument` keeps its state in SUBPROPERTIES** — `UseDef`, `Expr`, `ParamType`,
+  `ParamRepresentation` and its own `Flags` NUMBER (what the FileDiffer shows as the argument's
+  "Flags"; NOT the entry's PropFlags). `UseDef` is independent of `Expr`: the editor keeps a remembered
+  expression while still using the default. A prototype load overwrites `Flags`/`ParamRepresentation`
+  from the callee and renames entries after the callee's CURRENT parameters, so import rebuilds the
+  whole list in order rather than patching it (argument ORDER is compared positionally).
+- **Bulk writers**: `insert_sequences_bulk`, `insert_variables_bulk`, `set_property_nodes`,
+  `set_module_parameters` — one call, one save, applied in array order.
+- **`get_property_tree` addresses a sequence/step BY NAME** (`sequence_name` / `step_group` /
+  `step_name`); the raw path is `Data.Seq[i].Main[j]` and there is no `Sequences` node.
+- **`get_module_parameters` reads Python arguments** (`TS.SData.PythonCall.Parameters`); it returned
+  `[]` for every Python step before.
+- **Reminder:** new tool NAMES and new enum values/optional params need a FRESH MCP session — the
+  client caches the tool catalog at session start.
+
 ## General Conventions
 
 - **Sequence file for tests:** Always use `DemoTestsequenz.seq`
@@ -282,26 +398,38 @@ descriptions; the cross-cutting rules below apply regardless of which tool you c
 - **Undo/redo is not auto-recorded** by the headless API (it's a Sequence Editor
   feature). `CanUndo` is false on a fresh file; MCP edits won't be undoable. Revert by
   performing the inverse operation explicitly. (`T08`.)
-- **LabVIEW `ViCall` prototypes don't materialize headless.** A step's VI is in a `.lvlibp`
-  that can't load without LabVIEW, so the connector-pane (`ViCall.Parms`) stays empty, Namespace/
-  VI Description/Connector-Pane-Checksum are blank/`-1`, and `set_module_parameter` cannot bind
-  (nothing to match by Label). Expected — configure the VI path via `configure_labview_module`
-  and accept the empty prototype.
+- **LabVIEW `ViCall` prototypes DO materialize headless — this entry used to say the opposite and
+  that was wrong (2026-07-29).** A `.lvlibp` VI's connector pane loads via `load_module_prototype`
+  when three conditions hold: the step is SAVED to disk, the load runs `isolate:false` (in-process,
+  ExecServer-routed), and no SequenceCall prototype load has happened in this process yet (see the
+  rebuild section at the top for the measurements). Only then does `set_module_parameter` have
+  Labels to bind. What genuinely does NOT work is `configure_labview_module`'s built-in auto-load:
+  it goes in-process through the adapter's AutoDetect → LabVIEW Run-Time and faults, so pass
+  `load_prototype:false` there and call `load_module_prototype` afterwards.
 - **The engine connection auto-reconnects.** If the MCP host restarts the server mid-session,
   `EnsureConnected` does a one-shot lazy reconnect (default engine path) before failing; mutating
   tools also auto-load their file on demand. So a transient "Not connected" self-heals on the next
   call — no manual `connect_engine` needed (though it's still harmless).
 
 ### 1:1 file rebuild fidelity ceilings (`T33`; see memory `teststand-1to1-rebuild-fidelity`)
-- **FileDiffer `[val]` vs `{val}`** = an explicitly-set value vs the type-default flag. Enum
-  defaults written via the tools show `{val}`; editor-authored originals show `[val]` — so they
-  still diff even when the numeric value is IDENTICAL. Treat as cosmetic.
+**MOSTLY SUPERSEDED (2026-07-29).** These were the ceilings of the granular per-step approach. Use
+`export_sequence_file` + `import_sequence_file` (top of this file) — 9 differences on the reference
+file — and read the notes below only when hand-editing.
+- **FileDiffer `[val]` vs `{val}`** = an explicitly-set value vs the type-default flag. NO LONGER a
+  ceiling: every enum write now resolves the ordinal to its enumerator NAME, which is what stores it
+  explicitly. The inverse is the live hazard — writing a value the original leaves at its type default
+  flips `{val}`→`[val]`. `get_property_tree` reports `isDefault` per enum leaf so you can tell.
 - **Duplicate step names** (multiple `End`/`If`/`Check…`): the by-name step-config tools hit the
-  FIRST match only. To configure the 2nd+ occurrence, temporarily give it a unique name, configure,
-  then `rename_step` back (rename allows a duplicate target name).
-- **Not tool-reachable (accept as residual):** number Representation (UInt64) / NumberFormat,
-  PropFlags on Locals/Globals/Params members, a Parameter's default value / comment / nested
-  container members, and embedding unused type definitions.
+  FIRST match only. Use the `Name#N` (Nth occurrence) or `@idx:N` (0-based group index) selectors —
+  the rename-and-rename-back dance this used to prescribe is no longer needed.
+- **CLOSED, no longer residuals:** number Representation (UInt64) / NumberFormat (now on
+  `insert_local_variable` / `insert_sequence_parameter` / `set_property_node`, and readable);
+  PropFlags on Locals/Globals/Params members (`set_property_node` `flags` + `clear_flags`);
+  a Parameter's default value (`set_property_node` scope=`Parameters`), its comment
+  (`set_parameter_comment`) and its nested container members.
+- **Still a ceiling:** embedding an UNUSED type definition, a cross-file SequenceCall's cached
+  `Prototype` parameter defaults, a step's authored `TS.AdditionalResultsHints` /`CustomResults`
+  arrays (use `copy_step_module`), and the enum default marker on a named-type instance's member.
 
 ### Live thread-context inspection (runtime debugging)
 Reading a **running/paused** thread's RUNTIME state (live variable values, the RunState
@@ -436,14 +564,19 @@ max+1. (`T22`.)
     `Initialize()`, restored afterward. Configurable via **`labview_server`**: `deferred` (default,
     running ADE launched on first use), `exec` (connect now), `rte` (legacy AutoDetect), `auto` (leave
     config untouched).
-  - **Crash-safe worker is the DEFAULT (`isolate:true`) and can now bind LabVIEW too.** ExecServer uses
-    **ActiveX, which works CROSS-PROCESS**, so the isolated worker (`--load-prototype-worker` child, own
-    engine) attaches to the running LabVIEW just like an in-process load — giving **crash-safety AND a
-    real load together**. A process-fatal native fault (`0xC06D007E`, escapes managed `try/catch`) kills
-    only the worker → the tool returns cleanly (`prototypeLoaded:false`, `executionMode:"worker"`,
-    `workerOutcome:"crashed"`/`"timeout"`), server lives. `isolate:false` runs in-process (also
-    ExecServer-routed, faster, but a native fault is NOT contained). For a genuinely unloadable `.lvlibp`,
-    `copy_step_module` remains the headless fallback.
+  - **The isolated worker is the DEFAULT (`isolate:true`) but CANNOT actually load a LabVIEW VI —
+    pass `isolate:false` for LabVIEW (corrected 2026-07-29).** The claim that ExecServer's ActiveX
+    lets the worker "attach to the running LabVIEW just like an in-process load" is WRONG: the worker
+    is a separate process, does not inherit the attachment to the running LabVIEW ADE, tries to start
+    its own and TIMES OUT. Measured on `TFW_MDC_com_Python.seq`: 8 steps × 120 s, every one a timeout
+    (LabVIEW finally came up after the 7th) vs **~5 s per step and a correct 19-parameter pane
+    in-process**. Also: the worker reads the file from DISK, so a load after a run of `save:false`
+    edits reports the step as out of range — which reads like an unloadable VI but is an unsaved file.
+    What the worker still buys is crash containment: a process-fatal native fault (`0xC06D007E`,
+    escapes managed `try/catch`) kills only the child → `prototypeLoaded:false`,
+    `executionMode:"worker"`, `workerOutcome:"crashed"`/`"timeout"`, server lives. In-process is
+    ExecServer-routed (which is what avoids that fault in the first place) but does NOT contain one.
+    `copy_step_module` remains the fallback for a genuinely unloadable `.lvlibp`.
   - **SILENT worker death — no WER box AND no NI Error Reporter dialog.** `SetErrorMode` alone only
     hides the OS fault box; NI's green "…encountered a problem and needs to close" reporter is an
     IN-PROCESS unhandled-exception hook. The worker installs layered guards up front (in

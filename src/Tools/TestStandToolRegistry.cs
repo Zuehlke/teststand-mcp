@@ -276,7 +276,14 @@ public class TestStandToolRegistry
             "'MyEnum') — anything that isn't a builtin is treated as a named type. " +
             "To create an ARRAY local (required before get_array_variable/set_array_element/" +
             "resize_array_variable can be used), append '[]' to the type (e.g. 'number[]') or " +
-            "prefix 'array:' (e.g. 'array:string').",
+            "prefix 'array:' (e.g. 'array:string'). " +
+            "NUMERIC WIDTH: a plain 'number' is a 64-bit FLOAT. Pass representation='uint64' (or " +
+            "'int64') to create a wide integer, and number_format for its display format (e.g. " +
+            "'%#.4x' for the hex form the editor shows). This matters functionally, not just " +
+            "cosmetically: TestStand requires numeric representations to match EXACTLY, so passing a " +
+            "Float64 local into a UInt64 parameter is a hard Sequence-Analyzer error " +
+            "(NI_ExpressionEvaluationError 'Expected Number {64-bit Floating Point}'). default_value " +
+            "accepts a 0x… literal when a representation is given.",
             s => s
                 .AddRequired("file_path", "string", "Path to the sequence file")
                 .AddRequired("sequence_name", "string", "Name of the sequence")
@@ -285,7 +292,12 @@ public class TestStandToolRegistry
                     "Data type: 'string', 'number', 'boolean', 'container', 'reference', or the " +
                     "name of a custom/enum type in the file. Append '[]' (or prefix 'array:') " +
                     "for an array, e.g. 'number[]'.")
-                .AddOptional("default_value", "string", "Optional default value"),
+                .AddOptional("default_value", "string", "Optional default value (0x… allowed for wide integers)")
+                .AddOptional("representation", "string",
+                    "Numeric width for a NUMBER: 'float64' (default), 'int64' or 'uint64'.",
+                    null, new[] { "float64", "int64", "uint64" })
+                .AddOptional("number_format", "string",
+                    "Display NumericFormat, e.g. '%#.4x' for hex or '%.6f'."),
             InsertLocalVariableAsync);
 
         Register("set_local_variable_comment",
@@ -447,7 +459,10 @@ public class TestStandToolRegistry
             "Set the raw PropFlags bitfield of a step property (PropertyObject.SetFlags) — " +
             "e.g. 0x4 PassByReference, 0x2000 NotSerializedIfDefault-style markers like the " +
             "0x200000 flag TestStand puts on module containers. Returns the read-back flags. " +
-            "Use get_property_tree (node.flags) to inspect current values first.",
+            "Use get_property_tree (node.flags) to inspect current values first. " +
+            "SetFlags only ever turns bits ON — pass exact=true to ASSIGN the bitfield, the only way " +
+            "to turn a bit OFF (e.g. clear a 0x4 PassByReference that a prototype load copied from the " +
+            "callee onto a caller's argument where the original has 0x0).",
             s => s
                 .AddRequired("sequence_file_path", "string", "Path to the sequence file")
                 .AddRequired("sequence_name", "string", "Name of the sequence")
@@ -456,8 +471,31 @@ public class TestStandToolRegistry
                 .AddRequired("property_path", "string",
                     "Property path relative to the step (empty string = the step itself).")
                 .AddRequired("flags", "number", "The PropFlags bitfield value to set.")
+                .AddOptional("exact", "boolean",
+                    "Assign the bitfield exactly instead of OR-ing (turns bits OFF too). Default false.", false)
                 .AddOptional("save", "boolean", "Save the file after writing (default true).", true),
             SetStepPropertyFlagsAsync);
+
+        Register("delete_step_property",
+            "DELETE a subproperty from a step by a dotted path — the missing counterpart to " +
+            "create_step_property. The path may be nested (e.g. 'TS.SData.ActualArgs.vis'), so this " +
+            "reaches a single argument entry, a whole module subtree or an authored result container. " +
+            "PRIMARY USE in a 1:1 rebuild: the engine's own 'Load Prototype' regenerates a caller's " +
+            "argument list from the callee's CURRENT parameters, which can leave an entry the original " +
+            "does not have — real files carry arguments named after a since-renamed callee parameter " +
+            "(e.g. 'vis' where the callee now says 'vid'), and there was no way to remove the extra " +
+            "one. Recipe for that case: configure the call with load_prototype=false, then author the " +
+            "arguments with create_step_property('named_type','SequenceArgument') + set_step_property, " +
+            "or load the prototype and delete_step_property the surplus entry.",
+            s => s
+                .AddRequired("sequence_file_path", "string", "Path to the sequence file")
+                .AddRequired("sequence_name", "string", "Name of the sequence")
+                .AddRequired("step_group", "string", "Step group: 'Setup', 'Main', or 'Cleanup'")
+                .AddRequired("step_name", "string", "Name of the step")
+                .AddRequired("property_path", "string",
+                    "Dotted path of the subproperty to delete, relative to the step.")
+                .AddOptional("save", "boolean", "Save the file after deleting (default true).", true),
+            DeleteStepPropertyAsync);
 
         Register("rename_step_property",
             "Set the NAME of a step property (PropertyObject.Name). Essential for named ARRAY " +
@@ -612,7 +650,17 @@ public class TestStandToolRegistry
                 .AddOptional("file_path", "string",
                     "Path to the sequence file (required when root='FileGlobals' or 'SequenceFile').")
                 .AddOptional("lookup_string", "string",
-                    "Optional sub-path to start at within the root (e.g. 'MyContainer.Sub').")
+                    "Optional sub-path to start at within the root (e.g. 'MyContainer.Sub'). With " +
+                    "sequence_name/step_name it applies RELATIVE to that resolved object.")
+                .AddOptional("sequence_name", "string",
+                    "root='SequenceFile' only: address a sequence BY NAME. The engine's lookup has no " +
+                    "'Sequences' node — the raw path is Data.Seq[i].Main[j], which is neither guessable " +
+                    "nor stable when steps move — so use this instead of hand-writing indices.")
+                .AddOptional("step_group", "string",
+                    "With sequence_name+step_name: 'Setup', 'Main' (default) or 'Cleanup'.")
+                .AddOptional("step_name", "string",
+                    "With sequence_name: start at this STEP's property tree. Accepts the 'Name#N' / " +
+                    "'@idx:N' selectors for duplicate step names.")
                 .AddOptional("max_depth", "integer",
                     "Maximum recursion depth (default 25).", 25)
                 .AddOptional("include_hidden", "boolean",
@@ -861,11 +909,21 @@ public class TestStandToolRegistry
             "create_data_type, so a tool-only rebuild must copy them from the original. Pass explicit " +
             "'type_names' (reliable) or omit to copy EVERY embedded type. Types already present in the " +
             "destination are left untouched. Returns the names actually copied. Removes the previous " +
-            "need to physically copy the whole .seq just to keep its data types.",
+            "need to physically copy the whole .seq just to keep its data types. " +
+            "ATTACH STATE: 'attach' controls the destination's IsTypeAttachedToFile flag per type — " +
+            "'preserve' (DEFAULT) mirrors the SOURCE's own flag, which is what a 1:1 rebuild needs: " +
+            "attaching a type the original does NOT embed changes the file's embedded-type set and the " +
+            "FileDiffer reports it as a difference. 'all' attaches every copied type (the old " +
+            "behaviour), 'none' attaches nothing. Types land in the TypeUsageList in every mode, so " +
+            "GUID-based type resolution for cloned sequences/globals works regardless.",
             s => s
                 .AddRequired("source_file_path", "string", "File to copy type definitions FROM (e.g. the original)")
                 .AddRequired("dest_file_path", "string", "File to copy the type definitions INTO (the rebuild)")
                 .AddOptional("type_names", "array", "Specific type names to copy; omit to copy all embedded types.")
+                .AddOptional("attach", "string",
+                    "Destination attach state: 'preserve' (default) = mirror the source's per-type flag; " +
+                    "'all' = attach everything; 'none' = attach nothing.",
+                    "preserve", new[] { "preserve", "all", "none" })
                 .AddOptional("save", "boolean", "Save the destination file after copying (default true).", true),
             CopyTypeDefsAsync);
 
@@ -1140,13 +1198,26 @@ public class TestStandToolRegistry
         Register("insert_sequence_parameter",
             "Add a parameter to a sequence. Parameters are passed BY VALUE by default; set " +
             "pass_by_reference=true to pass BY REFERENCE so the called sequence can write back to " +
-            "the caller's variable. In TestStand this toggles the PropFlags_PassByReference flag.",
+            "the caller's variable. In TestStand this toggles the PropFlags_PassByReference flag. " +
+            "data_type also accepts 'container', 'reference' (Object Reference) and the name of any " +
+            "custom data type / enum in the file, plus '[]'/'array:' for an array — same contract as " +
+            "insert_local_variable, no silent String fallback. " +
+            "NUMERIC WIDTH: a plain 'number' is a 64-bit FLOAT. Pass representation='uint64'/'int64' " +
+            "for a wide integer and number_format for its display format ('%#.4x'). Required for " +
+            "fidelity AND correctness — TestStand matches numeric representations EXACTLY, so a " +
+            "Float64 parameter fed a UInt64 argument expression is a hard Sequence-Analyzer error.",
             s => s
                 .AddRequired("file_path", "string", "Path to the sequence file")
                 .AddRequired("sequence_name", "string", "Name of the sequence")
                 .AddRequired("param_name", "string", "Parameter name")
                 .AddRequired("data_type", "string",
-                    "Data type: 'string', 'number', 'boolean'")
+                    "Data type: 'string', 'number', 'boolean', 'container', 'reference', or a named " +
+                    "custom/enum type; append '[]' (or prefix 'array:') for an array.")
+                .AddOptional("representation", "string",
+                    "Numeric width for a NUMBER: 'float64' (default), 'int64' or 'uint64'.",
+                    null, new[] { "float64", "int64", "uint64" })
+                .AddOptional("number_format", "string",
+                    "Display NumericFormat, e.g. '%#.4x' for hex.")
                 .AddOptional("pass_by_reference", "boolean",
                     "Pass BY REFERENCE (true) or BY VALUE (false, default). By reference lets the called " +
                     "sequence modify the caller's variable; by value passes a copy. Takes precedence over 'direction'.")
@@ -1544,6 +1615,182 @@ public class TestStandToolRegistry
                     "native", new[] { "native", "structural" }),
             CompareSequenceFilesAsync);
 
+        Register("insert_sequences_bulk",
+            "Insert MANY sequences into a file in ONE call, in array order, with a SINGLE save at the " +
+            "end — instead of one insert_sequence call (and one full-file save) per sequence. Order " +
+            "matters: TestStand keeps sequences in insertion order and the FileDiffer compares them " +
+            "positionally, so list them exactly as they should appear. Each entry may carry its " +
+            "description, saving a second call. Remember create_sequence_file leaves a 'MainSequence' " +
+            "behind — delete_sequence it afterwards if your file has none.",
+            s => s
+                .AddRequired("file_path", "string", "Path to the sequence file")
+                .AddArray("sequences", "Sequences to create, in the order they should appear.",
+                    item => item
+                        .AddRequired("name", "string", "Sequence name")
+                        .AddOptional("description", "string", "Sequence description/comment"))
+                .AddOptional("save", "boolean", "Save once after all inserts (default true).", true),
+            InsertSequencesBulkAsync);
+
+        Register("insert_variables_bulk",
+            "Insert MANY variables into ONE scope (Locals, Parameters or FileGlobals) in a single call " +
+            "and a single save — the batch form of insert_local_variable / insert_sequence_parameter / " +
+            "insert_file_global. Entries are created in array order, which is the order they will " +
+            "appear in (and be compared in). Each entry takes the same fields as the single tools, " +
+            "including data_type (builtins, a named custom/enum type, '[]' for an array), " +
+            "default_value, comment, representation ('uint64'/'int64') and number_format, plus " +
+            "direction/pass_by_reference for Parameters. For the nested MEMBERS of a container " +
+            "variable use set_property_nodes afterwards.",
+            s => s
+                .AddRequired("file_path", "string", "Path to the sequence file")
+                .AddRequired("scope", "string", "Which scope to insert into.",
+                    new[] { "Locals", "Parameters", "FileGlobals" })
+                .AddOptional("sequence_name", "string",
+                    "Owning sequence — required for scope 'Locals' or 'Parameters'.")
+                .AddArray("variables", "Variables to create, in order.",
+                    item => item
+                        .AddRequired("name", "string", "Variable / parameter name")
+                        .AddOptional("data_type", "string",
+                            "'string'/'number'/'boolean'/'container'/'reference' or a named custom/enum " +
+                            "type; append '[]' for an array.")
+                        .AddOptional("value", "string", "Default value (0x… allowed for wide integers)")
+                        .AddOptional("comment", "string", "Comment/description")
+                        .AddOptional("representation", "string",
+                            "Numeric width: float64/int64/uint64.", null,
+                            new[] { "float64", "int64", "uint64" })
+                        .AddOptional("number_format", "string", "Display NumericFormat, e.g. '%#.4x'")
+                        .AddOptional("direction", "string", "Parameters only: Input/Output/InOut")
+                        .AddOptional("pass_by_reference", "boolean", "Parameters only: pass by reference"))
+                .AddOptional("save", "boolean", "Save once after all inserts (default true).", true),
+            InsertVariablesBulkAsync);
+
+        Register("set_property_nodes",
+            "Apply MANY set_property_node writes in ONE call and ONE save. This is the batch form of " +
+            "set_property_node and the workhorse for authoring nested variable payloads: reproducing " +
+            "the Request/Response container trees of one real file took ~250 individual calls. " +
+            "Entries are applied STRICTLY IN ARRAY ORDER — a nested member needs its parent to exist " +
+            "first, and container-member order is significant for the FileDiffer — so list parents " +
+            "before children. Each entry takes the same fields as set_property_node. Per-entry " +
+            "failures are reported in 'warnings' and do not abort the batch.",
+            s => s
+                .AddRequired("file_path", "string",
+                    "Path to the .seq file (unused for scope='StationGlobals').")
+                .AddArray("nodes", "Property-node writes, applied in order.",
+                    item => item
+                        .AddRequired("scope", "string", "Scope root",
+                            new[] { "Parameters", "Locals", "FileGlobals", "StationGlobals", "SequenceFile" })
+                        .AddOptional("sequence_name", "string", "Owning sequence for Parameters/Locals")
+                        .AddRequired("lookup_string", "string", "Dotted path relative to the scope root")
+                        .AddRequired("value_type", "string", "Kind of node",
+                            new[] { "number", "string", "boolean", "container", "reference",
+                                    "named_type", "enum", "array_elements" })
+                        .AddOptional("type_name", "string", "Named type for named_type/enum")
+                        .AddOptional("value", "string", "Scalar value to assign")
+                        .AddOptional("ordinal", "integer", "Enum ordinal")
+                        .AddOptional("num_elements", "integer", "Element count for array_elements")
+                        .AddOptional("flags", "integer", "PropFlags bitfield")
+                        .AddOptional("clear_flags", "boolean", "Assign flags exactly (turns bits off)")
+                        .AddOptional("representation", "string", "float64/int64/uint64", null,
+                            new[] { "float64", "int64", "uint64" })
+                        .AddOptional("number_format", "string", "Display NumericFormat")
+                        .AddOptional("create_missing_parents", "boolean",
+                            "Auto-create intermediate containers (default true)", true))
+                .AddOptional("save", "boolean", "Save once after all writes (default true).", true),
+            SetPropertyNodesBulkAsync);
+
+        Register("set_module_parameters",
+            "Bind MANY module arguments on ONE step in a single call and save — the batch form of " +
+            "set_module_parameter (binding the arguments of ~50 SequenceCall steps one at a time was " +
+            "~100 calls). Same matching rules as the single tool: a LabVIEW connector-pane Label " +
+            "('parent.child' descends into a cluster) or a SequenceCall argument name; an empty value " +
+            "reverts that argument to 'use default'. step_name accepts the 'Name#N' / '@idx:N' " +
+            "selectors for duplicate step names.",
+            s => s
+                .AddRequired("file_path", "string", "Path to the sequence file")
+                .AddRequired("sequence_name", "string", "Name of the sequence")
+                .AddRequired("step_group", "string", "Step group: 'Setup', 'Main', or 'Cleanup'")
+                .AddRequired("step_name", "string",
+                    "Step name, or a selector: 'Name#N' (Nth occurrence) / '@idx:N' (0-based group index).")
+                .AddArray("parameters", "Argument bindings to apply.",
+                    item => item
+                        .AddRequired("name", "string", "Argument / connector-pane label")
+                        .AddRequired("value", "string", "Value or expression ('' = use default)"))
+                .AddOptional("save", "boolean", "Save once after all bindings (default true).", true),
+            SetModuleParametersBulkAsync);
+
+        Register("export_sequence_file",
+            "EXPORT a whole sequence file as ONE complete, round-trippable authoring model (JSON on " +
+            "disk) — then rebuild it elsewhere with import_sequence_file. THIS IS THE EFFICIENT PATH " +
+            "for any whole-file reproduction, migration or bulk edit: rebuilding a 30-sequence file " +
+            "with the granular tools took ~700 MCP calls, and most of that was RECONNAISSANCE, because " +
+            "get_steps returns only name/type/group/enabled/description — a step's adapter, " +
+            "precondition, Pre/Post/Status expressions, run mode, result recording, module " +
+            "configuration and argument bindings each needed their own call, and some (a non-Statement " +
+            "Post expression, the retained SequenceCall file path, a UInt64 representation) were not " +
+            "reachable through any reader at all. Export/import replaces that with two calls. " +
+            "The model contains: file comment/version; every custom data type WITH its attach state; " +
+            "file globals as full node trees; and per sequence its description, result-recording flag, " +
+            "parameters, locals (nested container/array members, enum ordinal AND symbolic name, " +
+            "PropFlags, numeric representation/format, comments) and all steps in order with their " +
+            "properties and complete module configuration (Python class/instance/operation/interpreter/" +
+            "arguments, LabVIEW VI path, SequenceCall target + stored path + argument bindings, NI_Wait " +
+            "time). Written to disk — NOT returned inline — so a large model costs no tokens; the " +
+            "result is a summary plus the path. Set inline=true only for a small file or a single " +
+            "sequence (sequence_name).",
+            s => s
+                .AddRequired("file_path", "string", "Sequence file to export")
+                .AddOptional("output_path", "string",
+                    "Where to write the JSON model. Default: the source path with '.model.json' appended.")
+                .AddOptional("sequence_name", "string",
+                    "Export only this one sequence (omit for the whole file).")
+                .AddOptional("include_typedefs", "boolean",
+                    "Include the custom data types and their attach state (default true).", true)
+                .AddOptional("inline", "boolean",
+                    "Also return the model inline in the result. Only for small models — a whole-file " +
+                    "model is hundreds of KB. Default false.", false),
+            ExportSequenceFileAsync);
+
+        Register("import_sequence_file",
+            "IMPORT a model written by export_sequence_file into a sequence file — the rebuild half of " +
+            "the export/import pair. The destination should be a file you created with " +
+            "create_sequence_file; its default MainSequence is NOT removed automatically (delete it " +
+            "with delete_sequence afterwards if the model does not contain one). " +
+            "ORDER IS FIXED so cross-references resolve AND so the LabVIEW adapter stays usable: " +
+            "(1) type definitions from the model's source file, preserving each type's attach state; " +
+            "(2) file comment/version and file globals; (3) ALL sequences with their parameters and " +
+            "locals; (4) all steps with their properties and their LabVIEW module; (5) save, then load " +
+            "every VI connector pane and write its bindings; (6) ONLY THEN the SequenceCall and Python " +
+            "modules. Steps 5 and 6 are in that order because ONE SequenceCall prototype load disables " +
+            "LabVIEW VI loads for the rest of the server process, and step 3 precedes 6 so every " +
+            "callee has its interface before a caller's prototype is loaded. Steps are addressed by " +
+            "group index, so duplicate step names (several 'End'/'If') are unambiguous. " +
+            "Returns {sequencesCreated, stepsInserted, variablesCreated, modulesConfigured, " +
+            "prototypesLoaded, typeDefsCopied, warnings[]} — every item that could not be applied is " +
+            "named in 'warnings' with its sequence/step, so a partial import is visible instead of " +
+            "silently incomplete; in particular a step counted in modulesConfigured but NOT in " +
+            "prototypesLoaded has its VI path set with an EMPTY connector pane. " +
+            "Verify with diff_sequence_files (start with summary_only=true). Reference measurement: a " +
+            "30-sequence file with 13 object-oriented Python steps and 8 packed-library LabVIEW steps " +
+            "rebuilds in 9 MCP calls with 0 warnings and 9 FileDiffer differences, none in the panes.",
+            s => s
+                .AddRequired("model_path", "string", "Path to the JSON model written by export_sequence_file")
+                .AddRequired("dest_file_path", "string", "Sequence file to build into")
+                .AddOptional("copy_typedefs", "boolean",
+                    "Copy the custom data types from the model's source file first (default true). " +
+                    "Types carry GUIDs and cannot be recreated field-by-field, so this needs the " +
+                    "original file to still exist at the recorded path.", true)
+                .AddOptional("load_labview_prototypes", "boolean",
+                    "Load each LabVIEW step's VI connector pane after setting its path (default true) — " +
+                    "via load_module_prototype, i.e. routed to the LabVIEW ExecServer and run in the " +
+                    "crash-isolated worker, which is what makes a VI inside a .lvlibp loadable headless. " +
+                    "This ATTACHES TO / STARTS LabVIEW, so the first step is slow. Set false only when " +
+                    "LabVIEW is unavailable — the VI path is then still written but ViCall.Parms and " +
+                    "every connector-pane property stay EMPTY (a big block of FileDiffer differences), " +
+                    "and each skipped step is named in 'warnings'.", true)
+                .AddOptional("prototype_timeout_seconds", "integer",
+                    "Per-step timeout for the LabVIEW prototype load (default 120).", 120)
+                .AddOptional("save", "boolean", "Save the destination file at the end (default true).", true),
+            ImportSequenceFileAsync);
+
         Register("diff_sequence_files",
             "THE canonical way to VERIFY a rebuild/clone: runs NI TestStand's NATIVE FileDiffer on two " +
             "sequence files and returns its detailed, classified diff — exactly what the Sequence " +
@@ -1560,10 +1807,42 @@ public class TestStandToolRegistry
             "IgnoredMessages) cannot be closed by any rebuild — the TestStand engine API does not load " +
             "these file attributes into the in-memory object (only FileDiffer's raw reader sees them), " +
             "so no tool can read or reproduce them. Treat such an Attributes-only diff as a functional " +
-            "match (identical=false is expected in that case).",
+            "match (identical=false is expected in that case). " +
+            "SHAPING THE OUTPUT — START WITH summary_only=true. Every response carries the tallies " +
+            "'byCategory', 'byChangeType' and 'bySequence' computed over ALL differences, which is " +
+            "what you need to decide where to work; the individual differences are the expensive part " +
+            "(a 30-sequence rebuild can produce 600+ of them, far beyond one tool result). Then drill " +
+            "in with include_categories / exclude_categories / path_filter / change_types / " +
+            "max_results, and group_by='category'|'sequence'. Categories: labview_vicall, " +
+            "python_module, seqcall_args, module_other, step_properties, variables, " +
+            "sequence_properties, file_properties, types, other. TIP: exclude_categories=" +
+            "['labview_vicall'] hides the LabVIEW connector-pane metadata, which is IRREDUCIBLE " +
+            "headlessly (a VI inside a .lvlibp never loads, so the pane cannot be regenerated — only " +
+            "copy_step_module reproduces it) and would otherwise dominate the list. Counts are always " +
+            "reported against the unfiltered total and any filtering/truncation is stated explicitly, " +
+            "so a shortened answer can never be mistaken for 'almost identical'.",
             s => s
                 .AddRequired("file_path_1", "string", "Path to the first (base) sequence file")
-                .AddRequired("file_path_2", "string", "Path to the second sequence file to diff against file 1"),
+                .AddRequired("file_path_2", "string", "Path to the second sequence file to diff against file 1")
+                .AddOptional("summary_only", "boolean",
+                    "Return ONLY the tallies (byCategory/byChangeType/bySequence) and no individual " +
+                    "differences. Start here on a large diff. Default false.", false)
+                .AddOptional("group_by", "string",
+                    "Group the returned differences by 'category' or 'sequence' instead of a flat list.",
+                    "none", new[] { "none", "category", "sequence" })
+                .AddOptional("include_categories", "array",
+                    "Keep ONLY these categories (see the category list in the description).")
+                .AddOptional("exclude_categories", "array",
+                    "Drop these categories, e.g. ['labview_vicall'] to hide the headless-irreducible " +
+                    "LabVIEW connector-pane metadata.")
+                .AddOptional("path_filter", "string",
+                    "Keep only differences whose property-tree path contains this text (case-insensitive), " +
+                    "e.g. a sequence or step name.")
+                .AddOptional("change_types", "array",
+                    "Keep only these change types: Insert, Delete, ValueChange, Conflict, Moved.")
+                .AddOptional("max_results", "integer",
+                    "Cap the number of individual differences returned (0 = unlimited). Truncation is " +
+                    "reported in 'truncated'/'note'."),
             DiffSequenceFilesAsync);
 
         // ── Sync Manager ─────────────────────────────────────────────────────
@@ -2059,11 +2338,17 @@ public class TestStandToolRegistry
             "the editor) so a container member gets its real type instead of an anonymous Container; " +
             "'enum' (+type_name) creates/sets an enum-typed member (value via 'ordinal' preferred, or " +
             "'value' = ordinal number OR symbolic name); 'array_elements' (+num_elements) sizes a " +
-            "typed array. 'flags' sets raw PropFlags on the node (OR semantics — e.g. 0x84 = 0x04 " +
-            "PassByReference + 0x80). A value is written only when supplied, so a flags-only call " +
-            "leaves the value untouched. For StationGlobals the change commits to the station .ini " +
-            "(file_path is unused); every other scope saves the sequence file. Returns the read-back " +
-            "node {valueType, value, typeName, flags}.",
+            "typed array. An ENUM is always stored as an EXPLICITLY-SET value (FileDiffer '[val]'): " +
+            "the ordinal is resolved to its enumerator NAME first — from this file's types, then " +
+            "engine-wide, then off the property itself — because only the by-name write clears " +
+            "TestStand's type-default flag. 'flags' sets raw PropFlags (OR semantics by default — " +
+            "e.g. 0x84 = 0x04 PassByReference + 0x80); pass clear_flags=true to assign the bitfield " +
+            "EXACTLY, which is the only way to turn a bit OFF (needed when the original has 0x0 where " +
+            "a prototype load left 0x4 behind). representation/number_format set a NUMBER's width " +
+            "(float64/int64/uint64) and display format ('%#.4x'). A value is written only when " +
+            "supplied, so a flags-only call leaves the value untouched. For StationGlobals the change " +
+            "commits to the station .ini (file_path is unused); every other scope saves the sequence " +
+            "file. Returns the read-back node {valueType, value, typeName, flags}.",
             s => s
                 .AddRequired("file_path", "string",
                     "Path to the .seq file (unused for scope='StationGlobals').")
@@ -2088,6 +2373,13 @@ public class TestStandToolRegistry
                     "For value_type 'array_elements': the number of elements to size the array to.")
                 .AddOptional("flags", "integer",
                     "PropFlags bitfield to OR onto the node (e.g. 132 / 0x84). Omit to leave flags unchanged.")
+                .AddOptional("clear_flags", "boolean",
+                    "Assign 'flags' EXACTLY instead of OR-ing (the only way to turn a bit OFF, e.g. to " +
+                    "clear a 0x4 PassByReference a prototype load left behind). Default false.", false)
+                .AddOptional("representation", "string",
+                    "Numeric width for a NUMBER node: 'float64', 'int64' or 'uint64'.",
+                    null, new[] { "float64", "int64", "uint64" })
+                .AddOptional("number_format", "string", "Display NumericFormat, e.g. '%#.4x'.")
                 .AddOptional("create_missing_parents", "boolean",
                     "Auto-create missing intermediate containers along lookup_string (default true).", true)
                 .AddOptional("save", "boolean", "Save the file after the edit (default true).", true),
@@ -2240,11 +2532,21 @@ public class TestStandToolRegistry
             "UseDef. When the argument entry is missing, the callee prototype is loaded first (engine " +
             "'Load Prototype') so EVERY parameter becomes a correctly-typed SequenceArgument (right " +
             "ParamType/ParamRepresentation/Flags) with unbound args left at UseDef=True — only if the " +
-            "target cannot be resolved (headless/missing file) is a bare entry created on demand. Pass " +
-            "an empty value to revert to 'use default'. Falls back to the legacy flat Module.Parameters " +
-            "container for other adapters. step_name accepts the same selectors as set_step_* for " +
-            "duplicate-named steps: 'Name#N' (the Nth 1-based occurrence) or '@idx:N' (the 0-based " +
-            "index within the group).",
+            "target cannot be resolved (headless/missing file) is a bare entry created on demand. " +
+            "Falls back to the legacy flat Module.Parameters container for other adapters. step_name " +
+            "accepts the same selectors as set_step_* for duplicate-named steps: 'Name#N' (the Nth " +
+            "1-based occurrence) or '@idx:N' (the 0-based index within the group). " +
+            "NOT SUITABLE FOR A 1:1 REBUILD — it always CLEARS the 'use default' flag " +
+            "(UseDefaultValues on a LabVIEW control, UseDef on a SequenceCall argument) as a side " +
+            "effect, and those two are INDEPENDENT of the expression: the editor routinely keeps a " +
+            "remembered expression next to 'use default'. Passing an empty value therefore does NOT " +
+            "restore the default — it marks the control as explicitly bound to nothing. Measured on a " +
+            "real rebuild: binding a file's panes through this tool produced 68/41/39 FileDiffer " +
+            "differences (write-everything / non-empty-only / flag-aware) versus 9 when the two fields " +
+            "were written INDEPENDENTLY. To reproduce a binding exactly, set " +
+            "'…ViCall.Parms[i].ArgVal' + 'UseDefaultValues' (LabVIEW) or " +
+            "'TS.SData.ActualArgs.<name>.Expr' + 'UseDef' (SequenceCall) via set_step_property — or " +
+            "just use import_sequence_file, which does this.",
             s => s
                 .AddRequired("file_path", "string", "Path to the sequence file")
                 .AddRequired("sequence_name", "string", "Name of the sequence")
@@ -2588,8 +2890,13 @@ public class TestStandToolRegistry
         Register("configure_labview_module",
             "Configure a step's LabVIEW code module: the VI path (LabVIEW adapter). After the VI " +
             "path is set, the VI's connector pane is loaded (editor 'Load Prototype') so the " +
-            "parameter interface is populated — returned in the result's 'parameters' list (this " +
-            "needs the VI to be loadable: LabVIEW available, not an unloadable .lvlibp headless). " +
+            "parameter interface is populated — returned in the result's 'parameters' list. " +
+            "FOR A PACKED-LIBRARY VI (.lvlibp) PASS load_prototype=false AND CALL " +
+            "load_module_prototype AFTERWARDS: the auto-load here runs in-process through the " +
+            "adapter's AutoDetect, which resolves a LabVIEW Run-Time (lvrt.dll) and faults on such a " +
+            "VI. load_module_prototype routes the adapter to the LabVIEW ExecServer instead and loads " +
+            "the same pane in ~5s (with isolate=false). The pane IS reproducible headless — do not " +
+            "settle for an empty one. " +
             "Do NOT use on a None-adapter LabVIEW UTILITY step (e.g. NI_LV_RunVIAsynchronously, " +
             "'Run VI Asynchronously') — its VI config lives in the step's own properties and " +
             "switching to the LabVIEW adapter corrupts it; this tool now REFUSES such steps. Use " +
@@ -2608,21 +2915,67 @@ public class TestStandToolRegistry
             ConfigureLabViewModuleAsync);
 
         Register("configure_python_module",
-            "Configure a step's Python code module: module path and function name (Python adapter). " +
-            "After the function is set, the prototype is loaded (editor 'Load Prototype') so the " +
-            "parameter interface is populated — returned in the result's 'parameters' list.",
+            "Configure a step's Python code module COMPLETELY (Python adapter). module_path + " +
+            "function_name are only the module-level-function case; everything an OBJECT-ORIENTED " +
+            "Python step needs lives in the step's own tree (TS.SData.PythonCall.*) and is settable " +
+            "here in ONE call: class_name, class_instance_location (the expression holding the " +
+            "instance, e.g. 'FileGlobals.com_port'), operation_type / operation_scope (0/1 = create an " +
+            "instance vs. 1/2 = call a method ON an instance), the interpreter session settings " +
+            "(python_version, virtual_env_path, use_adapter_interpreter_settings) and the explicit " +
+            "argument list 'parameters'. " +
+            "WHY parameters MUST be authored: the Python prototype cannot be loaded headlessly for an " +
+            "arbitrary module, so 'Load Prototype' leaves the argument array empty and Dynamic-typed. " +
+            "Each entry takes {name, type, value}: name is the argument ('Return Value' for the " +
+            "result), value the binding expression, type the entry's Type code (0=None, 3=Boolean, " +
+            "4=Dynamic, 6=Object, 7=plain by-name argument; the aliases none/boolean/dynamic/object " +
+            "work too). NOTE python_version: TestStand stores the interpreter version PER STEP; " +
+            "leaving it empty makes a rebuilt step differ from an editor-authored one. (The Sequence " +
+            "Analyzer's 'Python version cannot be empty' error is about the STATION's Python Adapter " +
+            "configuration, not this step property.)",
             s => s
                 .AddRequired("file_path", "string", "Path to the sequence file")
                 .AddRequired("sequence_name", "string", "Name of the sequence")
                 .AddRequired("step_group", "string", "Step group: 'Setup', 'Main', or 'Cleanup'")
                 .AddRequired("step_name", "string", "Name of the step")
                 .AddRequired("module_path", "string", "Path to the Python module (.py)")
-                .AddRequired("function_name", "string", "Name of the function to call")
+                .AddRequired("function_name", "string",
+                    "Function / method / attribute name to call (FunctionOrAttributeName).")
+                .AddOptional("class_name", "string",
+                    "Python class name, for a constructor call or a method on an instance.")
+                .AddOptional("class_instance_location", "string",
+                    "Expression holding the class INSTANCE to call the method on (e.g. " +
+                    "'FileGlobals.com_port', 'Parameters.mdc_com'). Empty for a constructor — the new " +
+                    "instance is delivered through the 'Return Value' argument instead.")
+                .AddOptional("operation_type", "integer",
+                    "TS.SData.PythonCall.OperationType: 0 = create a class instance (constructor), " +
+                    "1 = call a function/method. A freshly created step defaults to 1.")
+                .AddOptional("operation_scope", "integer",
+                    "TS.SData.PythonCall.OperationScope: 1 = the class itself (constructor), " +
+                    "2 = an existing instance (method call).")
+                .AddOptional("python_version", "string",
+                    "Interpreter version stored on the step, e.g. '3.11'.")
+                .AddOptional("virtual_env_path", "string",
+                    "Virtual-environment path stored on the step, e.g. 'venv'.")
+                .AddOptional("use_adapter_interpreter_settings", "boolean",
+                    "TS.SData.PythonCall.UseAdapterSettingsForInterpreterSession.")
+                .AddArray("parameters",
+                    "Explicit argument list for TS.SData.PythonCall.Parameters — replaces the array " +
+                    "and fills every entry, so one call authors the whole interface.",
+                    item => item
+                        .AddOptional("name", "string",
+                            "Argument name ('Return Value' for the function result).")
+                        .AddOptional("type", "string",
+                            "Type code (0=None, 3=Boolean, 4=Dynamic, 6=Object, 7=by-name argument) " +
+                            "or an alias: none/boolean/dynamic/object.")
+                        .AddOptional("value", "string",
+                            "Binding expression (ArgumentValue), e.g. 'FileGlobals.com_port', '\"None\"', 'False'."),
+                    required: false)
                 .AddOptional("save", "boolean", "Save the file (default true)", true)
                 .AddOptional("load_prototype", "boolean",
                     "Load the function prototype afterwards to populate the parameter interface " +
                     "(default true). Set false to configure now and load later; then call " +
-                    "load_module_prototype once the module/function is reachable.", true),
+                    "load_module_prototype once the module/function is reachable. An explicit " +
+                    "'parameters' list is written BEFORE the load.", true),
             ConfigurePythonModuleAsync);
 
         Register("configure_sequence_call_module",
@@ -2647,6 +3000,12 @@ public class TestStandToolRegistry
                 .AddRequired("target_sequence_name", "string", "Name of the target sequence")
                 .AddOptional("target_sequence_file", "string",
                     "Target sequence file (empty = current file). Stored as a relative path.", "")
+                .AddOptional("stored_file_path", "string",
+                    "The sequence-file path STRING kept on the step (SData.SFPath) when the call " +
+                    "targets the current file. 'Use current file' does not blank that path — the " +
+                    "editor retains the last-known one — so it defaults to this file's own name. " +
+                    "Override it to reproduce an original that retained a STALE path (real files carry " +
+                    "paths from before a rename), which is otherwise unreachable.")
                 .AddOptional("save", "boolean", "Save the file (default true)", true)
                 .AddOptional("execution_mode", "string",
                     "Threading: 'UseCurrentThread' (default), 'NewThread' (async, new thread) or 'NewExecution'.")
@@ -2689,7 +3048,21 @@ public class TestStandToolRegistry
             "native fault is NOT contained). async=false runs inline and waits. For a genuinely " +
             "unloadable .lvlibp, copy_step_module is the headless fallback. Non-LabVIEW adapters always " +
             "run fast, in-process, synchronously. Result carries executionMode ('in-process'|'worker'), " +
-            "workerOutcome, jobId and status.",
+            "workerOutcome, jobId and status. " +
+            "FOR LABVIEW, PASS isolate=false. The isolated worker is a separate PROCESS that does not " +
+            "inherit the attachment to the running LabVIEW ADE — it tries to start its own and times " +
+            "out. Measured on a real file: 8 VI steps x 120s, every one a timeout, versus ~5s per step " +
+            "and a correct 19-parameter connector pane in-process. The worker only buys crash " +
+            "containment, and the ExecServer routing is what avoids the fault that made containment " +
+            "necessary. It also reads the file from DISK, so a worker load after a run of save=false " +
+            "edits fails with 'step … is out of range — the group has 0 step(s)' — which reads like an " +
+            "unloadable VI but is really an unsaved file. Save the step first either way. " +
+            "ORDER TRAP — DO ALL LABVIEW LOADS FIRST: one SequenceCall prototype load DISABLES LabVIEW " +
+            "VI loads for the REST OF THE SERVER PROCESS. After it, every LabVIEW load returns " +
+            "'could not resolve the target/module', while the identical call in a process that has not " +
+            "done one succeeds. So when rebuilding or re-syncing a file with both kinds of step, load " +
+            "every VI connector pane BEFORE configuring any SequenceCall (import_sequence_file splits " +
+            "its passes for exactly this reason). If you already hit it, restart the server.",
             s => s
                 .AddRequired("file_path", "string", "Path to the sequence file")
                 .AddRequired("sequence_name", "string", "Name of the sequence containing the step")
@@ -3163,7 +3536,10 @@ public class TestStandToolRegistry
         var variableName  = args!.Value.GetRequiredString("variable_name");
         var dataType      = args!.Value.GetRequiredString("data_type");
         var defaultValue  = args!.Value.GetStringOrNull("default_value");
-        await _ts.InsertLocalVariableAsync(filePath, sequenceName, variableName, dataType, defaultValue);
+        var representation= args!.Value.GetStringOrNull("representation");
+        var numberFormat  = args!.Value.GetStringOrNull("number_format");
+        await _ts.InsertLocalVariableAsync(filePath, sequenceName, variableName, dataType, defaultValue,
+            representation, numberFormat);
         return Ok($"Local variable '{variableName}' ({dataType}) added to sequence '{sequenceName}'");
     }
 
@@ -3312,9 +3688,22 @@ public class TestStandToolRegistry
         var path      = args!.Value.GetStringOrDefault("property_path", "");
         var flags     = args!.Value.GetIntOrDefault("flags", 0);
         var save      = args?.GetBoolOrDefault("save", true) ?? true;
+        var exact     = args?.GetBoolOrDefault("exact", false) ?? false;
         var info = await _ts.SetStepPropertyFlagsAsync(filePath, seqName, stepGroup, stepName,
-            path, flags, save);
+            path, flags, save, exact);
         return OkJson(info);
+    }
+
+    private async Task<CallToolResult> DeleteStepPropertyAsync(JsonElement? args)
+    {
+        var filePath  = args!.Value.GetRequiredString("sequence_file_path");
+        var seqName   = args!.Value.GetRequiredString("sequence_name");
+        var stepGroup = args!.Value.GetRequiredString("step_group");
+        var stepName  = args!.Value.GetRequiredString("step_name");
+        var path      = args!.Value.GetRequiredString("property_path");
+        var save      = args?.GetBoolOrDefault("save", true) ?? true;
+        await _ts.DeleteStepPropertyAsync(filePath, seqName, stepGroup, stepName, path, save);
+        return Ok($"Deleted step property '{path}' from step '{stepName}'.");
     }
 
     private async Task<CallToolResult> RenameStepPropertyAsync(JsonElement? args)
@@ -3439,7 +3828,11 @@ public class TestStandToolRegistry
         var maxDepth   = args?.GetIntOrDefault("max_depth", 25) ?? 25;
         var hidden     = args?.GetBoolOrDefault("include_hidden", true) ?? true;
         var maxArrayEl = args?.GetIntOrDefault("max_array_elements", 500) ?? 500;
-        var tree = await _ts.GetPropertyTreeAsync(root, filePath, lookup, maxDepth, hidden, maxArrayEl);
+        var seqName    = args?.GetStringOrNull("sequence_name");
+        var stepGroup  = args?.GetStringOrNull("step_group");
+        var stepName   = args?.GetStringOrNull("step_name");
+        var tree = await _ts.GetPropertyTreeAsync(root, filePath, lookup, maxDepth, hidden, maxArrayEl,
+            seqName, stepGroup, stepName);
         return OkJson(tree);
     }
 
@@ -3675,8 +4068,9 @@ public class TestStandToolRegistry
                       .Select(e => e.GetString()!)
                       .ToList();
         var save    = args!.Value.GetBoolOrDefault("save", true);
-        var copied  = await _ts.CopyTypeDefsAsync(sourceFile, destFile, names, save);
-        return OkJson(new { copiedCount = copied.Count, copied });
+        var attach  = args?.GetStringOrNull("attach") ?? "preserve";
+        var copied  = await _ts.CopyTypeDefsAsync(sourceFile, destFile, names, save, attach);
+        return OkJson(new { copiedCount = copied.Count, copied, attach });
     }
 
     private async Task<CallToolResult> CopyFileAttributesAsync(JsonElement? args)
@@ -3844,8 +4238,11 @@ public class TestStandToolRegistry
                          && flEl.ValueKind == JsonValueKind.Number ? flEl.GetInt32() : (int?)null;
         var createPar  = args?.GetBoolOrDefault("create_missing_parents", true) ?? true;
         var save       = args?.GetBoolOrDefault("save", true) ?? true;
+        var nodeRepr   = args!.Value.GetStringOrNull("representation");
+        var nodeNumFmt = args!.Value.GetStringOrNull("number_format");
+        var clearFlags = args?.GetBoolOrDefault("clear_flags", false) ?? false;
         var info = await _ts.SetPropertyNodeAsync(filePath, scope, seqName, lookup, valueType,
-            typeName, value, ordinal, numEl, flags, createPar, save);
+            typeName, value, ordinal, numEl, flags, createPar, save, nodeRepr, nodeNumFmt, clearFlags);
         return OkJson(info);
     }
 
@@ -4047,7 +4444,10 @@ public class TestStandToolRegistry
         var direction    = args!.Value.GetStringOrDefault("direction", "Input");
         var defValue     = args!.Value.GetStringOrNull("default_value");
         var passByRef    = args!.Value.GetBoolOrNull("pass_by_reference");
-        await _ts.InsertSequenceParameterAsync(filePath, sequenceName, paramName, dataType, direction, defValue, passByRef);
+        var repr         = args!.Value.GetStringOrNull("representation");
+        var numFmt       = args!.Value.GetStringOrNull("number_format");
+        await _ts.InsertSequenceParameterAsync(filePath, sequenceName, paramName, dataType, direction,
+            defValue, passByRef, repr, numFmt);
 
         bool effectiveByRef = passByRef ??
             direction.ToLowerInvariant() is "inout" or "inputoutput" or "passbyreference" or "byref";
@@ -4428,16 +4828,190 @@ public class TestStandToolRegistry
             var diff = await _ts.CompareSequenceFilesAsync(path1, path2);
             return OkJson(diff);
         }
+        // Native mode must return the SAME payload shape as diff_sequence_files — both tools document
+        // themselves as the same diff, so they go through the same shaper (which also supplies the
+        // byCategory/byChangeType/bySequence tallies).
         var report = await _ts.DiffSequenceFilesAsync(path1, path2);
-        return OkJson(report);
+        return OkJson(DiffReportShaper.Shape(report, new DiffReportShaper.Options()));
+    }
+
+    private async Task<CallToolResult> InsertSequencesBulkAsync(JsonElement? args)
+    {
+        var filePath = args!.Value.GetRequiredString("file_path");
+        var list = new List<(string, string?)>();
+        if (args!.Value.TryGetProperty("sequences", out var arr) && arr.ValueKind == JsonValueKind.Array)
+            foreach (var e in arr.EnumerateArray())
+            {
+                var n = e.GetStringOrNull("name");
+                if (!string.IsNullOrWhiteSpace(n)) list.Add((n!, e.GetStringOrNull("description")));
+            }
+        if (list.Count == 0) throw new ArgumentException("'sequences' must contain at least one entry.");
+        var result = await _ts.InsertSequencesBulkAsync(filePath, list,
+            args!.Value.GetBoolOrDefault("save", true));
+        return OkJson(result);
+    }
+
+    private async Task<CallToolResult> InsertVariablesBulkAsync(JsonElement? args)
+    {
+        var filePath = args!.Value.GetRequiredString("file_path");
+        var scope    = args!.Value.GetRequiredString("scope");
+        var seqName  = args!.Value.GetStringOrNull("sequence_name");
+        var vars     = new List<VarModel>();
+        if (args!.Value.TryGetProperty("variables", out var arr) && arr.ValueKind == JsonValueKind.Array)
+            foreach (var e in arr.EnumerateArray())
+            {
+                var n = e.GetStringOrNull("name");
+                if (string.IsNullOrWhiteSpace(n)) continue;
+                vars.Add(new VarModel
+                {
+                    Name            = n!,
+                    DataType        = e.GetStringOrNull("data_type"),
+                    Value           = e.GetStringOrNull("value"),
+                    Comment         = e.GetStringOrNull("comment"),
+                    Representation  = e.GetStringOrNull("representation"),
+                    NumberFormat    = e.GetStringOrNull("number_format"),
+                    Direction       = e.GetStringOrNull("direction"),
+                    PassByReference = e.GetBoolOrNull("pass_by_reference"),
+                });
+            }
+        if (vars.Count == 0) throw new ArgumentException("'variables' must contain at least one entry.");
+        var result = await _ts.InsertVariablesBulkAsync(filePath, scope, seqName, vars,
+            args!.Value.GetBoolOrDefault("save", true));
+        return OkJson(result);
+    }
+
+    private async Task<CallToolResult> SetPropertyNodesBulkAsync(JsonElement? args)
+    {
+        var filePath = args!.Value.GetRequiredString("file_path");
+        var nodes    = new List<PropertyNodeSpec>();
+        if (args!.Value.TryGetProperty("nodes", out var arr) && arr.ValueKind == JsonValueKind.Array)
+            foreach (var e in arr.EnumerateArray())
+            {
+                if (e.ValueKind != JsonValueKind.Object) continue;
+                int? IntOf(string k) => e.TryGetProperty(k, out var v)
+                    && v.ValueKind == JsonValueKind.Number ? v.GetInt32() : (int?)null;
+                nodes.Add(new PropertyNodeSpec
+                {
+                    Scope                = e.GetStringOrDefault("scope", ""),
+                    SequenceName         = e.GetStringOrNull("sequence_name"),
+                    LookupString         = e.GetStringOrDefault("lookup_string", ""),
+                    ValueType            = e.GetStringOrDefault("value_type", ""),
+                    TypeName             = e.GetStringOrNull("type_name"),
+                    Value                = e.GetStringOrNull("value"),
+                    Ordinal              = IntOf("ordinal"),
+                    NumElements          = IntOf("num_elements"),
+                    Flags                = IntOf("flags"),
+                    ClearFlags           = e.GetBoolOrDefault("clear_flags", false),
+                    Representation       = e.GetStringOrNull("representation"),
+                    NumberFormat         = e.GetStringOrNull("number_format"),
+                    CreateMissingParents = e.GetBoolOrDefault("create_missing_parents", true),
+                });
+            }
+        if (nodes.Count == 0) throw new ArgumentException("'nodes' must contain at least one entry.");
+        var result = await _ts.SetPropertyNodesBulkAsync(filePath, nodes,
+            args!.Value.GetBoolOrDefault("save", true));
+        return OkJson(result);
+    }
+
+    private async Task<CallToolResult> SetModuleParametersBulkAsync(JsonElement? args)
+    {
+        var filePath = args!.Value.GetRequiredString("file_path");
+        var seqName  = args!.Value.GetRequiredString("sequence_name");
+        var group    = args!.Value.GetRequiredString("step_group");
+        var stepName = args!.Value.GetRequiredString("step_name");
+        var parms    = new List<(string, string)>();
+        if (args!.Value.TryGetProperty("parameters", out var arr) && arr.ValueKind == JsonValueKind.Array)
+            foreach (var e in arr.EnumerateArray())
+            {
+                var n = e.GetStringOrNull("name");
+                if (string.IsNullOrWhiteSpace(n)) continue;
+                parms.Add((n!, e.GetStringOrDefault("value", "")));
+            }
+        if (parms.Count == 0) throw new ArgumentException("'parameters' must contain at least one entry.");
+        var result = await _ts.SetModuleParametersBulkAsync(filePath, seqName, group, stepName, parms,
+            args!.Value.GetBoolOrDefault("save", true));
+        return OkJson(result);
+    }
+
+    private async Task<CallToolResult> ExportSequenceFileAsync(JsonElement? args)
+    {
+        var filePath = args!.Value.GetRequiredString("file_path");
+        var seqName  = args!.Value.GetStringOrNull("sequence_name");
+        var withTd   = args!.Value.GetBoolOrDefault("include_typedefs", true);
+        var inline   = args!.Value.GetBoolOrDefault("inline", false);
+        var outPath  = args!.Value.GetStringOrNull("output_path") ?? filePath + ".model.json";
+
+        var model = await _ts.ExportSequenceFileAsync(filePath, withTd, seqName);
+        var json  = JsonSerializer.Serialize(model, SequenceFileModel.Json);
+        await System.IO.File.WriteAllTextAsync(outPath, json);
+
+        int steps = 0, vars = 0;
+        foreach (var s in model.Sequences)
+        {
+            steps += s.Steps.Count;
+            vars  += s.Locals.Count + s.Parameters.Count;
+        }
+        var summary = new Dictionary<string, object?>
+        {
+            ["outputPath"]  = outPath,
+            ["bytes"]       = json.Length,
+            ["sequences"]   = model.Sequences.Count,
+            ["steps"]       = steps,
+            ["variables"]   = vars + model.FileGlobals.Count,
+            ["typeDefs"]    = model.TypeDefs.Count,
+            ["attachedTypeDefs"] = model.TypeDefs.FindAll(t => t.Attached).Count,
+            ["note"]        = "Feed outputPath straight into import_sequence_file. The model is on " +
+                              "disk so it costs no tokens; pass inline=true only for small models.",
+        };
+        if (inline) summary["model"] = model;
+        return OkJson(summary);
+    }
+
+    private async Task<CallToolResult> ImportSequenceFileAsync(JsonElement? args)
+    {
+        var modelPath = args!.Value.GetRequiredString("model_path");
+        var destPath  = args!.Value.GetRequiredString("dest_file_path");
+        if (!System.IO.File.Exists(modelPath))
+            throw new System.IO.FileNotFoundException("Model file not found.", modelPath);
+
+        var json  = await System.IO.File.ReadAllTextAsync(modelPath);
+        var model = JsonSerializer.Deserialize<SequenceFileModel>(json, SequenceFileModel.Json)
+                    ?? throw new ArgumentException($"'{modelPath}' does not contain a sequence-file model.");
+
+        var outcome = await _ts.ImportSequenceFileAsync(model, destPath,
+            args!.Value.GetBoolOrDefault("copy_typedefs", true),
+            args!.Value.GetBoolOrDefault("save", true),
+            args!.Value.GetBoolOrDefault("load_labview_prototypes", true),
+            args!.Value.GetIntOrDefault("prototype_timeout_seconds", 120));
+        return OkJson(outcome);
     }
 
     private async Task<CallToolResult> DiffSequenceFilesAsync(JsonElement? args)
     {
-        var path1 = args!.Value.GetRequiredString("file_path_1");
-        var path2 = args!.Value.GetRequiredString("file_path_2");
+        var path1  = args!.Value.GetRequiredString("file_path_1");
+        var path2  = args!.Value.GetRequiredString("file_path_2");
         var report = await _ts.DiffSequenceFilesAsync(path1, path2);
-        return OkJson(report);
+
+        static List<string> StrList(JsonElement el, string key)
+        {
+            var list = new List<string>();
+            if (el.TryGetProperty(key, out var a) && a.ValueKind == JsonValueKind.Array)
+                foreach (var e in a.EnumerateArray())
+                    if (e.ValueKind == JsonValueKind.String) list.Add(e.GetString()!);
+            return list;
+        }
+
+        var opts = new DiffReportShaper.Options
+        {
+            SummaryOnly       = args!.Value.GetBoolOrDefault("summary_only", false),
+            GroupBy           = args!.Value.GetStringOrDefault("group_by", "none"),
+            IncludeCategories = StrList(args!.Value, "include_categories"),
+            ExcludeCategories = StrList(args!.Value, "exclude_categories"),
+            PathFilter        = args!.Value.GetStringOrNull("path_filter"),
+            ChangeTypes       = StrList(args!.Value, "change_types"),
+            MaxResults        = args!.Value.GetIntOrDefault("max_results", 0),
+        };
+        return OkJson(DiffReportShaper.Shape(report, opts));
     }
 
     // ── Sync Manager Handlers ─────────────────────────────────────────────────
@@ -4717,6 +5291,33 @@ public class TestStandToolRegistry
 
     private async Task<CallToolResult> ConfigurePythonModuleAsync(JsonElement? args)
     {
+        int? opType  = args!.Value.TryGetProperty("operation_type", out var otEl)
+                       && otEl.ValueKind == JsonValueKind.Number ? otEl.GetInt32() : (int?)null;
+        int? opScope = args!.Value.TryGetProperty("operation_scope", out var osEl)
+                       && osEl.ValueKind == JsonValueKind.Number ? osEl.GetInt32() : (int?)null;
+
+        List<PythonParamSpec>? pyParams = null;
+        if (args!.Value.TryGetProperty("parameters", out var pEl) && pEl.ValueKind == JsonValueKind.Array)
+        {
+            pyParams = new List<PythonParamSpec>();
+            foreach (var e in pEl.EnumerateArray())
+            {
+                if (e.ValueKind != JsonValueKind.Object) continue;
+                // 'type' is documented as a string but a client may send the raw number; accept both.
+                string? typeText = null;
+                if (e.TryGetProperty("type", out var tEl))
+                    typeText = tEl.ValueKind == JsonValueKind.Number
+                        ? tEl.GetRawText()
+                        : tEl.GetString();
+                pyParams.Add(new PythonParamSpec
+                {
+                    Name  = e.GetStringOrNull("name"),
+                    Type  = typeText,
+                    Value = e.GetStringOrNull("value"),
+                });
+            }
+        }
+
         var result = await _ts.ConfigurePythonModuleAsync(
             args!.Value.GetRequiredString("file_path"),
             args!.Value.GetRequiredString("sequence_name"),
@@ -4725,7 +5326,14 @@ public class TestStandToolRegistry
             args!.Value.GetRequiredString("module_path"),
             args!.Value.GetRequiredString("function_name"),
             args!.Value.GetBoolOrDefault("save", true),
-            args!.Value.GetBoolOrDefault("load_prototype", true));
+            args!.Value.GetBoolOrDefault("load_prototype", true),
+            args!.Value.GetStringOrNull("class_name"),
+            args!.Value.GetStringOrNull("class_instance_location"),
+            opType, opScope,
+            args!.Value.GetStringOrNull("python_version"),
+            args!.Value.GetStringOrNull("virtual_env_path"),
+            args!.Value.GetBoolOrNull("use_adapter_interpreter_settings"),
+            pyParams);
         return OkJson(result);
     }
 
@@ -4744,7 +5352,8 @@ public class TestStandToolRegistry
             args!.Value.GetStringOrNull("execution_mode"),
             args!.Value.GetStringOrNull("thread_ref_expr"),
             autoWait,
-            args!.Value.GetBoolOrDefault("load_prototype", true));
+            args!.Value.GetBoolOrDefault("load_prototype", true),
+            args!.Value.GetStringOrNull("stored_file_path"));
         return OkJson(result);
     }
 

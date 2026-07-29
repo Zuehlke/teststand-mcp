@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 
@@ -279,6 +279,28 @@ public class PropertyNode
     public bool IsHiddenInTypes { get; set; }
     /// <summary>Raw property flags bitfield (PropFlags_*), for reference.</summary>
     public int Flags { get; set; }
+    /// <summary>
+    /// TRUE when this leaf's value EQUALS the default carried by its named TYPE, i.e. writing that
+    /// value during a rebuild is redundant; FALSE when it differs and therefore has to be written.
+    /// Null when the node has no named type to compare against (anonymous container members, plain
+    /// builtins, containers and arrays), where the question does not apply.
+    /// <para>
+    /// This is a VALUE comparison against a pristine instance of the type
+    /// (<c>Engine.NewPropertyObject(PropValType_NamedType, …)</c>) — NOT a read of the FileDiffer's
+    /// stored explicit-vs-default marker, which the TestStand API does not expose. The FileDiffer's
+    /// <c>{val}</c>/<c>[val]</c> state is instead handled on the WRITE side: every enum write now goes
+    /// through the by-NAME path, which TestStand stores as explicitly set (see the service's
+    /// WriteEnumLeafExplicit), so a rebuilt file matches an editor-authored one without the caller
+    /// having to reason about it.
+    /// </para>
+    /// </summary>
+    public bool? IsDefault { get; set; }
+    /// <summary>Numeric REPRESENTATION of a number node: "Float64", "Int64", "UInt64"; null when the
+    /// node is not a number. A UInt64/Int64 property rejects the plain number reader, so without this
+    /// (and the matching wide reader) such values used to surface as Empty.</summary>
+    public string? Representation { get; set; }
+    /// <summary>The node's display NumericFormat (e.g. <c>%#.4x</c>), or null when unset.</summary>
+    public string? NumericFormat { get; set; }
     /// <summary>True when the node is an array.</summary>
     public bool IsArray { get; set; }
     /// <summary>Number of array elements (only when <see cref="IsArray"/>).</summary>
@@ -1257,6 +1279,26 @@ public class ModuleConfigResult
     /// prototype of a DLL/.NET/ActiveX call. Empty when load_prototype was disabled or when the
     /// target could not be resolved headless (e.g. a VI in an unloadable .lvlibp).</summary>
     public List<ModuleParameterInfo> Parameters { get; init; } = new();
+}
+
+/// <summary>
+/// One entry of a Python step's argument list (<c>TS.SData.PythonCall.Parameters[i]</c>, an
+/// <c>NI_PythonParameter</c>). The Python adapter cannot have its prototype loaded headlessly for an
+/// arbitrary module, so a 1:1 rebuild has to author these entries explicitly — which previously took
+/// three <c>set_step_property</c> calls per argument.
+/// </summary>
+public class PythonParamSpec
+{
+    /// <summary>Argument name; the return value is conventionally called "Return Value".</summary>
+    public string? Name { get; set; }
+    /// <summary>The entry's <c>Type</c> code as TestStand stores it. Observed values: 0 = None,
+    /// 3 = Boolean, 4 = Dynamic (what a freshly created entry defaults to), 6 = Object,
+    /// 7 = the code the editor uses for a plain by-name argument. May also be given as one of the
+    /// aliases "none"/"boolean"/"dynamic"/"object".</summary>
+    public string? Type { get; set; }
+    /// <summary>The argument's binding expression (<c>ArgumentValue</c>), e.g.
+    /// <c>FileGlobals.com_port</c> or <c>"None"</c>.</summary>
+    public string? Value { get; set; }
 }
 
 /// <summary>Result of loading a step's code-module prototype (the Sequence Editor's

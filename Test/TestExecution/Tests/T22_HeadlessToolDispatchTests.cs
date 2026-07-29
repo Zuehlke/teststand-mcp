@@ -602,8 +602,15 @@ public class T22_HeadlessToolDispatchTests : TestBase
             var doc = Doc(r);
             Assert.That(doc.GetProperty("identical").GetBoolean(), Is.False,
                 "files differ by one added step → not identical");
-            Assert.That(doc.GetProperty("changes").GetArrayLength(), Is.GreaterThan(0),
-                "the native differ must report at least one change");
+            // The individual differences live under 'differences' (they carry a category/sequence
+            // classification); 'changes' was the pre-shaping name. Pin BOTH the list and the tallies so
+            // a future rename of either fails here instead of silently changing the tool's contract.
+            Assert.That(doc.GetProperty("differences").GetArrayLength(), Is.GreaterThan(0),
+                "the native differ must report at least one difference");
+            Assert.That(doc.GetProperty("totalDifferences").GetInt32(), Is.GreaterThan(0));
+            Assert.That(doc.TryGetProperty("byCategory", out _), Is.True,
+                "the shaped payload always carries the byCategory tally over ALL differences");
+            Assert.That(doc.TryGetProperty("bySequence", out _), Is.True);
         }
         finally
         {
