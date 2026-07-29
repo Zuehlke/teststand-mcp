@@ -310,8 +310,39 @@ public class ImportOutcome
     /// <see cref="ModulesConfigured"/> but not here has its VI path set with an EMPTY connector pane —
     /// every load that did not succeed is also named in <see cref="Warnings"/>.</summary>
     public int PrototypesLoaded { get; set; }
+    /// <summary>Cross-file SequenceCall prototype CACHES (<c>TS.SData.Prototype</c>) actually loaded.
+    /// These need an isolated worker process: the LabVIEW pane loads and the cross-file SequenceCall
+    /// loads poison each other within one process, so a single-process import can only have one of the
+    /// two. A cross-file call missing here still works — only the editor's cached copy of the callee's
+    /// parameter list stays empty — and it is named in <see cref="Warnings"/>.</summary>
+    public int CrossFilePrototypesLoaded { get; set; }
+    /// <summary>How many cross-file SequenceCall steps were FOUND to need a prototype cache — the
+    /// denominator for <see cref="CrossFilePrototypesLoaded"/>. Reported separately so "none needed it"
+    /// is distinguishable from "all of them failed".</summary>
+    public int CrossFilePrototypeCandidates { get; set; }
+    /// <summary>LabVIEW connector panes reproduced by CLONING the cached ViCall subtree out of the
+    /// model's source file (<c>labview_panes='copy'</c>, the default) instead of loading the VI. This is
+    /// the safe path: an in-process load of a packed-library VI can raise a process-fatal native fault
+    /// (0xC06D007E), and the crash-isolated worker cannot bind the running LabVIEW at all.</summary>
+    public int PanesCopied { get; set; }
+    /// <summary>Cross-file SequenceCall prototype caches reproduced by CLONING
+    /// (<c>cross_file_prototypes='copy'</c>, the default) rather than by a worker load.</summary>
+    public int CrossFilePrototypesCopied { get; set; }
     /// <summary>Type definitions copied.</summary>
     public int TypeDefsCopied { get; set; }
+    /// <summary>Types the save had dropped (neither attached nor referenced by the imported subset) and
+    /// that were re-copied ATTACHED so they persist. Non-zero means the destination embeds more types
+    /// than the original — a deviation the FileDiffer does not report.</summary>
+    public int TypeDefsForceAttached { get; set; }
+    /// <summary>Types from the model that are still absent from the destination after the rescue.</summary>
+    public int TypeDefsMissing { get; set; }
+    /// <summary>Which route reproduced the LabVIEW connector panes: copy / load / skip.</summary>
+    public string? LabViewPaneMode { get; set; }
+    /// <summary>Which route reproduced the cross-file prototype caches: copy / load / skip.</summary>
+    public string? CrossFilePrototypeMode { get; set; }
+    /// <summary>Where this outcome was also written as JSON, so a caller whose RPC timed out can still
+    /// read the warnings. Null when it could not be written.</summary>
+    public string? OutcomePath { get; set; }
     /// <summary>Non-fatal problems, each naming the sequence/step it happened on.</summary>
     public List<string> Warnings { get; init; } = new();
 }

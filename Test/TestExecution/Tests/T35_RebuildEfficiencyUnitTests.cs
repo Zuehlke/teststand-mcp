@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Linq;
+using Microsoft.Extensions.Logging.Abstractions;
 using NUnit.Framework;
 using TestStandMCP.Models;
 using TestStandMCP.Services;
@@ -306,6 +307,57 @@ public class T35_RebuildEfficiencyUnitTests
         Assert.That(step.Module!.Arguments!.Single().Value, Is.EqualTo("FileGlobals.a"));
     }
 
+    // ── Cross-file SequenceCall detection (drives the isolated prototype-load pass) ──
+
+    [Test]
+    public void CrossFileSequenceCall_SurvivesTheJsonRoundTrip()
+    {
+        // The import decides which steps need the out-of-process prototype load from exactly these
+        // three fields. If UseCurrentFile came back null instead of false, the pass would silently
+        // find nothing to do — which is how a missing prototype cache hid once already.
+        var model = new SequenceFileModel();
+        var seq = new SequenceModel { Name = "_MDC_com" };
+        seq.Steps.Add(new StepModel
+        {
+            Group = "Main", Name = "Call Log", StepType = "SequenceCall",
+            Module = new StepModuleModel
+            {
+                Kind = "SequenceCall", TargetSequenceName = "Log_anythingAsJSon",
+                TargetSequenceFile = "Easy.Log.seq", StoredFilePath = "Easy.Log.seq",
+                UseCurrentFile = false,
+            },
+        });
+        // A same-file call must NOT be picked up: its cache is empty in the original too.
+        seq.Steps.Add(new StepModel
+        {
+            Group = "Main", Name = "Call Local", StepType = "SequenceCall",
+            Module = new StepModuleModel
+            {
+                Kind = "SequenceCall", TargetSequenceName = "Other", UseCurrentFile = true,
+                StoredFilePath = "Self.seq",
+            },
+        });
+        model.Sequences.Add(seq);
+
+        var json = System.Text.Json.JsonSerializer.Serialize(model, SequenceFileModel.Json);
+        Assert.That(json, Does.Contain("\"useCurrentFile\": false"),
+            "false must be written, not omitted as a default");
+
+        var back = System.Text.Json.JsonSerializer.Deserialize<SequenceFileModel>(
+            json, SequenceFileModel.Json)!;
+
+        var crossFile = back.Sequences
+            .SelectMany(s => s.Steps)
+            .Where(st => st.Module?.Kind == "SequenceCall"
+                         && st.Module.UseCurrentFile == false
+                         && !string.IsNullOrWhiteSpace(st.Module.TargetSequenceFile))
+            .ToList();
+
+        Assert.That(crossFile, Has.Count.EqualTo(1));
+        Assert.That(crossFile[0].Name, Is.EqualTo("Call Log"));
+        Assert.That(crossFile[0].Module!.TargetSequenceFile, Is.EqualTo("Easy.Log.seq"));
+    }
+
     // ── Analyzer: a zero result must be flagged, not reported as clean ───────────
 
     [Test]
@@ -362,5 +414,58 @@ public class T35_RebuildEfficiencyUnitTests
         var json = System.Text.Json.JsonSerializer.Serialize(model, SequenceFileModel.Json);
         Assert.That(json, Does.Not.Contain("\"description\""));
         Assert.That(json, Does.Not.Contain("null"));
+    }
+
+    // ── import_sequence_file must never DEFAULT to a prototype load ──────────────
+    //
+    // Measured 2026-07-29: an in-process LabVIEW prototype load of a packed-library VI raises the
+    // native delay-load fault 0xC06D007E, which escapes managed try/catch and kills the server process
+    // (NI Error Reporter, MCP session gone). The import used to do exactly that in its LabVIEW pass, so
+    // the *default* is the safety-relevant property here — hence a test on the declared schema, which is
+    // what a client sees and what a future edit would silently change back.
+    //
+    // Both the registry and the service constructor are engine-free (the service only stores its
+    // logger, the registry only builds schemas), so this stays a PureLogic test.
+
+    private static System.Text.Json.JsonElement ImportSchema()
+    {
+        using var editor = new SequenceEditorService(NullLogger<SequenceEditorService>.Instance);
+        var registry = new TestStandToolRegistry(
+            new TestStandService(NullLogger<TestStandService>.Instance), editor,
+            NullLogger<TestStandToolRegistry>.Instance);
+        var tool = registry.GetTools().FirstOrDefault(t => t.Name == "import_sequence_file");
+        Assert.That(tool, Is.Not.Null, "import_sequence_file is not registered");
+        return tool!.InputSchema.GetProperty("properties");
+    }
+
+    [TestCase("labview_panes")]
+    [TestCase("cross_file_prototypes")]
+    public void ImportSchema_ModuleReproductionDefaultsToCopy_NotToTheProcessFatalLoad(string param)
+    {
+        var prop = ImportSchema().GetProperty(param);
+
+        Assert.That(prop.GetProperty("default").GetString(), Is.EqualTo("copy"),
+            $"{param} must default to cloning from the source file — 'load' can kill the server process");
+
+        var allowed = prop.GetProperty("enum").EnumerateArray().Select(e => e.GetString()).ToList();
+        Assert.That(allowed, Is.EquivalentTo(new[] { "copy", "load", "skip" }));
+    }
+
+    [Test]
+    public void ImportSchema_KeepUnusedTypes_DefaultsToKeeping()
+    {
+        // A type survives a save only if it is attached or still referenced, so importing a SUBSET of
+        // the sequences drops the types only the omitted ones used — silently, after copy_typedefs has
+        // already reported them copied. Keeping them is the safe default.
+        Assert.That(ImportSchema().GetProperty("keep_unused_types").GetProperty("default").GetBoolean(),
+            Is.True);
+    }
+
+    [Test]
+    public void ImportSchema_StillAcceptsTheDeprecatedBoolean_ForOlderCallers()
+    {
+        var prop = ImportSchema().GetProperty("load_labview_prototypes");
+        Assert.That(prop.GetProperty("type").GetString(), Is.EqualTo("boolean"));
+        Assert.That(prop.GetProperty("description").GetString(), Does.Contain("DEPRECATED"));
     }
 }

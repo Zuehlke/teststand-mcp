@@ -1768,23 +1768,32 @@ public class TestStandToolRegistry
             "the export/import pair. The destination should be a file you created with " +
             "create_sequence_file; its default MainSequence is NOT removed automatically (delete it " +
             "with delete_sequence afterwards if the model does not contain one). " +
-            "ORDER IS FIXED so cross-references resolve AND so the LabVIEW adapter stays usable: " +
-            "(1) type definitions from the model's source file, preserving each type's attach state; " +
-            "(2) file comment/version and file globals; (3) ALL sequences with their parameters and " +
-            "locals; (4) all steps with their properties and their LabVIEW module; (5) save, then load " +
-            "every VI connector pane and write its bindings; (6) ONLY THEN the SequenceCall and Python " +
-            "modules. Steps 5 and 6 are in that order because ONE SequenceCall prototype load disables " +
-            "LabVIEW VI loads for the rest of the server process, and step 3 precedes 6 so every " +
-            "callee has its interface before a caller's prototype is loaded. Steps are addressed by " +
-            "group index, so duplicate step names (several 'End'/'If') are unambiguous. " +
+            "ORDER IS FIXED so cross-references resolve: (1) type definitions from the model's source " +
+            "file, preserving each type's attach state; (2) file comment/version and file globals; " +
+            "(3) ALL sequences with their parameters and locals — before any step, so every callee has " +
+            "its interface; (4) all steps with their properties and their LabVIEW module; (5) the " +
+            "LabVIEW connector panes; (6) the SequenceCall and Python modules; (7) the cross-file " +
+            "SequenceCall prototype caches; (8) re-attach any type the save dropped. Steps are " +
+            "addressed by group index, so duplicate step names (several 'End'/'If') are unambiguous. " +
+            "NO LABVIEW IS TOUCHED BY DEFAULT. Both fidelity passes that would need a real prototype " +
+            "load default to CLONING the cached module subtree out of the model's source file instead " +
+            "(labview_panes / cross_file_prototypes = 'copy'), because the load is process-fatal: an " +
+            "in-process load of a packed-library VI raises the native delay-load fault 0xC06D007E, " +
+            "which escapes managed try/catch and takes the server down, while the crash-isolated worker " +
+            "cannot bind the running LabVIEW and only times out. The clone reproduces the panes " +
+            "(Parms with their ArgVal/UseDefaultValues bindings, namespace, VI description, checksum) " +
+            "and the Prototype cache exactly, in about a second per step. " +
             "Returns {sequencesCreated, stepsInserted, variablesCreated, modulesConfigured, " +
-            "prototypesLoaded, typeDefsCopied, warnings[]} — every item that could not be applied is " +
-            "named in 'warnings' with its sequence/step, so a partial import is visible instead of " +
-            "silently incomplete; in particular a step counted in modulesConfigured but NOT in " +
-            "prototypesLoaded has its VI path set with an EMPTY connector pane. " +
-            "Verify with diff_sequence_files (start with summary_only=true). Reference measurement: a " +
-            "30-sequence file with 13 object-oriented Python steps and 8 packed-library LabVIEW steps " +
-            "rebuilds in 9 MCP calls with 0 warnings and 9 FileDiffer differences, none in the panes.",
+            "panesCopied, crossFilePrototypesCopied, typeDefsCopied, typeDefsForceAttached, " +
+            "typeDefsMissing, labViewPaneMode, crossFilePrototypeMode, outcomePath, warnings[]} — " +
+            "every item that could not be applied is named in 'warnings' with its sequence/step, so a " +
+            "partial import is visible instead of silently incomplete. The same object is ALSO written " +
+            "to '<dest>.import.json' (outcomePath), so if the call exceeds the ~60s MCP transport " +
+            "window the warnings are still readable from disk — the import itself keeps running and " +
+            "completes. Verify with diff_sequence_files (start with summary_only=true). Reference " +
+            "measurement: 8 sequences of a 30-sequence file with 13 object-oriented Python steps, 5 " +
+            "packed-library LabVIEW steps and a cross-file call rebuild to exactly ONE FileDiffer " +
+            "difference (a named-type instance's enum member reading as explicitly set — an API limit).",
             s => s
                 .AddRequired("model_path", "string", "Path to the JSON model written by export_sequence_file")
                 .AddRequired("dest_file_path", "string", "Sequence file to build into")
@@ -1792,16 +1801,36 @@ public class TestStandToolRegistry
                     "Copy the custom data types from the model's source file first (default true). " +
                     "Types carry GUIDs and cannot be recreated field-by-field, so this needs the " +
                     "original file to still exist at the recorded path.", true)
+                .AddOptional("labview_panes", "string",
+                    "How each LabVIEW step gets its connector pane. 'copy' (DEFAULT) clones the cached " +
+                    "ViCall subtree from the model's source file — no LabVIEW involved, ~1 s per step, " +
+                    "reproduces Parms with their ArgVal/UseDefaultValues bindings, namespace, VI " +
+                    "description and checksum. 'load' performs a real in-process prototype load: it " +
+                    "needs LabVIEW, is slow, and IS KNOWN TO KILL THE SERVER PROCESS on a packed-library " +
+                    "VI (native delay-load fault 0xC06D007E, not catchable, NI Error Reporter) — use it " +
+                    "only when there is no source file to clone from and you accept that risk. 'skip' " +
+                    "writes the VI path and leaves the pane empty. 'copy' falls back to 'skip' (with a " +
+                    "warning) when the model's source file no longer exists.",
+                    "copy", new[] { "copy", "load", "skip" })
+                .AddOptional("cross_file_prototypes", "string",
+                    "How a cross-file SequenceCall's cached TS.SData.Prototype is reproduced. 'copy' " +
+                    "(DEFAULT) clones it from the model's source file in about a second. 'load' uses the " +
+                    "crash-isolated worker, which must start its own engine and open every callee file — " +
+                    "measured: one 3 MB callee ran it into a 300 s timeout and produced nothing. 'skip' " +
+                    "leaves the cache empty; the calls still work.",
+                    "copy", new[] { "copy", "load", "skip" })
+                .AddOptional("keep_unused_types", "boolean",
+                    "Re-copy ATTACHED any model type that the save dropped (default true). A type " +
+                    "survives only if it is attached or still referenced, so importing a SUBSET of the " +
+                    "sequences silently loses the types only the omitted ones used. Attaching them keeps " +
+                    "them and adds no FileDiffer difference, but the destination then embeds more types " +
+                    "than the original. Either way the affected names are listed in 'warnings'.", true)
                 .AddOptional("load_labview_prototypes", "boolean",
-                    "Load each LabVIEW step's VI connector pane after setting its path (default true) — " +
-                    "via load_module_prototype, i.e. routed to the LabVIEW ExecServer and run in the " +
-                    "crash-isolated worker, which is what makes a VI inside a .lvlibp loadable headless. " +
-                    "This ATTACHES TO / STARTS LabVIEW, so the first step is slow. Set false only when " +
-                    "LabVIEW is unavailable — the VI path is then still written but ViCall.Parms and " +
-                    "every connector-pane property stay EMPTY (a big block of FileDiffer differences), " +
-                    "and each skipped step is named in 'warnings'.", true)
+                    "DEPRECATED — use labview_panes. false maps to 'skip'; true maps to 'copy' (NOT to " +
+                    "the process-fatal 'load').", true)
                 .AddOptional("prototype_timeout_seconds", "integer",
-                    "Per-step timeout for the LabVIEW prototype load (default 120).", 120)
+                    "Per-step timeout for a real prototype load, i.e. only for labview_panes='load' / " +
+                    "cross_file_prototypes='load' (default 120; the cross-file worker floors it at 300).", 120)
                 .AddOptional("save", "boolean", "Save the destination file at the end (default true).", true),
             ImportSequenceFileAsync);
 
@@ -3087,8 +3116,13 @@ public class TestStandToolRegistry
                     "get_prototype_load_status (default TRUE for LabVIEW, false otherwise). Set false " +
                     "to wait inline for the result (may hit the ~60s transport timeout for a slow load).")
                 .AddOptional("isolate", "boolean", "LabVIEW only: run in a crash-safe isolated worker " +
-                    "process (default TRUE — the worker binds the running LabVIEW via ActiveX AND " +
-                    "contains a native crash). false runs in-process (not crash-contained).")
+                    "process (default TRUE). NEITHER SETTING RELIABLY LOADS A PACKED-LIBRARY VI: the " +
+                    "worker is a separate process that does NOT inherit the attachment to the running " +
+                    "LabVIEW ADE, so it starts its own and usually times out; isolate=false loads " +
+                    "in-process and can raise the native delay-load fault 0xC06D007E, which is NOT " +
+                    "catchable and KILLS THE SERVER. For a .lvlibp step prefer copy_step_module (or " +
+                    "import_sequence_file's labview_panes='copy'), which clones the cached connector " +
+                    "pane from a source file without LabVIEW.")
                 .AddOptional("labview_server", "string", "LabVIEW server routing before the load: " +
                     "'deferred' (default) = running LabVIEW ADE via ActiveX, launched on first use " +
                     "(matches the editor; avoids the lvrt.dll delay-load); 'exec' = same but connect " +
@@ -5031,11 +5065,20 @@ public class TestStandToolRegistry
         var model = JsonSerializer.Deserialize<SequenceFileModel>(json, SequenceFileModel.Json)
                     ?? throw new ArgumentException($"'{modelPath}' does not contain a sequence-file model.");
 
+        // Back-compat for the retired boolean: it only offered "load the VI or get nothing". An explicit
+        // false still means "no panes"; an explicit true (and the old default) now maps to the SAFE clone
+        // route rather than the process-fatal in-process load — 'load' has to be asked for by name.
+        string paneMode = args!.Value.GetStringOrNull("labview_panes")
+                          ?? (args!.Value.GetBoolOrDefault("load_labview_prototypes", true)
+                              ? "copy" : "skip");
+
         var outcome = await _ts.ImportSequenceFileAsync(model, destPath,
             args!.Value.GetBoolOrDefault("copy_typedefs", true),
             args!.Value.GetBoolOrDefault("save", true),
-            args!.Value.GetBoolOrDefault("load_labview_prototypes", true),
-            args!.Value.GetIntOrDefault("prototype_timeout_seconds", 120));
+            paneMode,
+            args!.Value.GetIntOrDefault("prototype_timeout_seconds", 120),
+            args!.Value.GetStringOrDefault("cross_file_prototypes", "copy"),
+            args!.Value.GetBoolOrDefault("keep_unused_types", true));
         return OkJson(outcome);
     }
 

@@ -292,8 +292,9 @@ public interface ITestStandService : IDisposable
     /// configured). Returns per-item counts plus a warning for anything that could not be applied —
     /// a partial import is reported, never silently swallowed.</summary>
     Task<ImportOutcome> ImportSequenceFileAsync(SequenceFileModel model, string destFilePath,
-        bool copyTypeDefs = true, bool save = true, bool loadLabViewPrototypes = true,
-        int prototypeTimeoutSeconds = 120);
+        bool copyTypeDefs = true, bool save = true, string labViewPanes = "copy",
+        int prototypeTimeoutSeconds = 120, string crossFilePrototypes = "copy",
+        bool keepUnusedTypes = true);
 
     // Sequence Analyzer
     /// <summary>Runs the TestStand Sequence Analyzer on the given file and returns any messages.</summary>
@@ -895,10 +896,13 @@ public interface ITestStandService : IDisposable
     /// separate PROCESS with its own engine and reads the file from DISK, so the step has to be SAVED
     /// first. Called after a run of <c>save:false</c> edits it reports the step as out of range —
     /// which reads like an unloadable VI but is really an unsaved file.</para></summary>
+    /// <para><paramref name="calleeFiles"/> are extra sequence files the ISOLATED WORKER opens before
+    /// the load — required for a cross-file SequenceCall, whose prototype cache is only filled when the
+    /// callee file is loaded in the same engine.</para>
     Task<LoadPrototypeResult> LoadModulePrototypeAsync(string filePath,
         string sequenceName, string stepGroup, string stepName, bool save = true,
         bool? isolate = null, int timeoutSeconds = 120, bool? async = null,
-        string? labviewServer = null);
+        string? labviewServer = null, IReadOnlyList<string>? calleeFiles = null);
     /// <summary>Returns the current state of an ASYNC prototype-load job started by
     /// <see cref="LoadModulePrototypeAsync"/> (async mode). While running, Status="running"; once done,
     /// Status="completed" and the full result fields are final (or "error" if the job itself faulted).
@@ -918,11 +922,14 @@ public interface ITestStandService : IDisposable
     /// reproduce LabVIEW module metadata for VIs in a packed library (.lvlibp) that cannot be loaded
     /// headless (Load Prototype fails), so the connector pane cannot be regenerated — the cached
     /// metadata is copied verbatim instead. The module types must exist in the target file (use
-    /// copy_typedefs first). Does NOT load LabVIEW.</summary>
+    /// copy_typedefs first). Does NOT load LabVIEW.
+    /// <para><paramref name="paths"/> restricts which subtrees are copied (null = all of them, which is
+    /// what the MCP tool does). Passing a subset also SKIPS the adapter alignment, so an internal caller
+    /// can add authored step config to a step whose module is already configured.</para></summary>
     Task<Dictionary<string, object>> CopyStepModuleAsync(
         string sourceFilePath, string sourceSequenceName, string sourceStepGroup, string sourceStepName,
         string targetFilePath, string targetSequenceName, string targetStepGroup, string targetStepName,
-        bool save = true);
+        bool save = true, IReadOnlyList<string>? paths = null);
 
     // ── Sequence Analyzer (detailed) ─────────────────────────────────────────
     /// <summary>Runs the Sequence Analyzer and returns a detailed result filtered by minimum
@@ -12107,7 +12114,7 @@ public sealed class TestStandService : ITestStandService
     public async Task<LoadPrototypeResult> LoadModulePrototypeAsync(string filePath,
         string sequenceName, string stepGroup, string stepName, bool save = true,
         bool? isolate = null, int timeoutSeconds = 120, bool? async = null,
-        string? labviewServer = null)
+        string? labviewServer = null, IReadOnlyList<string>? calleeFiles = null)
     {
         EnsureConnected();
 
@@ -12126,9 +12133,22 @@ public sealed class TestStandService : ITestStandService
         bool isPackedLib = (viPath ?? "").IndexOf(".lvlibp", StringComparison.OrdinalIgnoreCase) >= 0;
 
         // Non-LabVIEW adapters (SequenceCall/.NET/DLL·CVI/ActiveX) are fast and never delay-load a
-        // LabVIEW runtime → always fast in-process & synchronous (no behaviour change, no regression).
+        // LabVIEW runtime → in-process & synchronous by default (no behaviour change, no regression).
+        //
+        // EXCEPTION — isolate=true forces the worker even here, and that is the ONLY way to load a
+        // cross-file SequenceCall prototype in a process that has already loaded a LabVIEW connector
+        // pane. Measured: the two load kinds poison each other BOTH ways. After any LabVIEW pane load,
+        // a cross-file SequenceCall load returns "could not resolve the target/module"; after a
+        // SequenceCall load, LabVIEW loads fail the same way. A fresh worker process is unpoisoned, so
+        // both can be had in one rebuild. openFiles carries the CALLEE files: the worker's fresh engine
+        // only fills TS.SData.Prototype when the target file is loaded there too.
         if (!isLabVIEW)
         {
+            if (isolate == true)
+                return await RunLoadPrototypeViaWorkerAsync(filePath, sequenceName, stepGroup,
+                    stepName, save, timeoutSeconds, adapterKey, isPackedLib,
+                    labviewServer ?? "deferred", calleeFiles);
+
             var r = await LoadPrototypeInProcessAsync(filePath, sequenceName, stepGroup, stepName, save);
             r.ExecutionMode = "in-process";
             return r;
@@ -12470,7 +12490,8 @@ public sealed class TestStandService : ITestStandService
     // read the interface back; on crash/timeout/clean-failure the on-disk file is unchanged.
     private async Task<LoadPrototypeResult> RunLoadPrototypeViaWorkerAsync(
         string filePath, string sequenceName, string stepGroup, string stepName,
-        bool save, int timeoutSeconds, string adapterKey, bool isPackedLib, string labviewServer)
+        bool save, int timeoutSeconds, string adapterKey, bool isPackedLib, string labviewServer,
+        IReadOnlyList<string>? openFiles = null)
     {
         var result = new LoadPrototypeResult
         {
@@ -12478,7 +12499,8 @@ public sealed class TestStandService : ITestStandService
         };
 
         var (outcome, workerNote) = await RunPrototypeWorkerProcessAsync(
-            filePath, sequenceName, stepGroup, stepName, Math.Max(5, timeoutSeconds), labviewServer);
+            filePath, sequenceName, stepGroup, stepName, Math.Max(5, timeoutSeconds), labviewServer,
+            openFiles);
         result.WorkerOutcome = outcome;
 
         if (outcome == "loaded")
@@ -12541,7 +12563,7 @@ public sealed class TestStandService : ITestStandService
     //   "timeout"    – worker exceeded the timeout and was killed (process tree)
     private async Task<(string outcome, string? note)> RunPrototypeWorkerProcessAsync(
         string filePath, string sequenceName, string stepGroup, string stepName, int timeoutSeconds,
-        string labviewServer)
+        string labviewServer, IReadOnlyList<string>? openFiles = null)
     {
         string? exe = Environment.ProcessPath;
         if (string.IsNullOrEmpty(exe) || !System.IO.File.Exists(exe))
@@ -12600,6 +12622,28 @@ public sealed class TestStandService : ITestStandService
         {
             psi.ArgumentList.Add("--search-dirs");
             psi.ArgumentList.Add(searchDirsFile);
+        }
+
+        // Callee files the worker must open before the load. A CROSS-FILE SequenceCall's prototype
+        // cache (TS.SData.Prototype) is only filled when the target file is loaded in the SAME engine,
+        // and the worker owns a fresh one that knows nothing of what the parent had open.
+        string? openFilesFile = null;
+        if (openFiles != null && openFiles.Count > 0)
+        {
+            try
+            {
+                openFilesFile = System.IO.Path.Combine(System.IO.Path.GetTempPath(),
+                    "ts_mcp_lp_openfiles_" + Guid.NewGuid().ToString("N") + ".json");
+                System.IO.File.WriteAllText(openFilesFile,
+                    System.Text.Json.JsonSerializer.Serialize(openFiles));
+                psi.ArgumentList.Add("--open-files");
+                psi.ArgumentList.Add(openFilesFile);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Could not write the worker callee-file list.");
+                openFilesFile = null;
+            }
         }
 
         // Give the worker the FULL logon environment. A Claude/stdio-launched MCP host inherits a
@@ -13166,10 +13210,29 @@ public sealed class TestStandService : ITestStandService
     }
 
     /// <inheritdoc/>
+    /// <summary>The subtrees a step-module copy clones by default: the code module plus the authored
+    /// step-config the step-type template does not instantiate on a fresh insert.</summary>
+    private static readonly string[] AllStepModulePaths =
+    {
+        "TS.SData", "VIModule",
+        "TS.AdditionalResultsHints", "TS.CustomResults",
+        "TS.ErrorDialogOptions", "Result.TimeoutOccurred",
+    };
+
+    /// <summary>Only the AUTHORED step config — no code module. Used by import_sequence_file to reproduce
+    /// result-logging hints and dialog options on every step without touching the module it just
+    /// configured from the model.</summary>
+    internal static readonly string[] AuthoredStepConfigPaths =
+    {
+        "TS.AdditionalResultsHints", "TS.CustomResults",
+        "TS.ErrorDialogOptions", "Result.TimeoutOccurred",
+    };
+
+    /// <inheritdoc/>
     public async Task<Dictionary<string, object>> CopyStepModuleAsync(
         string sourceFilePath, string sourceSequenceName, string sourceStepGroup, string sourceStepName,
         string targetFilePath, string targetSequenceName, string targetStepGroup, string targetStepName,
-        bool save = true)
+        bool save = true, IReadOnlyList<string>? paths = null)
     {
         EnsureConnected();
         return await Task.Run(() =>
@@ -13189,9 +13252,11 @@ public sealed class TestStandService : ITestStandService
 
             // 1) Align the adapter FIRST (so the target owns the right-shaped module container);
             //    ChangeAdapter would otherwise reset the module we are about to copy.
+            //    Skipped for a restricted path set: the caller is then copying authored step CONFIG only
+            //    and the target's module is already configured — ChangeAdapter would reset it.
             string srcAdapter = TryGetString(srcStep, "AdapterKeyName");
             string tgtAdapter = TryGetString(tgtStep, "AdapterKeyName");
-            if (!string.IsNullOrEmpty(srcAdapter) &&
+            if (paths is null && !string.IsNullOrEmpty(srcAdapter) &&
                 !string.Equals(srcAdapter, tgtAdapter, StringComparison.OrdinalIgnoreCase))
             {
                 try { ((dynamic)tgtStep).ChangeAdapter((object)srcAdapter); result["adapterChangedTo"] = srcAdapter; }
@@ -13213,9 +13278,7 @@ public sealed class TestStandService : ITestStandService
             //    SetPropertyObject refuses an object that "already has a parent object. You must first clone
             //    the item". So CLONE the subtree first (PropOption_CopyAllFlags = a flag-preserving deep copy
             //    that returns a detached, independent object) and attach the clone to the target.
-            foreach (var path in new[] { "TS.SData", "VIModule",
-                                         "TS.AdditionalResultsHints", "TS.CustomResults",
-                                         "TS.ErrorDialogOptions", "Result.TimeoutOccurred" })
+            foreach (var path in paths ?? AllStepModulePaths)
             {
                 // Existence probe on the source step (GetPropertyObject throws if the path is absent).
                 try { _ = (NiPropertyObject)(object)srcPo.GetPropertyObject(path, 0); }
@@ -13234,7 +13297,9 @@ public sealed class TestStandService : ITestStandService
                 catch (Exception ex) { warnings.Add($"Could not copy '{path}': {ex.Message}"); }
             }
 
-            if (copied.Count == 0)
+            // Only a full copy is expected to find a module; a restricted path set legitimately finds
+            // nothing when the source step authored no result hints or dialog options.
+            if (copied.Count == 0 && paths is null)
                 warnings.Add("No module subtree (TS.SData / VIModule) was found on the source step.");
 
             if (save)
@@ -14249,7 +14314,8 @@ public sealed class TestStandService : ITestStandService
     /// <inheritdoc/>
     public async Task<ImportOutcome> ImportSequenceFileAsync(SequenceFileModel model,
         string destFilePath, bool copyTypeDefs = true, bool save = true,
-        bool loadLabViewPrototypes = true, int prototypeTimeoutSeconds = 120)
+        string labViewPanes = "copy", int prototypeTimeoutSeconds = 120,
+        string crossFilePrototypes = "copy", bool keepUnusedTypes = true)
     {
         EnsureConnected();
         var outcome = new ImportOutcome();
@@ -14257,6 +14323,36 @@ public sealed class TestStandService : ITestStandService
         if (model.SchemaVersion != 1)
             throw new ArgumentException(
                 $"Unsupported model schemaVersion {model.SchemaVersion} (this server writes/reads 1).");
+
+        // Both fidelity passes that need a REAL prototype load have a cheap, safe alternative: clone the
+        // cached module subtree straight out of the file the model was exported from. That needs the
+        // source file, so resolve it once and downgrade the modes that depend on it.
+        string paneMode  = NormalizeModuleMode(labViewPanes,        nameof(labViewPanes));
+        string protoMode = NormalizeModuleMode(crossFilePrototypes, nameof(crossFilePrototypes));
+        string? sourcePath = FirstExistingPath(model.SourcePath, model.TypeDefsSourcePath);
+        if (sourcePath is null)
+        {
+            if (paneMode == "copy")
+            {
+                paneMode = "skip";
+                outcome.Warnings.Add(
+                    "labview_panes='copy' needs the file the model was exported from, and neither " +
+                    $"sourcePath ('{model.SourcePath}') nor typeDefsSourcePath " +
+                    $"('{model.TypeDefsSourcePath}') exists — falling back to 'skip'. The VI paths are " +
+                    "still written but ViCall.Parms stays empty. Use labview_panes='load' to attempt a " +
+                    "real LabVIEW load instead (see its warning).");
+            }
+            if (protoMode == "copy")
+            {
+                protoMode = "skip";
+                outcome.Warnings.Add(
+                    "cross_file_prototypes='copy' needs the model's source file (see above) — falling " +
+                    "back to 'skip'. Cross-file calls work; only the cached TS.SData.Prototype stays " +
+                    "empty.");
+            }
+        }
+        outcome.LabViewPaneMode        = paneMode;
+        outcome.CrossFilePrototypeMode = protoMode;
 
         // 1) Types first — cloned sequences, typed locals and enum members all resolve against them.
         if (copyTypeDefs && !string.IsNullOrWhiteSpace(model.TypeDefsSourcePath))
@@ -14405,13 +14501,44 @@ public sealed class TestStandService : ITestStandService
             }
         }
 
-        // 5) LabVIEW VI connector panes, LAST and only after the file is on disk. The load runs in an
-        // isolated worker process with its own engine that reads the file from DISK, so the steps must
-        // be saved first — otherwise the worker reports the step as out of range and nothing loads.
-        // Routed through load_module_prototype (LabVIEW ExecServer + crash-isolated worker), which is
-        // what makes a VI inside a packed library loadable headless at all; the built-in auto-load of
-        // configure_labview_module goes through the adapter's AutoDetect → Run-Time and faults there.
-        if (loadLabViewPrototypes && pendingViLoads.Count > 0)
+        // 5) LabVIEW VI connector panes.
+        //
+        // DEFAULT IS 'copy', NOT a prototype load, because the load is PROCESS-FATAL here. Measured
+        // 2026-07-29 on this file, with LabVIEW 2026 32-bit already started and responsive: an
+        // in-process load of a .lvlibp VI raised the MSVC delay-load SEH 0xC06D007E (the LabVIEW
+        // Run-Time lvrt.dll), which escapes managed try/catch, killed the server process and put up the
+        // NI Error Reporter. The ExecServer routing that was supposed to avoid the Run-Time did not
+        // prevent it, and the in-process path has none of the worker's silent-death guards — those live
+        // in LoadPrototypeWorker, which cannot help a fault raised in the server itself. The isolated
+        // worker is crash-safe but cannot bind the running LabVIEW ADE, so it times out instead.
+        //
+        // 'copy' clones the cached ViCall subtree (Namespace, VI Description, connector-pane checksum,
+        // Parms with their ArgVal/UseDefaultValues bindings) out of the file the model was exported
+        // from — the same thing copy_step_module does. Measured: all 5 packed-library steps of this
+        // file reproduced in ~1 s each with 0 pane differences, versus a dead process for the load.
+        if (paneMode == "copy" && pendingViLoads.Count > 0)
+        {
+            foreach (var (vSeq, vGroup, vSel, vStep) in pendingViLoads)
+            {
+                try
+                {
+                    var res = await CopyStepModuleAsync(sourcePath!, vSeq, vGroup, vSel,
+                        destFilePath, vSeq, vGroup, vSel, save: false);
+                    if (res.TryGetValue("warnings", out var w) && w is List<string> wl && wl.Count > 0)
+                        foreach (var msg in wl)
+                            outcome.Warnings.Add($"{vSeq}/{vGroup}/{vStep.Name} pane copy: {msg}");
+                    else
+                        outcome.PanesCopied++;
+                }
+                catch (Exception ex)
+                {
+                    outcome.Warnings.Add(
+                        $"{vSeq}/{vGroup}/{vStep.Name}: connector-pane copy from '{sourcePath}' failed: " +
+                        $"{ex.Message}. ViCall.Parms stays empty.");
+                }
+            }
+        }
+        else if (paneMode == "load" && pendingViLoads.Count > 0)
         {
             // Save AND RELOAD before loading any connector pane. Saving alone is not enough: the
             // in-memory file object that the import just assembled resolves a packed-library VI
@@ -14427,14 +14554,12 @@ public sealed class TestStandService : ITestStandService
                 string vLabel = vStep.Name;
                 try
                 {
-                    // isolate:FALSE — in-process. Measured on this file: in-process loads a packed-
-                    // library VI's connector pane in ~5s (19 parameters), while the isolated worker
-                    // times out every single time even with LabVIEW already running, because a fresh
-                    // worker process does not inherit the attachment to the running LabVIEW ADE and
-                    // tries to bring one up itself. Per-step workers also pay that cost 8 times over.
-                    // The price is that a native fault is not contained; the ExecServer routing is
-                    // precisely what avoids the Run-Time delay-load fault that made isolation
-                    // necessary, and the caller can still opt out with load_labview_prototypes=false.
+                    // isolate:FALSE — in-process, and THIS IS THE CALL THAT KILLS THE PROCESS when the
+                    // adapter resolves the LabVIEW Run-Time instead of the running ADE (0xC06D007E,
+                    // measured with LabVIEW warm; see the block above pass 5). It stays reachable only
+                    // because a station where the ExecServer routing DOES take effect gets a genuine
+                    // load out of it, and because 'copy' needs the source file. The isolated worker is
+                    // the crash-safe variant but cannot bind the running LabVIEW, so it only times out.
                     // Synchronous so one import call is self-contained.
                     var lp = await LoadModulePrototypeAsync(destFilePath, vSeq, vGroup, vSel,
                         save: true, isolate: false, timeoutSeconds: prototypeTimeoutSeconds,
@@ -14473,37 +14598,14 @@ public sealed class TestStandService : ITestStandService
         else if (pendingViLoads.Count > 0)
         {
             outcome.Warnings.Add(
-                $"load_labview_prototypes=false — {pendingViLoads.Count} LabVIEW step(s) got their VI " +
-                "path but NO connector pane, so ViCall.Parms and the VI metadata stay empty.");
+                $"labview_panes='skip' — {pendingViLoads.Count} LabVIEW step(s) got their VI path but NO " +
+                "connector pane, so ViCall.Parms and the VI metadata stay empty.");
         }
 
-        // 6) SequenceCall + Python modules LAST. A SequenceCall prototype load leaves the LabVIEW
-        // adapter unable to resolve a VI for the rest of the process, so this cannot run before the
-        // connector panes above are loaded.
-        //
-        // First make every EXTERNAL callee file resolvable: a cross-file SequenceCall's prototype
-        // cache is only filled with the callee's parameter defaults when that file is actually loaded.
-        // Without this the cached Prototype container comes out with the argument NAMES but none of
-        // their values.
-        foreach (var ext in model.Sequences
-                     .SelectMany(sq => sq.Steps)
-                     .Select(st => st.Module?.TargetSequenceFile)
-                     .Where(f => !string.IsNullOrWhiteSpace(f))
-                     .Select(f => f!.Trim())
-                     .Distinct(StringComparer.OrdinalIgnoreCase))
-        {
-            string resolved = Path.IsPathRooted(ext)
-                ? ext
-                : Path.Combine(Path.GetDirectoryName(destFilePath) ?? "", ext);
-            try { await OpenSequenceFileAsync(resolved); }
-            catch (Exception ex)
-            {
-                outcome.Warnings.Add(
-                    $"external callee file '{ext}' could not be opened ({ex.Message}); cross-file " +
-                    "SequenceCall prototypes will lack their cached parameter defaults.");
-            }
-        }
-
+        // 6) SequenceCall + Python modules. This sets every target and authors every argument, but
+        // WITHOUT an in-process SequenceCall prototype load: that load would (a) be poisoned by the
+        // LabVIEW pane loads just done and (b) poison any further LabVIEW load. Pass 7 does the load
+        // out-of-process instead.
         foreach (var (mSeq, mGroup, mSteps) in pendingModulePasses)
         {
             for (int i = 0; i < mSteps.Count; i++)
@@ -14518,8 +14620,236 @@ public sealed class TestStandService : ITestStandService
             }
         }
 
+        // 6b) AUTHORED step-config subtrees, for EVERY step. These are not part of the model and no
+        // configure_* tool writes them: the result-logging hints (TS.AdditionalResultsHints,
+        // TS.CustomResults), the error-dialog options and the NI_Wait timeout-result flag are authored in
+        // the editor and a freshly inserted step does not inherit them from its step-type template. They
+        // showed up as the last non-module residual — an NI_Wait whose AdditionalResultsHints array had
+        // one element in the original and none in the rebuild. Cloning them from the source step is
+        // value-neutral: the source IS the target, so this can only remove differences. The module
+        // subtrees are deliberately NOT in this set — those belong to passes 5/6/7.
+        if (sourcePath is not null)
+        {
+            foreach (var (mSeq, mGroup, mSteps) in pendingModulePasses)
+                for (int i = 0; i < mSteps.Count; i++)
+                {
+                    try
+                    {
+                        await CopyStepModuleAsync(sourcePath, mSeq, mGroup, $"@idx:{i}",
+                            destFilePath, mSeq, mGroup, $"@idx:{i}", save: false,
+                            paths: AuthoredStepConfigPaths);
+                    }
+                    catch (Exception ex)
+                    {
+                        outcome.Warnings.Add(
+                            $"step config '{mSeq}'/{mGroup}[{i}] '{mSteps[i].Name}': could not copy the " +
+                            $"authored result/dialog subtrees: {ex.Message}");
+                    }
+                }
+        }
+
+        // 7) CROSS-FILE SequenceCall prototype caches.
+        //
+        // TS.SData.Prototype caches the callee's parameter list so the editor can validate a cross-file
+        // call without loading the other file. A real LoadPrototype fills it only when the callee file is
+        // loaded in the SAME engine, and it cannot run here in-process: the two prototype-load kinds
+        // poison each other in BOTH directions (measured — after any LabVIEW pane load a cross-file
+        // SequenceCall load reports "could not resolve the target/module", and vice versa). That left an
+        // isolated worker, which has to start its own engine and open every callee file — measured on
+        // this file, one 3 MB callee ran the worker into its 300 s timeout and produced nothing.
+        //
+        // So the DEFAULT is 'copy': clone the cached subtree from the model's source file, which brings
+        // the Prototype AND the authored ActualArgs verbatim. Measured: ~1 s, and the 6 Prototype
+        // differences the worker left behind all closed. 'load' keeps the worker route for a rebuild that
+        // has no source file to clone from.
         if (save) await SaveSequenceFileAsync(destFilePath);
+
+        var crossFileCalls = new List<(string Seq, string Group, int Idx, StepModel Step)>();
+        foreach (var (mSeq, mGroup, mSteps) in pendingModulePasses)
+            for (int i = 0; i < mSteps.Count; i++)
+            {
+                var mod = mSteps[i].Module;
+                if (mod?.Kind == "SequenceCall" && mod.UseCurrentFile == false
+                    && !string.IsNullOrWhiteSpace(mod.TargetSequenceFile))
+                    crossFileCalls.Add((mSeq, mGroup, i, mSteps[i]));
+            }
+
+        outcome.CrossFilePrototypeCandidates = crossFileCalls.Count;
+        if (crossFileCalls.Count > 0 && protoMode == "copy")
+        {
+            foreach (var (cSeq, cGroup, cIdx, cStep) in crossFileCalls)
+            {
+                try
+                {
+                    var res = await CopyStepModuleAsync(sourcePath!, cSeq, cGroup, $"@idx:{cIdx}",
+                        destFilePath, cSeq, cGroup, $"@idx:{cIdx}", save: false);
+                    if (res.TryGetValue("warnings", out var w) && w is List<string> wl && wl.Count > 0)
+                        foreach (var msg in wl)
+                            outcome.Warnings.Add($"{cSeq}/{cGroup}/{cStep.Name} prototype copy: {msg}");
+                    else
+                        outcome.CrossFilePrototypesCopied++;
+                }
+                catch (Exception ex)
+                {
+                    outcome.Warnings.Add(
+                        $"{cSeq}/{cGroup}/{cStep.Name}: cross-file prototype copy from '{sourcePath}' " +
+                        $"failed: {ex.Message}. The call works — only the cached TS.SData.Prototype " +
+                        "stays empty.");
+                }
+            }
+        }
+        else if (crossFileCalls.Count > 0 && protoMode == "skip")
+        {
+            outcome.Warnings.Add(
+                $"cross_file_prototypes='skip' — {crossFileCalls.Count} cross-file SequenceCall(s) keep " +
+                "an empty TS.SData.Prototype cache. The calls themselves work.");
+        }
+        else if (crossFileCalls.Count > 0)
+        {
+            string baseDir = Path.GetDirectoryName(destFilePath) ?? "";
+            var callees = crossFileCalls
+                .Select(c => c.Step.Module!.TargetSequenceFile!.Trim())
+                .Select(f => Path.IsPathRooted(f) ? f : Path.Combine(baseDir, f))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Where(System.IO.File.Exists)
+                .ToList();
+
+            foreach (var (cSeq, cGroup, cIdx, cStep) in crossFileCalls)
+            {
+                try
+                {
+                    // The worker pays a fresh-process cost the in-process LabVIEW loads do not: its own
+                    // engine start plus opening the destination AND every callee file (a real callee can
+                    // be megabytes and pull in further files). Measured: 120 s was not enough for one
+                    // 3 MB callee, so the floor here is well above the caller's per-VI budget.
+                    int crossFileTimeout = Math.Max(prototypeTimeoutSeconds, 300);
+                    var lr = await LoadModulePrototypeAsync(destFilePath, cSeq, cGroup, $"@idx:{cIdx}",
+                        save: true, isolate: true, timeoutSeconds: crossFileTimeout,
+                        async: false, labviewServer: null, calleeFiles: callees);
+
+                    if (lr.PrototypeLoaded)
+                    {
+                        outcome.CrossFilePrototypesLoaded++;
+                        // The load rewrote ActualArgs from the callee — restore the source's bindings.
+                        if (cStep.Module!.Arguments != null)
+                            await ApplySequenceCallArgsAsync(destFilePath, cSeq, cGroup, $"@idx:{cIdx}",
+                                cStep.Name, cStep.Module!.Arguments!, outcome);
+                    }
+                    else
+                    {
+                        outcome.Warnings.Add(
+                            $"{cSeq}/{cGroup}/{cStep.Name}: cross-file prototype cache NOT loaded " +
+                            $"(workerOutcome={lr.WorkerOutcome ?? "n/a"}; {lr.Note}). The call works — " +
+                            "only the cached TS.SData.Prototype stays empty, which the FileDiffer shows " +
+                            "as missing Prototype members.");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    outcome.Warnings.Add(
+                        $"{cSeq}/{cGroup}/{cStep.Name}: cross-file prototype load failed: {ex.Message}");
+                }
+            }
+        }
+
+        if (save) await SaveSequenceFileAsync(destFilePath);
+
+        // 8) TYPES THAT THE SAVE DROPPED. A type survives in a file only if it is ATTACHED to the file or
+        // still REFERENCED by something in it; a type that is neither is garbage-collected on save. With
+        // attach='preserve' (what a 1:1 rebuild wants) that silently loses every type the original keeps
+        // alive through a sequence the import did not carry — measured: importing 8 of 30 sequences lost 5
+        // enum typedefs, with no warning and after copy_typedefs had reported all 59 as copied.
+        // Attaching those few in the destination brought them all back and produced ZERO additional
+        // FileDiffer differences, so 'keep' is the safe default; the deviation is that the destination
+        // then embeds more types than the original, which the FileDiffer does not report.
+        //
+        // The check MUST run against the file as it now exists ON DISK. GetFileTypeDefsAsync reads the
+        // in-memory object, which still lists a type the save has just dropped — measured: it reported
+        // all 59 types present while the FileDiffer found 5 of them gone. So reload first.
+        if (copyTypeDefs && save && model.TypeDefs.Count > 0 && sourcePath is not null)
+        {
+            try
+            {
+                async Task<HashSet<string>> ReloadedTypeNamesAsync()
+                {
+                    await CloseSequenceFileAsync(destFilePath);
+                    await OpenSequenceFileAsync(destFilePath);
+                    return new HashSet<string>(
+                        (await GetFileTypeDefsAsync(destFilePath)).Select(t => t.Name),
+                        StringComparer.OrdinalIgnoreCase);
+                }
+
+                var present = await ReloadedTypeNamesAsync();
+                var missing = model.TypeDefs.ConvertAll(t => t.Name)
+                    .FindAll(n => !string.IsNullOrWhiteSpace(n) && !present.Contains(n));
+
+                if (missing.Count > 0 && keepUnusedTypes)
+                {
+                    var rescued = await CopyTypeDefsAsync(sourcePath, destFilePath, missing,
+                        save: true, attach: "all");
+                    outcome.TypeDefsForceAttached = rescued.Count;
+                    if (rescued.Count > 0)
+                        outcome.Warnings.Add(
+                            $"{rescued.Count} type(s) were dropped by the save because the imported " +
+                            "sequences do not reference them and the original does not attach them; they " +
+                            "were re-copied ATTACHED so they persist (" + string.Join(", ", rescued) +
+                            "). The destination therefore embeds more types than the original — the " +
+                            "FileDiffer does not report that. Pass keep_unused_types=false to let them go.");
+
+                    present = await ReloadedTypeNamesAsync();
+                    missing = missing.FindAll(n => !present.Contains(n));
+                }
+
+                outcome.TypeDefsMissing = missing.Count;
+                if (missing.Count > 0)
+                    outcome.Warnings.Add(
+                        $"{missing.Count} type(s) from the model are NOT in the destination: " +
+                        string.Join(", ", missing) +
+                        (keepUnusedTypes ? ". Re-copying them attached did not make them persist."
+                                         : ". keep_unused_types=false, so unreferenced types were let go."));
+            }
+            catch (Exception ex)
+            { outcome.Warnings.Add($"type-survival check failed: {ex.Message}"); }
+        }
+
+        // The outcome is the only report of what could NOT be applied, and an import can outlive the
+        // caller's RPC window (measured: 5.5 min, which the ~60 s MCP transport gave up on long before
+        // the work finished — the result was complete but unreachable). Persist it next to the rebuilt
+        // file so a transport timeout costs latency, never the warnings.
+        try
+        {
+            outcome.OutcomePath = destFilePath + ".import.json";
+            await System.IO.File.WriteAllTextAsync(outcome.OutcomePath,
+                System.Text.Json.JsonSerializer.Serialize(outcome, SequenceFileModel.Json));
+        }
+        catch (Exception ex)
+        {
+            outcome.OutcomePath = null;
+            _logger.LogDebug(ex, "Could not persist the import outcome next to '{Dest}'.", destFilePath);
+        }
+
         return outcome;
+    }
+
+    /// <summary>Validates a copy/load/skip module-reproduction mode and normalises its casing.</summary>
+    private static string NormalizeModuleMode(string? mode, string paramName)
+    {
+        string m = (mode ?? "copy").Trim().ToLowerInvariant();
+        return m switch
+        {
+            "copy" or "load" or "skip" => m,
+            "" => "copy",
+            _ => throw new ArgumentException(
+                $"{paramName} must be 'copy', 'load' or 'skip' (got '{mode}').", paramName),
+        };
+    }
+
+    /// <summary>First of the candidate paths that exists on disk, or null.</summary>
+    private static string? FirstExistingPath(params string?[] candidates)
+    {
+        foreach (var c in candidates)
+            if (!string.IsNullOrWhiteSpace(c) && System.IO.File.Exists(c)) return c;
+        return null;
     }
 
     // Writes a variable's value/flags/representation and recurses into its members. The top-level
@@ -14712,11 +15042,16 @@ public sealed class TestStandService : ITestStandService
                     break;
 
                 case "SequenceCall":
+                    // loadPrototype:FALSE on purpose. The arguments are authored in full from the model
+                    // right below, so the load buys nothing here for the interface — and an in-process
+                    // SequenceCall load would poison the LabVIEW adapter for the rest of the process
+                    // (and is itself already poisoned by the pane loads that ran before). The only thing
+                    // it does add, the cross-file Prototype cache, is done out-of-process in pass 7.
                     await ConfigureSequenceCallModuleAsync(filePath, seqName, group, selector,
                         mod.TargetSequenceName ?? "",
                         mod.UseCurrentFile == false ? (mod.TargetSequenceFile ?? "") : "",
                         save: false, executionMode: null, threadRefExpr: null, autoWait: null,
-                        loadPrototype: true, storedFilePath: mod.StoredFilePath);
+                        loadPrototype: false, storedFilePath: mod.StoredFilePath);
                     outcome.ModulesConfigured++;
                     if (mod.Arguments != null)
                         await ApplySequenceCallArgsAsync(filePath, seqName, group, selector,

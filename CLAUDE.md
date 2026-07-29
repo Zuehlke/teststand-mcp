@@ -13,22 +13,29 @@ delete_sequence(dest, "MainSequence")              → the model has none
 diff_sequence_files(orig, dest, summary_only=true) → verify
 ```
 
-Measured on `TFW_MDC_com_Python.seq` (30 sequences, 131 steps, 13 object-oriented Python steps,
-8 LabVIEW `.lvlibp` steps): **9 MCP calls, 0 import warnings, 9 FileDiffer differences — and ZERO in
-the LabVIEW connector panes.** The same rebuild done with the granular tools took ~700 calls, 3 diff
-iterations and left 224 differences.
+Measured 2026-07-29 on 8 sequences of `TFW_MDC_com_Python.seq` (47 steps, 13 object-oriented Python
+steps, 5 LabVIEW `.lvlibp` steps, 1 cross-file SequenceCall): **3 MCP calls, 0 warnings, and exactly
+ONE FileDiffer difference** (the enum-default marker below). The same rebuild with the granular tools
+took ~700 calls, 3 diff iterations and left 224 differences.
 
-**The `.lvlibp` connector pane IS reproducible headless — it is NOT an irreducible residual.** Getting
-there depends on three ordering rules that are easy to get wrong (all measured on this file):
-1. **A SequenceCall `LoadPrototype` disables LabVIEW VI loads for the REST OF THE PROCESS.** After one
-   such load, every LabVIEW pane load fails with "could not resolve the target/module"; the identical
-   call in a process that has not done one succeeds in ~5 s. So: load ALL VI panes BEFORE configuring
-   any SequenceCall. `import_sequence_file` does this in separate passes.
-2. **The VI load must run IN-PROCESS (`isolate:false`).** The crash-isolated worker is a separate
-   process that does not inherit the attachment to the running LabVIEW ADE, tries to start its own and
-   times out every time — 8 steps × 120 s, all failed, while in-process takes ~5 s per step.
-3. **The step must be SAVED to disk before the load** (the worker path reads from disk; a load after a
-   run of `save:false` edits reports the step as out of range, which reads like an unloadable VI).
+### NEVER load a LabVIEW prototype to rebuild a pane — CLONE it (measured 2026-07-29)
+An earlier version of this file claimed an in-process `.lvlibp` pane load works in ~5 s and that the
+isolated worker is the broken one. **Both halves are wrong, and following that advice kills the server.**
+- `load_module_prototype(isolate:false)` on a `.lvlibp` VI raised the MSVC delay-load SEH
+  **`0xC06D007E`** (the LabVIEW Run-Time `lvrt.dll`) **with LabVIEW 2026 32-bit already started and
+  responsive**. It escapes managed `try/catch`, so the server PROCESS DIES and the NI Error Reporter
+  appears. The ExecServer routing that was supposed to avoid the Run-Time did not prevent it, and the
+  in-process path has none of the worker's silent-death guards — those live in `LoadPrototypeWorker`
+  and cannot help a fault raised in the server itself.
+- `isolate:true` is crash-safe but cannot bind the running LabVIEW ADE, so it only times out.
+- **So there is no working prototype-load route for a packed-library VI on this station.** The route
+  that DOES work is cloning the cached `ViCall` subtree from a source `.seq` — `copy_step_module`, or
+  `import_sequence_file`'s `labview_panes='copy'` (the DEFAULT). ~1 s per step, no LabVIEW, and the
+  panes come out with zero differences: `Parms` with their `ArgVal`/`UseDefaultValues` bindings,
+  namespace, VI description, connector-pane checksum.
+- After a crash, `get_prototype_load_status` reports the job as "unknown or expired" — indistinguishable
+  from a genuinely expired job. A vanished job right after a LabVIEW load means the process died; check
+  whether the server's PID changed.
 
 - The model is written to DISK, not returned inline (a 30-sequence model is ~350 KB) — pass the path
   straight to import. `inline=true` only for a single sequence.
@@ -40,30 +47,54 @@ there depends on three ordering rules that are easy to get wrong (all measured o
   ONLY THEN steps, so every callee's parameters exist before a caller's prototype is loaded.
 - `warnings[]` names every item that could not be applied. A non-empty list means a partial import —
   read it, do not assume success from the counts.
+- **The defaults are the safe ones — do not "improve" them.** `labview_panes='copy'` and
+  `cross_file_prototypes='copy'` clone from the model's source file; `'load'` exists only for a model
+  with no source file to clone from and carries the process-death risk above. `keep_unused_types=true`
+  re-attaches types the save would drop. All three are locked down by tests in `T35`.
+- **The outcome is ALSO written to `<dest>.import.json`.** An import can outlive the ~60 s MCP transport
+  window (measured 5.5 min before the passes were made cheap); a `-32001` timeout does NOT abort it —
+  the server finishes and saves. Read that file for the counts and warnings instead of re-running.
+- Importing a SUBSET of the sequences **silently drops every type the omitted sequences kept alive**: a
+  type survives only if it is attached to the file or still referenced, and `attach='preserve'` (what a
+  1:1 rebuild needs) attaches almost nothing. Import now detects this AFTER a save+reload — the
+  in-memory type list still lists a type the save just dropped — re-attaches them and names them in
+  `warnings`. Cost: the rebuild embeds more types than the original, which the FileDiffer does not show.
 
 **Reading a big diff:** always start `diff_sequence_files(..., summary_only=true)`. Every response
 carries `byCategory` / `byChangeType` / `bySequence` over ALL differences; the individual rows are the
 expensive part (600+ of them blows the tool-result budget). Then drill in with `include_categories` /
 `exclude_categories` / `path_filter` / `change_types` / `max_results` and
-`group_by='category'|'sequence'`. `exclude_categories=['labview_vicall']` hides the block that cannot
-be reproduced headlessly at all.
+`group_by='category'|'sequence'`. When you rebuild only SOME sequences, the omitted ones dominate the
+count as `other` Deletes — subtract them (`exclude_categories=['other']`) before judging the rebuild.
 
 **Connector-pane BINDINGS need their own writer.** `set_module_parameter` always clears a control's
 `UseDefaultValues` as a side effect, so binding every parameter through it flips that flag wherever the
 source keeps the VI's own default (a remembered expression next to "use default" — the same asymmetry as
 a SequenceCall argument's `UseDef`). Measured: 31 differences became 68 (write everything), 41
 (non-empty only), 39 (flag-aware) — while writing `ViCall.Parms[i].ArgVal` and `UseDefaultValues`
-INDEPENDENTLY gave 9. For 1:1 work set those two properties directly, not via `set_module_parameter`.
+INDEPENDENTLY gave 9. Only relevant when hand-binding: the clone path carries both verbatim.
 
-### Residuals after export/import (the only ones left; 9 on the reference file)
+### The two prototype-load kinds are MUTUALLY EXCLUSIVE per process (measured 2026-07-29)
+Within one server process: a LabVIEW pane load first → the following SeqCall load returns
+`prototypeLoaded:false` ("LoadPrototype could not resolve the target/module"); a SeqCall load first →
+the following LabVIEW loads fail the same way. So a single process can have the panes or the cross-file
+caches, never both. **This no longer constrains a rebuild**, because neither is produced by a load any
+more — both are cloned from the source file, which has no such interaction. It still matters if you
+force `labview_panes='load'` / `cross_file_prototypes='load'` by hand.
+
+The worker route for the cross-file cache is also not a real option: it must start its own engine and
+open every callee file, and one 3 MB callee (`Easy.Log.seq`) ran it into a 300 s timeout and produced
+nothing. `cross_file_prototypes='copy'` reproduced the same 6 `Prototype` members in about a second.
+
+### Residuals after export/import (the only one left)
 - **1× a named-type instance's ENUM member reads as explicitly-set.** Both instantiation routes
   (`NewSubProperty(NamedType)` and `Engine.NewPropertyObject`+`SetPropertyObject`) produce `[val]`
-  where the editor produces `{val}`. API limitation, cosmetic.
-- **6× a cross-file SequenceCall's cached `Prototype`** keeps the callee's parameter DEFAULTS
-  (`LogProperty {""}`); a prototype load recreates the names but not the values, and preloading the
-  callee file does not change it.
-- **2× a step's authored `TS.AdditionalResultsHints` / `CustomResults` arrays** are not part of the
-  model; use `copy_step_module` when they matter.
+  where the editor produces `{val}`. API limitation, cosmetic. On the reference subset this is the
+  ONLY difference (`_MDC_com > Locals > LogEntry > LogLevel`).
+- CLOSED since 2026-07-29: the cross-file `Prototype` cache (now cloned), the LabVIEW connector panes
+  (now cloned), and a step's authored `TS.AdditionalResultsHints` / `CustomResults` — import pass 6b
+  clones those for EVERY step, so the `NI_Wait` residual is gone and `copy_step_module` is no longer
+  needed by hand for them.
 - **`NI.Analyzer.IgnoredMessages`** is invisible to the engine API (see below), so the rebuild shows a
   few extra analyzer warnings the original suppresses.
 
@@ -398,14 +429,13 @@ descriptions; the cross-cutting rules below apply regardless of which tool you c
 - **Undo/redo is not auto-recorded** by the headless API (it's a Sequence Editor
   feature). `CanUndo` is false on a fresh file; MCP edits won't be undoable. Revert by
   performing the inverse operation explicitly. (`T08`.)
-- **LabVIEW `ViCall` prototypes DO materialize headless — this entry used to say the opposite and
-  that was wrong (2026-07-29).** A `.lvlibp` VI's connector pane loads via `load_module_prototype`
-  when three conditions hold: the step is SAVED to disk, the load runs `isolate:false` (in-process,
-  ExecServer-routed), and no SequenceCall prototype load has happened in this process yet (see the
-  rebuild section at the top for the measurements). Only then does `set_module_parameter` have
-  Labels to bind. What genuinely does NOT work is `configure_labview_module`'s built-in auto-load:
-  it goes in-process through the adapter's AutoDetect → LabVIEW Run-Time and faults, so pass
-  `load_prototype:false` there and call `load_module_prototype` afterwards.
+- **A `.lvlibp` `ViCall` pane cannot be LOADED headless on this station — clone it instead.** Both
+  routes fail, in different ways: `isolate:false` (in-process) raised the delay-load SEH `0xC06D007E`
+  and KILLED THE SERVER even with LabVIEW warm, and `isolate:true` cannot bind the running LabVIEW ADE
+  and times out. Use `copy_step_module` (or `import_sequence_file`'s default `labview_panes='copy'`),
+  which reproduces `ViCall.Parms` and all the VI metadata from a source `.seq` in ~1 s without LabVIEW.
+  `configure_labview_module`'s built-in auto-load faults the same way — pass `load_prototype:false`.
+  See the corrected section at the top of this file for the measurements.
 - **The engine connection auto-reconnects.** If the MCP host restarts the server mid-session,
   `EnsureConnected` does a one-shot lazy reconnect (default engine path) before failing; mutating
   tools also auto-load their file on demand. So a transient "Not connected" self-heals on the next
@@ -564,19 +594,18 @@ max+1. (`T22`.)
     `Initialize()`, restored afterward. Configurable via **`labview_server`**: `deferred` (default,
     running ADE launched on first use), `exec` (connect now), `rte` (legacy AutoDetect), `auto` (leave
     config untouched).
-  - **The isolated worker is the DEFAULT (`isolate:true`) but CANNOT actually load a LabVIEW VI —
-    pass `isolate:false` for LabVIEW (corrected 2026-07-29).** The claim that ExecServer's ActiveX
-    lets the worker "attach to the running LabVIEW just like an in-process load" is WRONG: the worker
-    is a separate process, does not inherit the attachment to the running LabVIEW ADE, tries to start
-    its own and TIMES OUT. Measured on `TFW_MDC_com_Python.seq`: 8 steps × 120 s, every one a timeout
-    (LabVIEW finally came up after the 7th) vs **~5 s per step and a correct 19-parameter pane
-    in-process**. Also: the worker reads the file from DISK, so a load after a run of `save:false`
-    edits reports the step as out of range — which reads like an unloadable VI but is an unsaved file.
-    What the worker still buys is crash containment: a process-fatal native fault (`0xC06D007E`,
-    escapes managed `try/catch`) kills only the child → `prototypeLoaded:false`,
-    `executionMode:"worker"`, `workerOutcome:"crashed"`/`"timeout"`, server lives. In-process is
-    ExecServer-routed (which is what avoids that fault in the first place) but does NOT contain one.
-    `copy_step_module` remains the fallback for a genuinely unloadable `.lvlibp`.
+  - **NEITHER `isolate` setting loads a packed-library VI — do not keep hunting for the right one
+    (measured twice, 2026-07-29).** `isolate:true` (the default) is a separate process that does not
+    inherit the attachment to the running LabVIEW ADE, starts its own and TIMES OUT (8 steps × 120 s,
+    all timeouts). It also reads the file from DISK, so a load after `save:false` edits reports the step
+    as out of range — which reads like an unloadable VI but is an unsaved file. `isolate:false`
+    (in-process) **KILLS THE SERVER**: it raised `0xC06D007E`, the MSVC delay-load fault for the LabVIEW
+    Run-Time, with LabVIEW 2026 32-bit already running and responsive; the fault escapes managed
+    `try/catch` and the in-process path has no guards. An earlier note here recommended `isolate:false`
+    on the strength of one apparently-good run — that recommendation caused a server crash and an NI
+    Error Reporter dialog, and is retracted. What the worker still buys is crash containment
+    (`prototypeLoaded:false`, `workerOutcome:"crashed"`/`"timeout"`, server lives).
+    **`copy_step_module` is not the fallback — it is THE way.**
   - **SILENT worker death — no WER box AND no NI Error Reporter dialog.** `SetErrorMode` alone only
     hides the OS fault box; NI's green "…encountered a problem and needs to close" reporter is an
     IN-PROCESS unhandled-exception hook. The worker installs layered guards up front (in
