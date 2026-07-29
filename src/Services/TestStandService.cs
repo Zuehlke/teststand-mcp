@@ -285,7 +285,7 @@ public interface ITestStandService : IDisposable
     /// module configuration a rebuild needs. Replaces the per-step reader traffic (a real 30-sequence
     /// rebuild spent the bulk of ~700 calls on reconnaissance alone).</summary>
     Task<SequenceFileModel> ExportSequenceFileAsync(string filePath, bool includeTypeDefs = true,
-        string? sequenceName = null);
+        string? sequenceName = null, IReadOnlyList<string>? sequenceNames = null);
     /// <summary>Rebuilds a sequence file from a model produced by <see cref="ExportSequenceFileAsync"/>.
     /// Order is fixed so cross-references resolve: types → file metadata/globals → all sequences with
     /// their interfaces → all steps (so every callee's parameters exist before a caller is
@@ -297,7 +297,12 @@ public interface ITestStandService : IDisposable
 
     // Sequence Analyzer
     /// <summary>Runs the TestStand Sequence Analyzer on the given file and returns any messages.</summary>
-    Task<List<AnalyzerMessage>> RunSequenceAnalyzerAsync(string filePath);
+    /// <summary>Runs the TestStand Sequence Analyzer on the given file and returns any messages.
+    /// <paramref name="timeoutSeconds"/> bounds the AnalyzerApp.exe child: a COLD analysis that loads
+    /// LabVIEW .lvlibp or Python code modules legitimately takes many minutes (~8.5 min measured on a
+    /// 30-sequence file), so the default is generous; the call throws rather than hanging forever.</summary>
+    Task<List<AnalyzerMessage>> RunSequenceAnalyzerAsync(string filePath,
+        int timeoutSeconds = TestStandService.DefaultAnalyzerTimeoutSeconds);
 
     // Reports
     /// <summary>Generates a report for the specified execution and writes it to the output path.</summary>
@@ -926,8 +931,11 @@ public interface ITestStandService : IDisposable
     /// returns IMMEDIATELY with a running handle (JobId + Status="running"); poll the result with
     /// <see cref="GetAnalysisStatusAsync"/>. Async is the fix for the ~60s MCP transport timeout
     /// (-32001) that a cold analysis of LabVIEW <c>.lvlibp</c> steps otherwise trips.</summary>
+    /// <para><paramref name="timeoutSeconds"/> bounds the AnalyzerApp.exe child (default 900 s — a cold
+    /// analysis that loads LabVIEW/Python code modules takes minutes).</para>
     Task<AnalyzerResult> RunSequenceAnalyzerDetailedAsync(string filePath,
-        string minSeverity = "Information", string groupBy = "severity", bool async = false);
+        string minSeverity = "Information", string groupBy = "severity", bool async = false,
+        int timeoutSeconds = TestStandService.DefaultAnalyzerTimeoutSeconds);
 
     /// <summary>Polls an ASYNC analysis job started by <see cref="RunSequenceAnalyzerDetailedAsync"/>
     /// (async=true). Returns the full <see cref="AnalyzerResult"/> plus a Status of "running",
@@ -4233,8 +4241,19 @@ public sealed class TestStandService : ITestStandService
         });
     }
 
+    /// <summary>
+    /// Default bound for the AnalyzerApp.exe child. Deliberately generous: the analyzer's
+    /// "module is loadable" rule LOADS every step's code module, so a cold analysis of a file with
+    /// LabVIEW <c>.lvlibp</c> or Python steps takes minutes — measured ~511 s on a 30-sequence file
+    /// once Python and LabVIEW were actually installed, versus seconds when neither could be loaded.
+    /// A tight bound would kill legitimate work; the point of the bound is that a genuinely stuck
+    /// child fails loudly instead of hanging forever.
+    /// </summary>
+    public const int DefaultAnalyzerTimeoutSeconds = 900;
+
     /// <inheritdoc/>
-    public async Task<List<AnalyzerMessage>> RunSequenceAnalyzerAsync(string filePath)
+    public async Task<List<AnalyzerMessage>> RunSequenceAnalyzerAsync(string filePath,
+        int timeoutSeconds = DefaultAnalyzerTimeoutSeconds)
     {
         EnsureConnected();
         return await Task.Run(() =>
@@ -4253,7 +4272,8 @@ public sealed class TestStandService : ITestStandService
 
             // Resolve Bin/Public dirs + version for the *connected* engine — no hard-coded release.
             var (binDir, publicDir, productVersion, probed) = ResolveAnalyzerLocations();
-            return RunAnalysisViaApp(filePath, binDir, publicDir, productVersion, probed, Log, Flush);
+            return RunAnalysisViaApp(filePath, binDir, publicDir, productVersion, probed, Log, Flush,
+                timeoutSeconds);
         });
     }
 
@@ -4264,7 +4284,8 @@ public sealed class TestStandService : ITestStandService
         string productVersion,
         string probed,
         Action<string> Log,
-        Action Flush)
+        Action Flush,
+        int timeoutSeconds)
     {
         // AnalyzerApp.exe ships in the connected engine's Bin directory — never hard-code a release.
         string analyzerExe = !string.IsNullOrEmpty(binDir)
@@ -4379,15 +4400,39 @@ public sealed class TestStandService : ITestStandService
         using var proc = System.Diagnostics.Process.Start(psi)
             ?? throw new InvalidOperationException("Failed to start AnalyzerApp.exe process.");
 
-        string stdout = proc.StandardOutput.ReadToEnd();
-        string stderr = proc.StandardError.ReadToEnd();
-        bool exited   = proc.WaitForExit(120_000); // 2 min timeout
+        // The output must be drained ASYNCHRONOUSLY and the wait must be the thing that enforces the
+        // timeout. The previous code did `ReadToEnd(); ReadToEnd(); WaitForExit(120_000)` — but
+        // ReadToEnd blocks until the child closes the stream, i.e. until it EXITS, so by the time
+        // WaitForExit ran the process was always gone and the "2 minute timeout" could never fire.
+        // A genuinely hung AnalyzerApp therefore hung the call forever. Reading the two pipes
+        // serially could also deadlock: a child that fills the stderr buffer while we are still
+        // draining stdout blocks, and we never get to stderr.
+        var stdoutTask = proc.StandardOutput.ReadToEndAsync();
+        var stderrTask = proc.StandardError.ReadToEndAsync();
+        int timeoutMs  = Math.Max(1, timeoutSeconds) * 1000;
 
-        if (!exited)
+        if (!proc.WaitForExit(timeoutMs))
         {
-            try { proc.Kill(); } catch (Exception) { /* best-effort: kill timed-out AnalyzerApp.exe process — intentionally ignored */ }
-            throw new InvalidOperationException("AnalyzerApp.exe timed out after 120 seconds.");
+            try { proc.Kill(entireProcessTree: true); } catch (Exception) { /* best-effort */ }
+            Log($"AnalyzerApp.exe timed out after {timeoutSeconds}s — killed.");
+            Flush();
+            throw new InvalidOperationException(
+                $"AnalyzerApp.exe timed out after {timeoutSeconds} seconds. A cold analysis that " +
+                "loads LabVIEW .lvlibp or Python code modules can legitimately take many minutes " +
+                "(measured: ~8.5 min on a 30-sequence file) — raise timeout_seconds, or run the " +
+                "analysis with async=true and poll get_analysis_status.");
         }
+
+        // The child has exited, so both reads are complete or about to be; bounded so a stuck pipe
+        // cannot hang us after a successful exit.
+        string stdout = "", stderr = "";
+        try
+        {
+            Task.WaitAll(new Task[] { stdoutTask, stderrTask }, 15_000);
+            if (stdoutTask.IsCompletedSuccessfully) stdout = stdoutTask.Result;
+            if (stderrTask.IsCompletedSuccessfully) stderr = stderrTask.Result;
+        }
+        catch (Exception ex) { Log($"Draining AnalyzerApp output failed: {ex.Message}"); }
 
         int exitCode = proc.ExitCode;
         Log($"AnalyzerApp exit code: {exitCode}");
@@ -8795,7 +8840,8 @@ public sealed class TestStandService : ITestStandService
 
     /// <inheritdoc/>
     public async Task<AnalyzerResult> RunSequenceAnalyzerDetailedAsync(string filePath,
-        string minSeverity = "Information", string groupBy = "severity", bool async = false)
+        string minSeverity = "Information", string groupBy = "severity", bool async = false,
+        int timeoutSeconds = DefaultAnalyzerTimeoutSeconds)
     {
         // ASYNC: return a running handle right away so the RPC completes well within the MCP
         // transport's ~60s window. The analysis (which spawns AnalyzerApp.exe — an out-of-process
@@ -8805,12 +8851,17 @@ public sealed class TestStandService : ITestStandService
         if (async)
         {
             EnsureConnected(); // surface a genuine "not connected" synchronously, before the job starts
-            return StartAnalyzerJob(filePath, minSeverity, groupBy);
+            return StartAnalyzerJob(filePath, minSeverity, groupBy, timeoutSeconds);
         }
 
         var messages = await RunSequenceAnalyzerAsync(filePath);
         return BuildAnalyzerResult(filePath, messages, minSeverity, groupBy);
     }
+
+    /// <summary>Test seam for <see cref="BuildAnalyzerResult"/> (pure, engine-free shaping).</summary>
+    internal static AnalyzerResult BuildAnalyzerResultForTest(string filePath,
+        List<AnalyzerMessage> messages, string minSeverity, string groupBy)
+        => BuildAnalyzerResult(filePath, messages, minSeverity, groupBy);
 
     // Pure shaping of raw analyzer messages into the filtered/grouped result — shared by the
     // synchronous path and the async job so both produce an identical AnalyzerResult.
@@ -8826,6 +8877,12 @@ public sealed class TestStandService : ITestStandService
 
         bool grouped = AnalyzerGrouping.IsGrouped(groupBy);
 
+        // Zero RAW messages (before severity filtering) means the analysis produced nothing at all.
+        // The counting rules fire on any file, so that is the tell for "AnalyzerApp bailed out" rather
+        // than "the file is clean" — flag it instead of reporting a silent, flattering zero. Note the
+        // check is on 'messages', NOT 'filtered': min_severity='Error' legitimately filters to zero.
+        bool suspect = messages.Count == 0;
+
         return new AnalyzerResult
         {
             FilePath         = filePath,
@@ -8837,7 +8894,17 @@ public sealed class TestStandService : ITestStandService
             GroupBy          = grouped ? groupBy.Trim().ToLowerInvariant() : "",
             Groups           = grouped
                                    ? AnalyzerGrouping.Group(filtered, groupBy)
-                                   : new List<AnalyzerMessageGroup>()
+                                   : new List<AnalyzerMessageGroup>(),
+            ResultSuspect    = suspect,
+            Note             = suspect
+                ? "SUSPECT RESULT: the analyzer returned no messages at all. Even a clean file "
+                  + "normally yields the counting rules (NI_SequenceFileCount / NI_SequenceCount / "
+                  + "NI_StepCount), so this usually means AnalyzerApp.exe did not analyse the file — "
+                  + "most often because LabVIEW or the Python interpreter was unavailable for the "
+                  + "'module is loadable' rule. Do NOT read this as 'no findings'; make the code "
+                  + "modules loadable and re-run. See ts_analyzer_diag.txt in %TEMP% for the child's "
+                  + "exit code and output."
+                : null
         };
     }
 
@@ -8867,7 +8934,9 @@ public sealed class TestStandService : ITestStandService
             {
                 Result.JobId = JobId;
                 Result.Status = "completed";
-                Result.Note = null;
+                // Keep the suspect-result warning — clearing the note here would turn an
+                // "analysis produced nothing" answer back into a silent, flattering zero.
+                if (!Result.ResultSuspect) Result.Note = null;
                 return Result;
             }
             return new AnalyzerResult
@@ -8888,7 +8957,8 @@ public sealed class TestStandService : ITestStandService
 
     // Starts the analysis on a background task, tracks it as a job, and returns a "running" handle
     // immediately so the RPC returns well within the transport timeout.
-    private AnalyzerResult StartAnalyzerJob(string filePath, string minSeverity, string groupBy)
+    private AnalyzerResult StartAnalyzerJob(string filePath, string minSeverity, string groupBy,
+        int timeoutSeconds = DefaultAnalyzerTimeoutSeconds)
     {
         PruneOldAnalyzerJobs();
         var job = new AnalyzerJob
@@ -13736,12 +13806,20 @@ public sealed class TestStandService : ITestStandService
 
     /// <inheritdoc/>
     public async Task<SequenceFileModel> ExportSequenceFileAsync(string filePath,
-        bool includeTypeDefs = true, string? sequenceName = null)
+        bool includeTypeDefs = true, string? sequenceName = null,
+        IReadOnlyList<string>? sequenceNames = null)
     {
         EnsureConnected();
         return await Task.Run(() =>
         {
             dynamic sf = GetOrLoadSeqFile(filePath);
+            // Optional subset filter. Types/file globals are always exported in full: a subset that
+            // silently dropped the types its sequences reference would not import.
+            HashSet<string>? wanted = null;
+            if (sequenceNames is { Count: > 0 })
+                wanted = new HashSet<string>(sequenceNames, StringComparer.OrdinalIgnoreCase);
+            else if (!string.IsNullOrWhiteSpace(sequenceName))
+                wanted = new HashSet<string>(new[] { sequenceName! }, StringComparer.OrdinalIgnoreCase);
             var model = new SequenceFileModel
             {
                 SourcePath         = filePath,
@@ -13789,8 +13867,7 @@ public sealed class TestStandService : ITestStandService
 
                 string name = "";
                 try { name = (string)seq.Name; } catch { }
-                if (sequenceName != null &&
-                    !string.Equals(name, sequenceName, StringComparison.OrdinalIgnoreCase)) continue;
+                if (wanted != null && !wanted.Contains(name)) continue;
 
                 var sm = new SequenceModel { Name = name };
                 try { sm.Description = NullIfEmpty((string)seq.Comment); } catch { }

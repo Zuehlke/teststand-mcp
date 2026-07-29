@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using System.Linq;
 using NUnit.Framework;
 using TestStandMCP.Models;
+using TestStandMCP.Services;
 using TestStandMCP.Tools;
 
 namespace TestStandMCP.IntegrationTests.Tests;
@@ -303,6 +304,54 @@ public class T35_RebuildEfficiencyUnitTests
         Assert.That(step.IgnoreRuntimeErrors, Is.True);
         Assert.That(step.Module!.StoredFilePath, Is.EqualTo("stale.seq"));
         Assert.That(step.Module!.Arguments!.Single().Value, Is.EqualTo("FileGlobals.a"));
+    }
+
+    // ── Analyzer: a zero result must be flagged, not reported as clean ───────────
+
+    [Test]
+    public void BuildAnalyzerResult_NoMessagesAtAll_IsFlaggedSuspect()
+    {
+        // AnalyzerApp can bail out early (LabVIEW/Python unavailable for the "module is loadable"
+        // rule), save an empty project and still exit successfully. That must not read as "clean".
+        var r = TestStandService.BuildAnalyzerResultForTest(
+            "x.seq", new List<AnalyzerMessage>(), "Information", "rule");
+
+        Assert.That(r.ResultSuspect, Is.True);
+        Assert.That(r.TotalMessages, Is.EqualTo(0));
+        Assert.That(r.Note, Does.Contain("SUSPECT"));
+    }
+
+    [Test]
+    public void BuildAnalyzerResult_MessagesPresent_IsNotSuspect()
+    {
+        var msgs = new List<AnalyzerMessage>
+        {
+            new() { Severity = "Information", RuleId = "NI_StepCount",  Text = "3 steps" },
+            new() { Severity = "Warning",     RuleId = "NI_UnusedSequence", Text = "unused" },
+        };
+        var r = TestStandService.BuildAnalyzerResultForTest("x.seq", msgs, "Information", "rule");
+
+        Assert.That(r.ResultSuspect, Is.False);
+        Assert.That(r.Note, Is.Null);
+        Assert.That(r.TotalMessages, Is.EqualTo(2));
+        Assert.That(r.WarningCount, Is.EqualTo(1));
+        Assert.That(r.InformationCount, Is.EqualTo(1));
+    }
+
+    [Test]
+    public void BuildAnalyzerResult_FilteredToZeroBySeverity_IsNotSuspect()
+    {
+        // min_severity='Error' legitimately filters a warning-only file to zero. That is NOT the
+        // "analysis did not run" case, so the suspect flag must key off the RAW message count.
+        var msgs = new List<AnalyzerMessage>
+        {
+            new() { Severity = "Warning", RuleId = "NI_UnusedSequence", Text = "unused" },
+        };
+        var r = TestStandService.BuildAnalyzerResultForTest("x.seq", msgs, "Error", "none");
+
+        Assert.That(r.TotalMessages, Is.EqualTo(0));
+        Assert.That(r.ResultSuspect, Is.False, "raw messages existed — only the filter emptied it");
+        Assert.That(r.Note, Is.Null);
     }
 
     [Test]

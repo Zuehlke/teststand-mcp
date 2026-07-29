@@ -526,7 +526,12 @@ public class TestStandToolRegistry
             "COLD/LabVIEW NOTE: analyzing a file with LabVIEW .lvlibp steps on a cold module cache " +
             "can exceed the ~60s MCP transport timeout (-32001) because the analyzer loads each " +
             "code module. Set async=true to get an immediate 'jobId' + status='running' and poll " +
-            "get_analysis_status(job_id) for the (structured) result.",
+            "get_analysis_status(job_id) for the (structured) result. " +
+            "DURATION: because the analyzer loads each code module, an analysis takes MINUTES when " +
+            "Python/LabVIEW are actually installed (~8.5 min measured on a 30-sequence file) and " +
+            "seconds when they are not. A ZERO result is reported as SUSPECT, not as 'no issues' — " +
+            "zero messages almost always means the analysis did not run (even a clean file yields the " +
+            "counting rules), typically because LabVIEW or the Python interpreter was unavailable.",
             s => s
                 .AddRequired("file_path", "string", "Absolute path to the sequence file to analyze")
                 .AddOptional("group_by", "string",
@@ -535,7 +540,10 @@ public class TestStandToolRegistry
                 .AddOptional("async", "boolean",
                     "Run asynchronously: return a 'jobId' immediately and poll get_analysis_status " +
                     "(which returns the structured result) instead of waiting inline. Use for files " +
-                    "with LabVIEW .lvlibp steps on a cold cache. Default false.", false),
+                    "with LabVIEW .lvlibp steps on a cold cache. Default false.", false)
+                .AddOptional("timeout_seconds", "integer",
+                    "Bound for the AnalyzerApp.exe child in seconds (default 900); the call throws on " +
+                    "expiry rather than hanging.", 900),
             RunSequenceAnalyzerAsync);
 
         // Executions
@@ -1742,6 +1750,12 @@ public class TestStandToolRegistry
                     "Where to write the JSON model. Default: the source path with '.model.json' appended.")
                 .AddOptional("sequence_name", "string",
                     "Export only this one sequence (omit for the whole file).")
+                .AddOptional("sequence_names", "array",
+                    "Export only these sequences (a SUBSET), in the file's own order. Types and file " +
+                    "globals are still exported in full — a subset that dropped the types its " +
+                    "sequences reference would not import. Make sure the subset is self-contained: a " +
+                    "SequenceCall to a sequence you leave out stays unresolved. Takes precedence over " +
+                    "sequence_name.")
                 .AddOptional("include_typedefs", "boolean",
                     "Include the custom data types and their attach state (default true).", true)
                 .AddOptional("inline", "boolean",
@@ -3140,9 +3154,27 @@ public class TestStandToolRegistry
             "analysis in the background and get an immediate 'jobId' + status='running'; then poll " +
             "get_analysis_status(job_id) until status='completed' (same result shape). The analysis " +
             "already runs in a separate AnalyzerApp.exe process, so a native .lvlibp fault ends the " +
-            "job with status='error' and never takes the server down.",
+            "job with status='error' and never takes the server down. " +
+            "HOW LONG IT REALLY TAKES: because that rule loads the code modules, duration depends on " +
+            "whether they CAN be loaded. Measured on a 30-sequence file with 13 Python and 8 packed-" +
+            "library LabVIEW steps: ~8.5 MINUTES with Python and LabVIEW installed and running, versus " +
+            "seconds when neither could be loaded. Budget accordingly and prefer async=true; " +
+            "timeout_seconds (default 900) bounds the child so a genuinely stuck analysis fails loudly " +
+            "instead of hanging. " +
+            "READING A ZERO — IMPORTANT: 'resultSuspect':true means the analyzer returned NO messages " +
+            "AT ALL, which almost always means it did NOT analyse the file rather than that the file " +
+            "is clean. Even a clean file normally yields the counting rules (NI_SequenceFileCount / " +
+            "NI_SequenceCount / NI_StepCount). The usual cause is LabVIEW or the Python interpreter " +
+            "being unavailable for the 'module is loadable' rule: AnalyzerApp then bails out early, " +
+            "saves an empty project and still exits successfully. Never report such a zero as 'no " +
+            "findings' — make the modules loadable and re-run; 'note' says so too, and %TEMP%\\" +
+            "ts_analyzer_diag.txt holds the child's exit code and output.",
             s => s
                 .AddRequired("file_path", "string", "Path to the sequence file to analyze")
+                .AddOptional("timeout_seconds", "integer",
+                    "Bound for the AnalyzerApp.exe child in seconds (default 900). Raise it for a very " +
+                    "large file with many loadable code modules; the call throws on expiry rather " +
+                    "than hanging.", 900)
                 .AddOptional("min_severity", "string",
                     "Minimum severity to include: 'Information' (default), 'Warning', or 'Error'",
                     "Information", new[] { "Information", "Warning", "Error" })
@@ -3164,7 +3196,12 @@ public class TestStandToolRegistry
             "messages[], optional groups[]) plus 'status': 'running' (not finished — poll again after " +
             "a short wait), 'completed' (the message/count fields are final) or 'error' (the analysis " +
             "itself faulted; see 'note'). Unknown/expired job_id → error. Finished jobs are retained " +
-            "~10 minutes.",
+            "~10 minutes. BUDGET THE POLLING: an analysis that can actually load its Python/LabVIEW " +
+            "code modules takes MINUTES (~8.5 min measured on a 30-sequence file), so poll well past " +
+            "that before concluding anything — giving up early and reading the still-empty counts is " +
+            "indistinguishable from a clean result. Also check 'resultSuspect': true means the " +
+            "analyzer returned no messages at all, i.e. it did not analyse the file, NOT that the file " +
+            "is clean.",
             s => s
                 .AddRequired("job_id", "string",
                     "The jobId returned by analyze_sequence_file / run_sequence_analyzer (async)."),
@@ -3603,9 +3640,18 @@ public class TestStandToolRegistry
         if (args!.Value.GetBoolOrDefault("async", false))
             return OkJson(await _ts.RunSequenceAnalyzerDetailedAsync(filePath, "Information", groupBy, async: true));
 
-        var messages = await _ts.RunSequenceAnalyzerAsync(filePath);
+        var timeout  = args!.Value.GetIntOrDefault("timeout_seconds",
+                           TestStandService.DefaultAnalyzerTimeoutSeconds);
+        var messages = await _ts.RunSequenceAnalyzerAsync(filePath, timeout);
         if (messages.Count == 0)
-            return Ok("Sequence Analyzer found no issues.");
+            // Do NOT claim a clean file. Zero messages almost always means the analysis did not run:
+            // even a clean file yields the counting rules. See AnalyzerResult.ResultSuspect.
+            return Ok("SUSPECT RESULT: the Sequence Analyzer returned no messages at all. That " +
+                      "usually means it did NOT analyse the file — even a clean file normally yields " +
+                      "the counting rules (NI_SequenceFileCount / NI_SequenceCount / NI_StepCount). " +
+                      "The usual cause is LabVIEW or the Python interpreter being unavailable for the " +
+                      "'module is loadable' rule. Make the code modules loadable and re-run; see " +
+                      "%TEMP%\\ts_analyzer_diag.txt for the AnalyzerApp exit code and output.");
 
         var sb = new System.Text.StringBuilder();
         sb.AppendLine($"Sequence Analyzer found {messages.Count} message(s):\n");
@@ -4941,7 +4987,14 @@ public class TestStandToolRegistry
         var inline   = args!.Value.GetBoolOrDefault("inline", false);
         var outPath  = args!.Value.GetStringOrNull("output_path") ?? filePath + ".model.json";
 
-        var model = await _ts.ExportSequenceFileAsync(filePath, withTd, seqName);
+        List<string>? seqNames = null;
+        if (args!.Value.TryGetProperty("sequence_names", out var snEl) && snEl.ValueKind == JsonValueKind.Array)
+            seqNames = snEl.EnumerateArray()
+                           .Where(e => e.ValueKind == JsonValueKind.String)
+                           .Select(e => e.GetString()!)
+                           .ToList();
+
+        var model = await _ts.ExportSequenceFileAsync(filePath, withTd, seqName, seqNames);
         var json  = JsonSerializer.Serialize(model, SequenceFileModel.Json);
         await System.IO.File.WriteAllTextAsync(outPath, json);
 
@@ -5402,7 +5455,10 @@ public class TestStandToolRegistry
         var minSeverity = args!.Value.GetStringOrDefault("min_severity", "Information");
         var groupBy     = args!.Value.GetStringOrDefault("group_by", "severity");
         var async       = args!.Value.GetBoolOrDefault("async", false);
-        var result      = await _ts.RunSequenceAnalyzerDetailedAsync(filePath, minSeverity, groupBy, async);
+        var timeout     = args!.Value.GetIntOrDefault("timeout_seconds",
+                              TestStandService.DefaultAnalyzerTimeoutSeconds);
+        var result      = await _ts.RunSequenceAnalyzerDetailedAsync(filePath, minSeverity, groupBy,
+                              async, timeout);
         return OkJson(result);
     }
 

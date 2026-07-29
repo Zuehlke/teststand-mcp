@@ -722,6 +722,21 @@ public class AnalyzerResult
     /// <summary>Advisory note — e.g. the poll instruction while running, or the failure reason when
     /// <see cref="Status"/> is "error". Null on a normal synchronous / completed result.</summary>
     public string? Note { get; set; }
+    /// <summary>
+    /// TRUE when the analyzer returned NO messages AT ALL — which almost always means the analysis
+    /// did not actually run over the file rather than that the file is clean.
+    /// <para>
+    /// WHY THIS EXISTS: AnalyzerApp.exe can bail out early (observed when LabVIEW was not available
+    /// for the "module is loadable" rule), save an empty project and still exit with a success code.
+    /// The result was then indistinguishable from a genuinely clean file — a silent zero that reads
+    /// as a perfect score, which is exactly how it misled a rebuild comparison. The counting rules
+    /// (NI_SequenceFileCount / NI_SequenceCount / NI_StepCount) fire on ANY file, so a total of zero
+    /// RAW messages is the reliable tell. Re-run and check <see cref="Note"/> before believing a
+    /// zero. (If every rule including the counters is disabled in the station's analyzer project,
+    /// a real zero is possible — hence "suspect", not "failed".)
+    /// </para>
+    /// </summary>
+    public bool ResultSuspect { get; set; }
 }
 
 /// <summary>

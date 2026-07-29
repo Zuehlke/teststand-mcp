@@ -602,6 +602,27 @@ max+1. (`T22`.)
 - With element names mirrored, a full tool-driven rebuild of TFW_DemoModule.seq
   diffs **identical (0 differences)** against the original (`T32`).
 
+### Sequence Analyzer: duration, a REAL timeout, and never trust a zero (2026-07-29)
+Three facts measured while verifying a rebuild. Two of them cost an hour of chasing a phantom bug.
+- **The analysis takes MINUTES when the code modules can actually be loaded.** The "module is
+  loadable" rule loads every step's module, so duration depends on the STATION, not the file:
+  ~**511 s** on the 30-sequence `TFW_MDC_com_Python.seq` once Python 3.11 and LabVIEW were installed
+  and running, versus **seconds** before, when every load failed instantly. Budget the polling
+  accordingly — a 360 s poll budget looked exactly like a hang.
+- **Zero messages ≠ clean file.** If LabVIEW or the Python interpreter is unavailable, `AnalyzerApp`
+  bails out early, saves an EMPTY project and still exits successfully. The result was
+  indistinguishable from a clean file — a silent zero that reads as a perfect score. The counting
+  rules (`NI_SequenceFileCount` / `NI_SequenceCount` / `NI_StepCount`) fire on ANY file, so zero RAW
+  messages is the tell. The result now carries **`resultSuspect: true`** plus an explanatory `note`,
+  and `run_sequence_analyzer` no longer prints "found no issues" for that case. NOTE the flag keys off
+  the RAW count, not the filtered one — `min_severity='Error'` may legitimately filter to zero.
+- **The old 120 s timeout was dead code.** `proc.StandardOutput.ReadToEnd()` blocks until the child
+  closes the pipe, i.e. until it EXITS, so `WaitForExit(120_000)` afterwards always returned true and
+  could never fire; a genuinely stuck `AnalyzerApp` hung the call forever (and the two serial
+  `ReadToEnd()`s could deadlock on a full stderr buffer). Now the pipes drain via `ReadToEndAsync`
+  and `WaitForExit` enforces **`timeout_seconds` (default 900)**, killing the process tree and
+  throwing on expiry.
+
 ### Sequence Analyzer is ASYNC-capable (cold `.lvlibp` timeout fix; 2026-07-09)
 - `analyze_sequence_file` / `run_sequence_analyzer` accept **`async=true`**: the call returns
   IMMEDIATELY with `{jobId, status:"running"}`; poll **`get_analysis_status(job_id)`** until
