@@ -27,10 +27,59 @@ into a clean, well-structured **TestStand sequence**.
   waits/delays, result-template/`PassFailTest` for checks. Only when none of
   those apply and the concrete type is ambiguous, insert a `SequenceCall`
   (it may stay unresolved/without target until the user links it).
+- **Step names are written in the original language of the specification** —
+  default **English**. See "Step-name language" below for the precedence.
 - Default sequence file for tests: `DemoTestsequenz.seq` (unless the user
   specifies a different one).
 - After every sequence change: call `save_sequence_file`.
 - Before any TestStand tool call: call `connect_engine`.
+
+## Step-name language
+
+Step names follow the **specification**, not the conversation. Resolve the
+naming language once, in Phase 1, by this precedence — **first match wins**:
+
+1. **An explicit wish in the prompt.** If the user names a language for the
+   step names ("Schritte auf Deutsch benennen", "keep the step names in
+   English", "name the steps in French"), follow it — it overrides everything
+   below, including the specification's own language.
+2. **The language of the specification input.** Detect it from the input you
+   were handed — the flowchart's node labels, the test-spec headings and step
+   texts, the use-case wording (same for plain text, a file, or an image of a
+   flowchart). A German flowchart yields German step names, a French spec
+   French ones.
+3. **English** — the default. Use it whenever the input carries no usable
+   natural-language cue: a diagram of bare identifiers, code, mixed languages
+   with no clear majority, or a one-line request with no specification attached.
+
+Rules that go with it:
+
+- **The chat language is NOT a signal.** The user may write German and hand in
+  an English specification — that is case 2, and the step names stay
+  **English**. Never derive the naming language from the language the user
+  writes in.
+- **Mixed-language input:** use the language of the *step / action* texts (the
+  wording that actually becomes the names). Ignore a title, heading or preamble
+  written in another language.
+- **Names only.** This rule governs the identifiers this build creates — step
+  names, plus the locals and (when you have to derive one) a new sequence name,
+  so the whole file's identifier set stays in ONE language. The human-readable
+  texts — the file comment, the sequence `Description`, the per-step comments —
+  keep their existing rule: the **user's** language. A German conversation about
+  an English specification therefore produces English names with German
+  comments. If the user wants one single language for everything, they will say
+  so — then apply that choice to both.
+- **Keep the style, change only the language.** Translate the wording, not the
+  convention: same `Verb_Object` shape, same separator, same abbreviations you
+  would have used in English (`Pruefe_Anschluss`, not `pruefe anschluss`).
+- **Encoding guard.** Step names round-trip through Windows-1252 like every
+  other text: German / French / Spanish accents and umlauts survive, but a
+  script outside that codepage (CJK, Cyrillic, Greek) becomes `?`. For such a
+  specification do **not** write the native script into the names — ask once via
+  `AskUserQuestion` whether to transliterate to ASCII or to name the steps in
+  English, and keep the original text in the step comment.
+- **State your choice.** Name the resolved language *and* which rule produced it
+  in the Phase 5 review, so the user can correct it before anything is written.
 
 ## Workflow
 
@@ -42,11 +91,11 @@ is what makes results reproducible (same plan → same sequence) and observable
 
 ```
 Phase 0  Connect & target        connect, create/confirm file + sequence
-Phase 1  Parse                   input → logical steps + edges
+Phase 1  Parse                   input → logical steps + edges, naming language
 Phase 2  Map → BUILD-PLAN        steps[] (bulk shape) + locals[]      ← artifact
 Phase 3  Interactive linking     per-step file→subsequence            ← Checkpoint 1 (main thread)
 Phase 4  Validate                validate_sequence_plan               ← deterministic GATE
-Phase 5  Review & approve        show plan + verdict; Build/Adjust    ← Checkpoint 2 (main thread)
+Phase 5  Review & approve        plan + lang + verdict; Build/Adjust  ← Checkpoint 2 (main thread)
 Phase 6  Build                   locals + insert_steps_bulk (1 call)  ← mechanical
 Phase 7  Finish                  save + summary
 ```
@@ -69,6 +118,9 @@ carry unchanged into validation and build:
 ### 1. Understand the input
 
 - Ask the user for the flowchart / test description (text, image, file).
+- **Resolve the step-name language** — explicit wish in the prompt →
+  specification language → English (see "Step-name language" above) — and carry
+  it with the plan. Do this **before** you name anything.
 - Identify the logical steps and map them to TestStand constructs:
   - Branches → `NI_Flow_If` / `NI_Flow_ElseIf` / `NI_Flow_Else` / `NI_Flow_End`
   - Loops → `NI_Flow_While` / `NI_Flow_For` / `NI_Flow_DoWhile` / `NI_Flow_ForEach` / `NI_Flow_End`
@@ -323,11 +375,15 @@ Show the user a **compact preview** of the validated plan before writing:
 
 - a short step outline (names + types, indentation reflecting flow nesting),
 - the declared locals,
+- the **step-name language** plus the rule that produced it (explicit wish /
+  specification / English default) — so the user can correct it here,
 - the validation summary: `errorCount` (must be 0), the `warnings`, and
   `stats` (step count, flow vs. action steps, unlinked calls, max nesting).
 
 Then a single `AskUserQuestion`: **Build / Adjust / Abort**. On "Adjust", loop
-back to Phase 2/3, re-validate, and review again.
+back to Phase 2/3, re-validate, and review again — a language correction means
+renaming the plan's steps (and locals) before re-validating, never renaming in
+TestStand afterwards.
 
 ### 6. Build (mechanical — only after valid + approved)
 
@@ -350,8 +406,8 @@ validation and the review see the full sequence.
 
 - Call `save_sequence_file`.
 - Give the user a short summary: which sequence was built, how many steps,
-  which have a detail link, which are placeholders, and the validation verdict
-  (errors = 0, warnings surfaced).
+  which have a detail link, which are placeholders, the step-name language that
+  was used, and the validation verdict (errors = 0, warnings surfaced).
 
 ## Important behavior rules
 
@@ -378,4 +434,7 @@ validation and the review see the full sequence.
   batched across steps — each linked step is resolved file→subsequence
   back-to-back before the next (see the hard rule in step 3). Flow steps are
   never counted here — they are always skipped.
-- Reply in the language the user writes in.
+- Reply in the language the user writes in. **This governs your chat replies
+  (and the `AskUserQuestion` option labels) only** — it does NOT decide the step
+  names: those follow the specification, English by default (see "Step-name
+  language").
