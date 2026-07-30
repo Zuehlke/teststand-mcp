@@ -32,6 +32,7 @@
     <Compile Include="..\..\src\Tools\DiffReportShaper.cs" Link="Shared\DiffReportShaper.cs" />
     <Compile Include="..\..\src\Tools\SequenceModelIo.cs" Link="Shared\SequenceModelIo.cs" />
     <Compile Include="..\..\src\Tools\StepCopyPolicy.cs" Link="Shared\StepCopyPolicy.cs" />
+    <Compile Include="..\..\src\Tools\TypeConsistencyAuditor.cs" Link="Shared\TypeConsistencyAuditor.cs" />
     <Compile Include="..\..\src\Tools\TestStandToolRegistry.cs" Link="Shared\TestStandToolRegistry.cs" />
   </ItemGroup>
 

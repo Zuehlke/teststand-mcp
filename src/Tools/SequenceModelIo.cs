@@ -374,6 +374,10 @@ public class ImportOutcome
     public int ModulesCloned { get; set; }
     /// <summary>Which route reproduced the step modules: copy / model.</summary>
     public string? ModuleMode { get; set; }
+    /// <summary>True when the destination's leftover default <c>MainSequence</c> was removed because the
+    /// model contains no sequence of that name. Deleting it used to be a separate call the caller had to
+    /// remember, and forgetting it left a stray empty sequence in every rebuild.</summary>
+    public bool DefaultMainSequenceRemoved { get; set; }
     /// <summary>Which route reproduced the LabVIEW connector panes: copy / load / skip.</summary>
     public string? LabViewPaneMode { get; set; }
     /// <summary>Which route reproduced the cross-file prototype caches: copy / load / skip.</summary>

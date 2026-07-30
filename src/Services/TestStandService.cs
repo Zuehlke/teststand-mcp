@@ -78,7 +78,11 @@ public interface ITestStandService : IDisposable
     /// <summary>Saves the sequence file at the given path to disk.</summary>
     Task SaveSequenceFileAsync(string filePath);
     /// <summary>Creates a new empty sequence file at the given path and returns the path.</summary>
-    Task<string> CreateSequenceFileAsync(string filePath);
+    /// <summary>Creates a new empty sequence file. With <paramref name="overwrite"/> an existing file at
+    /// the path is closed in this engine and deleted first (with the retry the engine's ASYNCHRONOUS
+    /// handle release requires) — without it, creating over a loaded/existing file fails with a sharing
+    /// violation.</summary>
+    Task<string> CreateSequenceFileAsync(string filePath, bool overwrite = false);
     /// <summary>Inserts a new sequence with the given name into the specified sequence file.</summary>
     Task InsertSequenceAsync(string filePath, string sequenceName);
     /// <summary>Inserts a single step into the specified sequence and step group at the given index.</summary>
@@ -294,7 +298,8 @@ public interface ITestStandService : IDisposable
     Task<ImportOutcome> ImportSequenceFileAsync(SequenceFileModel model, string destFilePath,
         bool copyTypeDefs = true, bool save = true, string labViewPanes = "copy",
         int prototypeTimeoutSeconds = 120, string crossFilePrototypes = "copy",
-        bool keepUnusedTypes = true, string variables = "copy", string modules = "copy");
+        bool keepUnusedTypes = true, string variables = "copy", string modules = "copy",
+        bool removeDefaultMainSequence = true);
 
     // Sequence Analyzer
     /// <summary>Runs the TestStand Sequence Analyzer on the given file and returns any messages.</summary>
@@ -364,6 +369,13 @@ public interface ITestStandService : IDisposable
     /// in the TypeUsageList, not as file-root subproperties). Each entry carries the type name,
     /// whether it is attached to the file, and a coarse kind.</summary>
     Task<List<DataTypeInfo>> GetFileTypeDefsAsync(string filePath, bool includeValues = false);
+    /// <summary>Audits a file's TYPE REGISTRATIONS (its TypeUsageList) for the defect class no other
+    /// check can see: a type name registered more than once, or a locally modified copy of a type. Such a
+    /// file opens in the Sequence Editor with a type-conflict dialog while the native FileDiffer reports
+    /// it as identical. With <paramref name="referenceFilePath"/> (typically the file a rebuild came
+    /// from) it also compares versions and members per type name. Read-only.</summary>
+    Task<TypeConsistencyResult> AuditTypeConsistencyAsync(string filePath,
+        string? referenceFilePath = null);
     /// <summary>Copies custom data type definitions from one sequence file into another. This is the
     /// ONLY way to reproduce LabVIEW-cluster typedefs in a rebuilt file — they carry GUIDs/structure
     /// that cannot be recreated field-by-field. Pass explicit <paramref name="typeNames"/> (reliable)
@@ -899,10 +911,14 @@ public interface ITestStandService : IDisposable
     /// <para><paramref name="calleeFiles"/> are extra sequence files the ISOLATED WORKER opens before
     /// the load — required for a cross-file SequenceCall, whose prototype cache is only filled when the
     /// callee file is loaded in the same engine.</para>
+    /// <para><paramref name="forceUnsafeInProcess"/> lifts the refusal of an IN-PROCESS load for a VI
+    /// inside a packed library (<c>.lvlibp</c>). That load is process-fatal (native delay-load SEH
+    /// 0xC06D007E, uncatchable) — see <see cref="InputGuards.IsPackedLibraryModulePath"/>.</para>
     Task<LoadPrototypeResult> LoadModulePrototypeAsync(string filePath,
         string sequenceName, string stepGroup, string stepName, bool save = true,
         bool? isolate = null, int timeoutSeconds = 120, bool? async = null,
-        string? labviewServer = null, IReadOnlyList<string>? calleeFiles = null);
+        string? labviewServer = null, IReadOnlyList<string>? calleeFiles = null,
+        bool forceUnsafeInProcess = false);
     /// <summary>Returns the current state of an ASYNC prototype-load job started by
     /// <see cref="LoadModulePrototypeAsync"/> (async mode). While running, Status="running"; once done,
     /// Status="completed" and the full result fields are final (or "error" if the job itself faulted).
@@ -1452,9 +1468,10 @@ public sealed class TestStandService : ITestStandService
     }
 
     /// <inheritdoc/>
-    public async Task<string> CreateSequenceFileAsync(string filePath)
+    public async Task<string> CreateSequenceFileAsync(string filePath, bool overwrite = false)
     {
         EnsureConnected();
+        if (overwrite) await ReplaceExistingSequenceFileOnDiskAsync(filePath);
         return await Task.Run(() =>
         {
             var sf = _engine!.NewSequenceFile();
@@ -1462,6 +1479,37 @@ public sealed class TestStandService : ITestStandService
             _loadedSequenceFiles[filePath] = sf;
             return filePath;
         });
+    }
+
+    /// <summary>
+    /// Clears the way for a fresh <c>NewSequenceFile</c> at <paramref name="filePath"/>: closes the file
+    /// if this engine has it loaded, then deletes it from disk.
+    /// <para>THE RETRY LOOP IS NOT OPTIONAL. The engine releases the OS file handle ASYNCHRONOUSLY after
+    /// the release call returns, so an immediate <c>File.Delete</c> loses a race and throws a sharing
+    /// violation — and deleting WITHOUT closing first throws every time. This sequence (close → delete
+    /// with a short back-off → create) was the documented dance every caller had to remember and
+    /// open-code; it lives here now so <c>overwrite:true</c> just works.</para>
+    /// </summary>
+    private async Task ReplaceExistingSequenceFileOnDiskAsync(string filePath)
+    {
+        if (_loadedSequenceFiles.ContainsKey(filePath))
+        {
+            try { await CloseSequenceFileAsync(filePath); }
+            catch (Exception ex)
+            { _logger.LogDebug(ex, "Close before overwrite failed for '{Path}'.", filePath); }
+        }
+        if (!File.Exists(filePath)) return;
+
+        const int attempts = 5;
+        for (int i = 0; i < attempts; i++)
+        {
+            try { File.Delete(filePath); return; }
+            catch (IOException) when (i < attempts - 1) { await Task.Delay(300); }
+            catch (UnauthorizedAccessException) when (i < attempts - 1) { await Task.Delay(300); }
+        }
+        // Last attempt outside the catch-and-retry, so a genuine failure surfaces with its real reason
+        // (file open in the Sequence Editor, read-only, no permission) instead of a create-time error.
+        File.Delete(filePath);
     }
 
     /// <inheritdoc/>
@@ -4263,6 +4311,11 @@ public sealed class TestStandService : ITestStandService
     /// </summary>
     public const int DefaultAnalyzerTimeoutSeconds = 900;
 
+    /// <summary>The sequence every newly created file starts with. A rebuild target therefore always has
+    /// one, while a model exported from a real file usually does not — so an import removes it unless the
+    /// model brings a sequence of that name itself.</summary>
+    public const string DefaultMainSequenceName = "MainSequence";
+
     /// <inheritdoc/>
     public async Task<List<AnalyzerMessage>> RunSequenceAnalyzerAsync(string filePath,
         int timeoutSeconds = DefaultAnalyzerTimeoutSeconds)
@@ -6130,6 +6183,77 @@ public sealed class TestStandService : ITestStandService
         throw new ArgumentException(
             $"Type '{typeName}' was not found — neither as a file-root subproperty nor in the file's " +
             "TypeUsageList. Use list_file_typedefs to see the available custom types.");
+    }
+
+    /// <summary>
+    /// Reads a file's TypeUsageList RAW — every registration, duplicates INCLUDED. This is deliberately
+    /// not <see cref="EnumerateFileTypeDefs"/>, which de-duplicates by name and would hide the very
+    /// thing the type-consistency audit looks for. Walks 0..NumTypes-1 (the list reports its own length)
+    /// and never throws: an unreadable entry contributes what could be read.
+    /// </summary>
+    private List<TypeRegistrationInfo> ReadTypeRegistrations(dynamic sf)
+    {
+        NiTypeUsageList tul = GetTypeUsageList(sf);
+        var outp = new List<TypeRegistrationInfo>();
+
+        int count = 0;
+        try { count = tul.NumTypes; }
+        catch (Exception ex) { _logger.LogDebug(ex, "TypeUsageList.NumTypes failed; falling back to probing."); }
+        if (count <= 0) count = 4000;   // fall back to the probe-until-it-throws walk
+
+        for (int i = 0; i < count; i++)
+        {
+            NiPropertyObject def;
+            try { def = tul.GetTypeDefinition(i); }
+            catch { break; }                       // out-of-range → end of list
+            if (def == null) break;
+
+            var info = new TypeRegistrationInfo { Index = i };
+            try { info.Name = def.Name; } catch { }
+            if (string.IsNullOrEmpty(info.Name)) continue;
+
+            try { info.TypeVersion = def.TypeVersion; } catch { }
+            try { info.IsModified  = def.IsModifiedType; } catch { }
+            try { info.Category    = def.TypeCategory.ToString(); } catch { }
+            try { info.Attached    = tul.GetIsTypeAttachedToFile(i); } catch { }
+
+            // Member names as a cheap structural fingerprint. Only meaningful for a structured type; a
+            // leaf legitimately has none, and an unreadable one stays null so the comparison skips it.
+            try
+            {
+                int n = def.GetNumSubProperties("");
+                var members = new List<string>(n);
+                for (int m = 0; m < n; m++)
+                {
+                    try { members.Add((string)def.GetNthSubPropertyName("", m, 0)); }
+                    catch { members.Add("?"); }
+                }
+                info.MemberSignature = string.Join("|", members);
+            }
+            catch { info.MemberSignature = null; }
+
+            outp.Add(info);
+        }
+        return outp;
+    }
+
+    /// <inheritdoc/>
+    public async Task<TypeConsistencyResult> AuditTypeConsistencyAsync(string filePath,
+        string? referenceFilePath = null)
+    {
+        EnsureConnected();
+        return await Task.Run(() =>
+        {
+            var data = new TypeConsistencyData();
+            data.File.AddRange(ReadTypeRegistrations(GetOrLoadSeqFile(filePath)));
+
+            if (!string.IsNullOrWhiteSpace(referenceFilePath))
+            {
+                data.ReferencePath = referenceFilePath;
+                data.Reference     = ReadTypeRegistrations(GetOrLoadSeqFile(referenceFilePath!));
+            }
+            return TypeConsistencyAuditor.Audit(data);
+        });
     }
 
     /// <inheritdoc/>
@@ -8535,7 +8659,14 @@ public sealed class TestStandService : ITestStandService
     public Task<ModuleConfigResult> ConfigureLabViewModuleAsync(string filePath,
         string sequenceName, string stepGroup, string stepName, string viPath,
         bool save = true, bool loadPrototype = true)
-        => ConfigureModuleAsync(filePath, sequenceName, stepGroup, stepName, "LabVIEW", save,
+    {
+        // The automatic prototype load inside ConfigureModuleAsync runs IN-PROCESS and synchronously.
+        // For a VI in a packed library that load is process-fatal (native delay-load SEH 0xC06D007E,
+        // uncatchable — it kills the server), so it is skipped rather than attempted: the VI path is
+        // still written, and the note tells the caller to clone the pane instead. This used to be a
+        // "remember to pass load_prototype=false" rule in CLAUDE.md — nothing enforced it.
+        bool packedLib = InputGuards.IsPackedLibraryModulePath(viPath);
+        return ConfigureModuleAsync(filePath, sequenceName, stepGroup, stepName, "LabVIEW", save,
             mod =>
             {
                 var applied = new Dictionary<string, object>();
@@ -8560,7 +8691,11 @@ public sealed class TestStandService : ITestStandService
                         "configuration. Use set_step_property instead (e.g. property_path " +
                         "'VIModule.ViCall.VIPath' for the VI, 'RemoteHost'/'PortNumber'/'Timeout').");
             },
-            loadPrototype: loadPrototype);
+            loadPrototype: loadPrototype && !packedLib,
+            note: loadPrototype && packedLib
+                ? InputGuards.PackedLibraryAutoLoadSkippedNote(viPath)
+                : null);
+    }
 
     /// <inheritdoc/>
     public Task<ModuleConfigResult> ConfigurePythonModuleAsync(string filePath,
@@ -8767,7 +8902,8 @@ public sealed class TestStandService : ITestStandService
         bool save, Func<dynamic, Dictionary<string, object>> apply,
         Action<dynamic>? preAdapterGuard = null, bool loadPrototype = true,
         Action<NiPropertyObject, Dictionary<string, object>>? applyOnStep = null,
-        Action<NiPropertyObject, Dictionary<string, object>>? applyAfterPrototype = null)
+        Action<NiPropertyObject, Dictionary<string, object>>? applyAfterPrototype = null,
+        string? note = null)
     {
         EnsureConnected();
         return await Task.Run(() =>
@@ -8846,7 +8982,8 @@ public sealed class TestStandService : ITestStandService
                 StepName        = stepName,
                 Adapter         = string.IsNullOrEmpty(actualKey) ? resolvedKey : actualKey,
                 AppliedSettings = applied,
-                Parameters      = parameters
+                Parameters      = parameters,
+                Note            = note
             };
         });
     }
@@ -12171,7 +12308,8 @@ public sealed class TestStandService : ITestStandService
     public async Task<LoadPrototypeResult> LoadModulePrototypeAsync(string filePath,
         string sequenceName, string stepGroup, string stepName, bool save = true,
         bool? isolate = null, int timeoutSeconds = 120, bool? async = null,
-        string? labviewServer = null, IReadOnlyList<string>? calleeFiles = null)
+        string? labviewServer = null, IReadOnlyList<string>? calleeFiles = null,
+        bool forceUnsafeInProcess = false)
     {
         EnsureConnected();
 
@@ -12187,7 +12325,16 @@ public sealed class TestStandService : ITestStandService
             string ak = TryGetString(step, "AdapterKeyName");
             return (ak, ReadStepViPath(((NiStep)(object)step).AsPropertyObject()), IsLabVIEWAdapter(ak));
         });
-        bool isPackedLib = (viPath ?? "").IndexOf(".lvlibp", StringComparison.OrdinalIgnoreCase) >= 0;
+        bool isPackedLib = InputGuards.IsPackedLibraryModulePath(viPath);
+
+        // HARD GUARD — an in-process load of a packed-library VI is PROCESS-FATAL, not merely risky:
+        // the LabVIEW Run-Time's delay-load raises SEH 0xC06D007E, which escapes managed try/catch and
+        // takes the whole server down (measured with a running, responsive LabVIEW ADE). Refusing it
+        // here is what keeps that fact from having to be remembered by the caller; the working route is
+        // to CLONE the cached pane (copy_step_module / import labview_panes='copy').
+        if (isLabVIEW && isPackedLib && isolate == false && !forceUnsafeInProcess)
+            throw new InvalidOperationException(
+                InputGuards.PackedLibraryInProcessLoadRefusal(stepName, viPath));
 
         // Non-LabVIEW adapters (SequenceCall/.NET/DLL·CVI/ActiveX) are fast and never delay-load a
         // LabVIEW runtime → in-process & synchronous by default (no behaviour change, no regression).
@@ -14590,7 +14737,8 @@ public sealed class TestStandService : ITestStandService
         string destFilePath, bool copyTypeDefs = true, bool save = true,
         string labViewPanes = "copy", int prototypeTimeoutSeconds = 120,
         string crossFilePrototypes = "copy", bool keepUnusedTypes = true,
-        string variables = "copy", string modules = "copy")
+        string variables = "copy", string modules = "copy",
+        bool removeDefaultMainSequence = true)
     {
         EnsureConnected();
         var outcome = new ImportOutcome();
@@ -14878,12 +15026,12 @@ public sealed class TestStandService : ITestStandService
                 string vLabel = vStep.Name;
                 try
                 {
-                    // isolate:FALSE — in-process, and THIS IS THE CALL THAT KILLS THE PROCESS when the
-                    // adapter resolves the LabVIEW Run-Time instead of the running ADE (0xC06D007E,
-                    // measured with LabVIEW warm; see the block above pass 5). It stays reachable only
-                    // because a station where the ExecServer routing DOES take effect gets a genuine
-                    // load out of it, and because 'copy' needs the source file. The isolated worker is
-                    // the crash-safe variant but cannot bind the running LabVIEW, so it only times out.
+                    // isolate:FALSE — in-process. For a PACKED-LIBRARY VI this is the call that killed
+                    // the process (0xC06D007E, measured with LabVIEW warm); LoadModulePrototypeAsync now
+                    // REFUSES that combination, and the catch below turns the refusal into a warning
+                    // instead of a dead server. A plain .vi still loads in-process, which is why this
+                    // opt-in mode (labview_panes='load') remains useful on a station where the
+                    // ExecServer routing takes effect and no source file is available to clone from.
                     // Synchronous so one import call is self-contained.
                     var lp = await LoadModulePrototypeAsync(destFilePath, vSeq, vGroup, vSel,
                         save: true, isolate: false, timeoutSeconds: prototypeTimeoutSeconds,
@@ -15095,6 +15243,35 @@ public sealed class TestStandService : ITestStandService
                 {
                     outcome.Warnings.Add(
                         $"{cSeq}/{cGroup}/{cStep.Name}: cross-file prototype load failed: {ex.Message}");
+                }
+            }
+        }
+
+        // 7b) THE DESTINATION'S LEFTOVER DEFAULT MainSequence. create_sequence_file always makes one, and
+        // a model exported from a real file usually has no sequence of that name — so an unattended
+        // rebuild ends up with a stray empty sequence that the FileDiffer duly reports. Deleting it was a
+        // separate call the caller had to remember; it happens here now, and only when the model really
+        // has no MainSequence of its own (otherwise the import just rebuilt it).
+        if (removeDefaultMainSequence)
+        {
+            bool modelHasMain = model.Sequences.Exists(
+                s => string.Equals(s.Name, DefaultMainSequenceName, StringComparison.OrdinalIgnoreCase));
+            if (!modelHasMain)
+            {
+                try
+                {
+                    if (await SequenceNameExistsAsync(destFilePath, DefaultMainSequenceName))
+                    {
+                        await DeleteSequenceAsync(destFilePath, DefaultMainSequenceName);
+                        outcome.DefaultMainSequenceRemoved = true;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    outcome.Warnings.Add(
+                        $"The destination's default '{DefaultMainSequenceName}' could not be removed " +
+                        $"({ex.Message}); the model has no sequence of that name, so it is left over from " +
+                        "create_sequence_file. Delete it with delete_sequence.");
                 }
             }
         }
@@ -15442,21 +15619,21 @@ public sealed class TestStandService : ITestStandService
                     break;
 
                 case "LabVIEW":
-                    // Set the VI path WITHOUT the built-in auto-load: that one runs in-process and via
-                    // the adapter's AutoDetect, which resolves a LabVIEW Run-Time and faults on a
-                    // packed-library VI. The connector pane is then loaded through
-                    // load_module_prototype instead, which routes the adapter to the LabVIEW
-                    // ExecServer (the running ADE, via ActiveX) and runs in the crash-isolated worker —
-                    // that is what makes a .lvlibp VI loadable headless at all. Skipping the load
-                    // entirely would leave ViCall.Parms empty and every connector-pane property blank.
+                    // Set the VI path WITHOUT the built-in auto-load: that one runs in-process, and
+                    // in-process a packed-library VI's connector pane raises the uncatchable delay-load
+                    // fault 0xC06D007E and kills the server. The pane is reproduced in a later pass —
+                    // by CLONING the cached ViCall subtree out of the model's source file
+                    // (labview_panes='copy', the DEFAULT), which needs no LabVIEW at all. Only the
+                    // explicit labview_panes='load' opt-in defers to a real prototype load, and that
+                    // route works for a plain .vi, not for a packed library.
                     await ConfigureLabViewModuleAsync(filePath, seqName, group, selector,
                         mod.ViPath ?? "", save: false, loadPrototype: false);
                     outcome.ModulesConfigured++;
-                    // The load itself is DEFERRED to a pass after the file has been saved: it runs in
-                    // an isolated WORKER PROCESS with its own engine, which reads the file from DISK.
-                    // Loading here — while the import still holds everything in memory with save:false
-                    // — makes the worker look at a file that does not contain the step yet ("@idx:0 is
-                    // out of range — the group has 0 step(s)").
+                    // A load (labview_panes='load') is DEFERRED to a pass after the file has been
+                    // saved: it runs in an isolated WORKER PROCESS with its own engine, which reads the
+                    // file from DISK. Loading here — while the import still holds everything in memory
+                    // with save:false — makes the worker look at a file that does not contain the step
+                    // yet ("@idx:0 is out of range — the group has 0 step(s)").
                     pendingViLoads?.Add((seqName, group, selector, s));
                     break;
 

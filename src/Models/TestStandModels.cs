@@ -439,6 +439,103 @@ public class ReferenceAuditResult
     public ReferenceAuditStats Stats { get; init; } = new();
 }
 
+// ── Type-consistency audit ───────────────────────────────────────────────────
+// The one class of rebuild defect NOTHING else can see. Replacing a property that carries a NAMED
+// TYPE registers a second, conflicting instance of that type in the file; the Sequence Editor then
+// greets it with a "type conflict" dialog, while the native FileDiffer reports the very same file as
+// identical:true — it compares content, not the type registry. Until this audit existed the only
+// check was a human opening the file (SeqEdit 2026 renders with CEF and cannot be automated).
+
+/// <summary>One entry of a file's TypeUsageList, read RAW — duplicates included, because a duplicate
+/// registration is exactly what the audit is looking for.</summary>
+public class TypeRegistrationInfo
+{
+    /// <summary>Index in the TypeUsageList.</summary>
+    public int Index { get; set; }
+    /// <summary>The type's name.</summary>
+    public string Name { get; set; } = "";
+    /// <summary>TestStand's type category (custom data type, step type, …).</summary>
+    public string? Category { get; set; }
+    /// <summary>The type's version string, as TestStand stores it.</summary>
+    public string? TypeVersion { get; set; }
+    /// <summary>TestStand's own "this copy has been modified" flag (PropertyObject.IsModifiedType).</summary>
+    public bool IsModified { get; set; }
+    /// <summary>Whether the type is attached to (embedded in) the file.</summary>
+    public bool Attached { get; set; }
+    /// <summary>The member names joined with '|' — a cheap structural fingerprint. Null when the
+    /// members could not be read (an exotic leaf type), which simply skips the structural comparison.</summary>
+    public string? MemberSignature { get; set; }
+}
+
+/// <summary>Engine-read input for <c>TypeConsistencyAuditor</c>: the file's registrations and, when a
+/// reference file was given, that file's registrations to compare against.</summary>
+public class TypeConsistencyData
+{
+    /// <summary>The audited file's type registrations.</summary>
+    public List<TypeRegistrationInfo> File { get; init; } = new();
+    /// <summary>The reference file's registrations, or null when no reference was given.</summary>
+    public List<TypeRegistrationInfo>? Reference { get; set; }
+    /// <summary>Path of the reference file, for the report.</summary>
+    public string? ReferencePath { get; set; }
+}
+
+/// <summary>One finding of the type-consistency audit.</summary>
+public class TypeConsistencyIssue
+{
+    /// <summary>Finding code: E_DUPLICATE_TYPE_NAME (the same type name registered more than once —
+    /// this is what raises the editor's type-conflict dialog), E_TYPE_VERSION_MISMATCH (same name, a
+    /// different TypeVersion than the reference file), W_MODIFIED_TYPE (the file carries a locally
+    /// MODIFIED copy of a type, which TestStand compares against the already-loaded definition on
+    /// open), W_TYPE_STRUCTURE_MISMATCH (same name and version but different members),
+    /// W_TYPE_ONLY_IN_FILE / W_TYPE_ONLY_IN_REFERENCE (present on one side only).</summary>
+    public string Code { get; set; } = "";
+    /// <summary>The type's name.</summary>
+    public string TypeName { get; set; } = "";
+    /// <summary>The type category as TestStand reports it (custom data types, step types, …).</summary>
+    public string? Category { get; set; }
+    /// <summary>Human-readable detail: the indices involved, the differing versions, the member delta.</summary>
+    public string Detail { get; set; } = "";
+    /// <summary>Severity: "error" for a real registration conflict, "warning" for a signal that needs
+    /// judgement (a deliberately kept extra type is a warning, not a defect).</summary>
+    public string Severity { get; set; } = "warning";
+}
+
+/// <summary>Aggregate counts of a type-consistency audit.</summary>
+public class TypeConsistencyStats
+{
+    /// <summary>Type registrations walked in the file's TypeUsageList (RAW — duplicates included).</summary>
+    public int TypeRegistrations { get; set; }
+    /// <summary>Distinct type names among them.</summary>
+    public int DistinctTypeNames { get; set; }
+    /// <summary>Names registered more than once — each one is an E_DUPLICATE_TYPE_NAME.</summary>
+    public int DuplicateNames { get; set; }
+    /// <summary>Types flagged by TestStand as locally modified (IsModifiedType).</summary>
+    public int ModifiedTypes { get; set; }
+    /// <summary>Types attached to (embedded in) the file.</summary>
+    public int AttachedTypes { get; set; }
+    /// <summary>The reference file the comparison ran against, when one was given.</summary>
+    public string? ComparedAgainst { get; set; }
+}
+
+/// <summary>Outcome of a type-consistency audit.</summary>
+public class TypeConsistencyResult
+{
+    /// <summary>True when no ERROR-severity finding was made. Warnings do not clear it to false —
+    /// read them, they need judgement.</summary>
+    public bool Valid { get; set; }
+    /// <summary>Number of findings (errors + warnings).</summary>
+    public int IssueCount { get; set; }
+    /// <summary>Number of ERROR-severity findings — a non-zero count means the file will very likely
+    /// raise a type-conflict dialog when it is opened in the Sequence Editor.</summary>
+    public int ErrorCount { get; set; }
+    /// <summary>The findings, errors first.</summary>
+    public List<TypeConsistencyIssue> Issues { get; init; } = new();
+    /// <summary>Aggregate counts.</summary>
+    public TypeConsistencyStats Stats { get; init; } = new();
+    /// <summary>What this audit does and does not prove.</summary>
+    public string? Note { get; set; }
+}
+
 /// <summary>A named property value with its type and optional lookup string.</summary>
 public class PropertyValue
 {
@@ -1298,6 +1395,10 @@ public class ModuleConfigResult
     /// prototype of a DLL/.NET/ActiveX call. Empty when load_prototype was disabled or when the
     /// target could not be resolved headless (e.g. a VI in an unloadable .lvlibp).</summary>
     public List<ModuleParameterInfo> Parameters { get; init; } = new();
+    /// <summary>Advisory note when the configuration was applied but something was deliberately NOT
+    /// done — currently the automatic prototype load being skipped for a packed-library VI, whose
+    /// in-process load would kill the server. Null when nothing needed saying.</summary>
+    public string? Note { get; set; }
 }
 
 /// <summary>

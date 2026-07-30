@@ -95,9 +95,21 @@ public static class DiffReportShaper
         public string? PathFilter { get; init; }
         /// <summary>Keep only these change types (Insert/Delete/ValueChange/…); empty = all.</summary>
         public IReadOnlyCollection<string> ChangeTypes { get; init; } = Array.Empty<string>();
-        /// <summary>Maximum number of differences to return (0 = unlimited).</summary>
-        public int MaxResults { get; init; }
+        /// <summary>Maximum number of differences to return (0 = unlimited). Defaults to
+        /// <see cref="DefaultMaxResults"/> so an unshaped call (compare_sequence_files in native mode)
+        /// is capped too — the cap has to be the DEFAULT, not something the caller must remember.</summary>
+        public int MaxResults { get; init; } = DefaultMaxResults;
     }
+
+    /// <summary>
+    /// The DEFAULT row cap for a diff response. A whole-file rebuild comparison legitimately produces
+    /// 600+ differences, and returning them all does not fit one tool result — the answer gets
+    /// truncated by the transport instead of by the tool, which loses the tallies that actually say
+    /// where the work is. So the cap is applied by default and the truncation is reported; pass
+    /// max_results=0 for the unlimited behaviour. This used to be a "always start with
+    /// summary_only=true" rule in CLAUDE.md that nothing enforced.
+    /// </summary>
+    public const int DefaultMaxResults = 150;
 
     /// <summary>
     /// Applies <paramref name="opts"/> to <paramref name="report"/> and returns the MCP payload.
@@ -181,7 +193,9 @@ public static class DiffReportShaper
                       "'byCategory' above still counts ALL of them.");
         if (limited.Count < matched)
             notes.Add($"Only the first {limited.Count} of {matched} matching differences are listed " +
-                      "(max_results); raise it or narrow the filter to see the rest.");
+                      $"(max_results; the default is {DefaultMaxResults} because a full list does not " +
+                      "fit one tool result). Narrow the filter, page with a path_filter/category, or " +
+                      "pass a higher max_results (0 = unlimited) to see the rest.");
         if (notes.Count > 0) payload["note"] = string.Join(" ", notes);
 
         object Project((FileDifferChange Change, string Category, string Sequence) x) => new

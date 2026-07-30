@@ -705,4 +705,262 @@ public class T35_RebuildEfficiencyUnitTests
         Assert.That(props[2].Type, Is.EqualTo("boolean"));
         Assert.That(props[1].Value, Is.EqualTo("Open"));
     }
+
+    // ── Packed-library guard — the rule that used to live only in CLAUDE.md ───────
+    //
+    // An IN-PROCESS prototype load of a VI inside a .lvlibp raises the uncatchable delay-load SEH
+    // 0xC06D007E and kills the server process. That was documented in three places and enforced
+    // nowhere, so forgetting it cost the whole server. These tests pin the detection and the wording.
+
+    [TestCase(@"C:\lib\MyLib.lvlibp\Public\Init.vi", true)]
+    [TestCase(@"C:\lib\MYLIB.LVLIBP\Public\Init.vi", true)]   // case-insensitive, like the filesystem
+    [TestCase(@"MyLib.lvlibp\Init.vi",               true)]   // relative, as a .seq stores it
+    [TestCase(@"C:\vis\Init.vi",                     false)]
+    [TestCase(@"C:\lib\MyLib.lvlib\Init.vi",         false)]  // a plain library is NOT packed
+    [TestCase("",                                    false)]
+    [TestCase(null,                                  false)]
+    public void IsPackedLibraryModulePath_RecognisesAPackedLibraryVi(string? path, bool expected)
+    {
+        Assert.That(InputGuards.IsPackedLibraryModulePath(path), Is.EqualTo(expected));
+    }
+
+    [Test]
+    public void PackedLibraryRefusal_NamesTheWorkingRouteAndTheFault()
+    {
+        string msg = InputGuards.PackedLibraryInProcessLoadRefusal("Init", @"MyLib.lvlibp\Init.vi");
+
+        // A refusal that does not say what to do instead just moves the dead end.
+        Assert.That(msg, Does.Contain("copy_step_module"));
+        Assert.That(msg, Does.Contain("labview_panes='copy'"));
+        Assert.That(msg, Does.Contain("0xC06D007E"));
+        Assert.That(msg, Does.Contain("Init"));
+    }
+
+    [Test]
+    public void PackedLibraryAutoLoadSkippedNote_SaysTheStepIsStillConfigured()
+    {
+        // The VI path IS written — a note that reads like a failure would send the caller re-running a
+        // call that already did its job.
+        string note = InputGuards.PackedLibraryAutoLoadSkippedNote(@"MyLib.lvlibp\Init.vi");
+        Assert.That(note, Does.Contain("SKIPPED"));
+        Assert.That(note, Does.Contain("step is configured"));
+        Assert.That(note, Does.Contain("copy_step_module"));
+    }
+
+    [Test]
+    public void PackedLibraryAutoLoadSkippedNote_DoesNotClaimTheParametersAreEmpty()
+    {
+        // Measured live: reconfiguring an EXISTING packed-library step returns its 18 cached connector-pane
+        // parameters, because the interface is read back whether or not a load ran. An earlier wording
+        // said the pane "is empty", which would send the caller cloning a pane they already have.
+        string note = InputGuards.PackedLibraryAutoLoadSkippedNote(@"MyLib.lvlibp\Init.vi");
+        Assert.That(note, Does.Not.Contain("is empty"));
+        Assert.That(note, Does.Contain("already cached"));
+    }
+
+    // ── The diff row cap is a DEFAULT, not a reminder ────────────────────────────
+
+    [Test]
+    public void ShapeOptions_CapRowsByDefault()
+    {
+        // compare_sequence_files (native mode) shapes with a bare Options instance. Before the default
+        // moved into Options it returned every row of a 600-difference report.
+        Assert.That(new DiffReportShaper.Options().MaxResults,
+            Is.EqualTo(DiffReportShaper.DefaultMaxResults));
+        Assert.That(DiffReportShaper.DefaultMaxResults, Is.GreaterThan(0));
+    }
+
+    [Test]
+    public void Shape_DefaultOptions_TruncateALargeReport_AndKeepTheFullTallies()
+    {
+        int n   = DiffReportShaper.DefaultMaxResults + 25;
+        var rep = Report(Enumerable.Range(0, n)
+            .Select(i => Ch("ValueChange", $"Sequences > A > Locals > X{i}")).ToArray());
+
+        var outp = DiffReportShaper.Shape(rep, new DiffReportShaper.Options());
+
+        Assert.That(outp["returnedDifferences"], Is.EqualTo(DiffReportShaper.DefaultMaxResults));
+        Assert.That(outp["truncated"], Is.EqualTo(true));
+        // The tallies must still count EVERYTHING — they are what a truncated answer is judged on.
+        Assert.That(outp["totalDifferences"], Is.EqualTo(n));
+        var byCategory = (Dictionary<string, int>)outp["byCategory"]!;
+        Assert.That(byCategory.Values.Sum(), Is.EqualTo(n));
+        Assert.That((string)outp["note"]!, Does.Contain("unlimited"));
+    }
+
+    [Test]
+    public void Shape_ExplicitZeroMaxResults_StillMeansUnlimited()
+    {
+        int n   = DiffReportShaper.DefaultMaxResults + 5;
+        var rep = Report(Enumerable.Range(0, n)
+            .Select(i => Ch("ValueChange", $"Sequences > A > Locals > X{i}")).ToArray());
+
+        var outp = DiffReportShaper.Shape(rep, new DiffReportShaper.Options { MaxResults = 0 });
+
+        Assert.That(outp["returnedDifferences"], Is.EqualTo(n));
+        Assert.That(outp.ContainsKey("truncated"), Is.False);
+    }
+
+    // ── TypeConsistencyAuditor — the defect the FileDiffer cannot see ─────────────
+
+    private static TypeRegistrationInfo Ty(string name, int index, string? version = "1.0.0.0",
+        bool modified = false, bool attached = true, string? members = "A|B") =>
+        new()
+        {
+            Name = name, Index = index, TypeVersion = version, IsModified = modified,
+            Attached = attached, MemberSignature = members, Category = "TypeCategory_CustomDataTypes"
+        };
+
+    [Test]
+    public void Audit_CleanFile_IsValidAndSaysWhatItProved()
+    {
+        var r = TypeConsistencyAuditor.Audit(new TypeConsistencyData
+        { File = { Ty("LogEvent", 0), Ty("Error", 1) } });
+
+        Assert.That(r.Valid, Is.True);
+        Assert.That(r.ErrorCount, Is.Zero);
+        Assert.That(r.Stats.TypeRegistrations, Is.EqualTo(2));
+        Assert.That(r.Stats.DistinctTypeNames, Is.EqualTo(2));
+        // The note must not overclaim: a clean registry is not a clean file.
+        Assert.That(r.Note, Does.Contain("FileDiffer"));
+    }
+
+    [Test]
+    public void Audit_SameTypeNameRegisteredTwice_IsAnError()
+    {
+        // THE finding. This is what the editor reports as a type conflict and what a whole-subtree
+        // clone onto a typed node produces — while diff_sequence_files says identical:true.
+        var r = TypeConsistencyAuditor.Audit(new TypeConsistencyData
+        { File = { Ty("NI_Flow_If", 3), Ty("NI_Flow_If", 17, version: "2.0.0.0") } });
+
+        Assert.That(r.Valid, Is.False);
+        Assert.That(r.ErrorCount, Is.EqualTo(1));
+        Assert.That(r.Stats.DuplicateNames, Is.EqualTo(1));
+        var issue = r.Issues[0];
+        Assert.That(issue.Code, Is.EqualTo("E_DUPLICATE_TYPE_NAME"));
+        Assert.That(issue.TypeName, Is.EqualTo("NI_Flow_If"));
+        Assert.That(issue.Detail, Does.Contain("3").And.Contain("17"),
+            "the indices are what makes the duplicate findable");
+        Assert.That(r.Note, Does.Contain("type-conflict dialog"));
+    }
+
+    [Test]
+    public void Audit_DuplicateNamesAreCaseInsensitive_LikeTestStand()
+    {
+        var r = TypeConsistencyAuditor.Audit(new TypeConsistencyData
+        { File = { Ty("LogEvent", 0), Ty("logevent", 1) } });
+
+        Assert.That(r.ErrorCount, Is.EqualTo(1));
+    }
+
+    [Test]
+    public void Audit_ModifiedType_IsAWarningNotAnError()
+    {
+        // A file may legitimately own a modified type — but it is the state TestStand compares against
+        // the loaded definition on open, so it must be named without failing the audit.
+        var r = TypeConsistencyAuditor.Audit(new TypeConsistencyData
+        { File = { Ty("LogEvent", 0, modified: true) } });
+
+        Assert.That(r.Valid, Is.True, "a warning must not clear 'valid' to false");
+        Assert.That(r.IssueCount, Is.EqualTo(1));
+        Assert.That(r.Issues[0].Code, Is.EqualTo("W_MODIFIED_TYPE"));
+        Assert.That(r.Stats.ModifiedTypes, Is.EqualTo(1));
+    }
+
+    [Test]
+    public void Audit_ErrorsAreListedBeforeWarnings()
+    {
+        var r = TypeConsistencyAuditor.Audit(new TypeConsistencyData
+        {
+            File =
+            {
+                Ty("Modified", 0, modified: true),
+                Ty("Dup", 1), Ty("Dup", 2),
+            }
+        });
+
+        Assert.That(r.Issues[0].Severity, Is.EqualTo("error"));
+        Assert.That(r.Issues.Last().Severity, Is.EqualTo("warning"));
+    }
+
+    [Test]
+    public void Audit_AgainstReference_DifferentVersionUnderTheSameName_IsAnError()
+    {
+        var r = TypeConsistencyAuditor.Audit(new TypeConsistencyData
+        {
+            File          = { Ty("LogEvent", 0, version: "2.0.0.0") },
+            Reference     = new List<TypeRegistrationInfo> { Ty("LogEvent", 0, version: "1.0.0.0") },
+            ReferencePath = @"C:\orig.seq",
+        });
+
+        Assert.That(r.ErrorCount, Is.EqualTo(1));
+        Assert.That(r.Issues[0].Code, Is.EqualTo("E_TYPE_VERSION_MISMATCH"));
+        Assert.That(r.Issues[0].Detail, Does.Contain("copy_typedefs"));
+        Assert.That(r.Stats.ComparedAgainst, Is.EqualTo(@"C:\orig.seq"));
+    }
+
+    [Test]
+    public void Audit_AgainstReference_MissingVersionOnEitherSide_IsNotAMismatch()
+    {
+        // An unreadable version must not manufacture an error — the whole point of the audit is that a
+        // reported conflict is trustworthy.
+        var r = TypeConsistencyAuditor.Audit(new TypeConsistencyData
+        {
+            File      = { Ty("LogEvent", 0, version: null) },
+            Reference = new List<TypeRegistrationInfo> { Ty("LogEvent", 0, version: "1.0.0.0") },
+        });
+
+        Assert.That(r.ErrorCount, Is.Zero);
+    }
+
+    [Test]
+    public void Audit_AgainstReference_SameVersionDifferentMembers_IsAWarning()
+    {
+        var r = TypeConsistencyAuditor.Audit(new TypeConsistencyData
+        {
+            File      = { Ty("LogEvent", 0, members: "A|B|C") },
+            Reference = new List<TypeRegistrationInfo> { Ty("LogEvent", 0, members: "A|B") },
+        });
+
+        Assert.That(r.Valid, Is.True);
+        Assert.That(r.Issues.Single().Code, Is.EqualTo("W_TYPE_STRUCTURE_MISMATCH"));
+    }
+
+    [Test]
+    public void Audit_AgainstReference_OneSidedTypesAreWarnings_BecauseAnImportAddsSome()
+    {
+        // keep_unused_types=true deliberately re-attaches types the save would have dropped, so an extra
+        // type in the rebuild is expected — reporting it as an error would cry wolf on every import.
+        var r = TypeConsistencyAuditor.Audit(new TypeConsistencyData
+        {
+            File      = { Ty("OnlyHere", 0) },
+            Reference = new List<TypeRegistrationInfo> { Ty("OnlyThere", 0) },
+        });
+
+        Assert.That(r.Valid, Is.True);
+        Assert.That(r.Issues.Select(i => i.Code),
+            Is.EquivalentTo(new[] { "W_TYPE_ONLY_IN_FILE", "W_TYPE_ONLY_IN_REFERENCE" }));
+    }
+
+    [Test]
+    public void Audit_NullData_DoesNotThrow()
+    {
+        var r = TypeConsistencyAuditor.Audit(null!);
+        Assert.That(r.Valid, Is.True);
+        Assert.That(r.IssueCount, Is.Zero);
+    }
+
+    [Test]
+    public void AuditTypeConsistency_IsRegisteredAndPointsAtTheFileDifferBlindSpot()
+    {
+        var registry = new TestStandToolRegistry(
+            new TestStandService(NullLogger<TestStandService>.Instance),
+            new SequenceEditorService(NullLogger<SequenceEditorService>.Instance),
+            NullLogger<TestStandToolRegistry>.Instance);
+        var tool = registry.GetTools().First(t => t.Name == "audit_type_consistency");
+
+        Assert.That(tool.Description, Does.Contain("identical:true"),
+            "the description has to say WHY the diff alone is not enough");
+        Assert.That(tool.Description, Does.Contain("E_DUPLICATE_TYPE_NAME"));
+    }
 }

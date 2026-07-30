@@ -117,8 +117,18 @@ public class TestStandToolRegistry
             SaveSequenceFileAsync);
 
         Register("create_sequence_file",
-            "Create a new empty sequence file at the given path.",
-            s => s.AddRequired("file_path", "string", "Absolute path for the new sequence file"),
+            "Create a new empty sequence file at the given path. The new file contains the default " +
+            "'MainSequence' — delete it with delete_sequence if the rebuild has no sequence of that " +
+            "name (import_sequence_file removes it for you by default). " +
+            "RECREATING A FILE THAT ALREADY EXISTS: pass overwrite=true. Creating over an existing (or " +
+            "still-loaded) file otherwise fails with a sharing violation.",
+            s => s
+                .AddRequired("file_path", "string", "Absolute path for the new sequence file")
+                .AddOptional("overwrite", "boolean",
+                    "Replace an existing file at that path: close it in the engine, delete it from " +
+                    "disk (retrying briefly — the engine releases the OS handle asynchronously, so an " +
+                    "immediate delete loses the race), then create the new one. Without this a " +
+                    "pre-existing file makes the call fail. Default false.", false),
             CreateSequenceFileAsync);
 
         Register("insert_sequence",
@@ -268,6 +278,36 @@ public class TestStandToolRegistry
                 .AddOptional("sequence_name", "string",
                     "Sequence to audit. Omit to audit every sequence in the file."),
             AuditSequenceReferencesAsync);
+
+        Register("audit_type_consistency",
+            "POST-REBUILD TYPE-REGISTRATION audit — the ONE defect class no other check can see. Reads " +
+            "the file's TypeUsageList and reports a type name registered MORE THAN ONCE, or a type the " +
+            "engine flags as locally MODIFIED. Such a file opens in the Sequence Editor with a 'type " +
+            "conflict' dialog even though it is functionally complete — and diff_sequence_files reports " +
+            "it as identical:true, because the FileDiffer compares CONTENT and a divergent type " +
+            "REGISTRATION is not content. Before this tool the only way to catch it was a human opening " +
+            "the file (SeqEdit 2026 renders with CEF and cannot be automated). " +
+            "RUN IT AFTER EVERY REBUILD, alongside diff_sequence_files: the diff proves the content " +
+            "matches, this proves the type registry is sane. Pass reference_file_path (the file the " +
+            "rebuild came from) to also compare per type name: a different TypeVersion under the same " +
+            "name is an ERROR (something re-created the type instead of copying it — copy_typedefs " +
+            "clones by GUID and preserves the version), same version with different members is a " +
+            "warning, and present-on-one-side-only is reported as a warning because an import with " +
+            "keep_unused_types=true legitimately adds types. " +
+            "Returns {valid, issueCount, errorCount, issues[], stats{}, note} with codes " +
+            "E_DUPLICATE_TYPE_NAME / E_TYPE_VERSION_MISMATCH / W_MODIFIED_TYPE / " +
+            "W_TYPE_STRUCTURE_MISMATCH / W_TYPE_ONLY_IN_FILE / W_TYPE_ONLY_IN_REFERENCE; 'valid' keys " +
+            "off the ERRORS only, so read the warnings rather than trusting the flag alone. Errors come " +
+            "first. Read-only — it reports, it never modifies. " +
+            "THE USUAL CAUSE of a duplicate registration is replacing a whole property subtree whose " +
+            "node carries a NAMED TYPE (Clone + SetPropertyObject); write that node's leaf scalars BY " +
+            "VALUE instead. copy_step_module and import_sequence_file already do.",
+            s => s
+                .AddRequired("file_path", "string", "Path to the sequence file to audit")
+                .AddOptional("reference_file_path", "string",
+                    "Optional file to compare the type registrations against — normally the original a " +
+                    "rebuild was made from. Enables the per-type version/member comparison."),
+            AuditTypeConsistencyAsync);
 
         Register("insert_local_variable",
             "Insert a new local variable into a sequence. data_type accepts the builtins " +
@@ -1774,8 +1814,9 @@ public class TestStandToolRegistry
         Register("import_sequence_file",
             "IMPORT a model written by export_sequence_file into a sequence file — the rebuild half of " +
             "the export/import pair. The destination should be a file you created with " +
-            "create_sequence_file; its default MainSequence is NOT removed automatically (delete it " +
-            "with delete_sequence afterwards if the model does not contain one). " +
+            "create_sequence_file; its leftover default MainSequence is REMOVED automatically when the " +
+            "model has no sequence of that name (see remove_default_main_sequence), so a whole-file " +
+            "rebuild is export → create → import → verify with no cleanup call in between. " +
             "ORDER IS FIXED so cross-references resolve: (1) type definitions from the model's source " +
             "file, preserving each type's attach state; (2) file comment/version and file globals; " +
             "(3) ALL sequences with their parameters and locals — before any step, so every callee has " +
@@ -1796,15 +1837,19 @@ public class TestStandToolRegistry
             "Returns {sequencesCreated, stepsInserted, variablesCreated, variablesCopied, " +
             "modulesConfigured, panesCopied, crossFilePrototypesCopied, typeDefsCopied, " +
             "typeDefsForceAttached, typeDefsMissing, variableMode, labViewPaneMode, " +
-            "crossFilePrototypeMode, outcomePath, warnings[]} — " +
+            "crossFilePrototypeMode, defaultMainSequenceRemoved, outcomePath, warnings[]} — " +
             "every item that could not be applied is named in 'warnings' with its sequence/step, so a " +
             "partial import is visible instead of silently incomplete. The same object is ALSO written " +
             "to '<dest>.import.json' (outcomePath), so if the call exceeds the ~60s MCP transport " +
             "window the warnings are still readable from disk — the import itself keeps running and " +
-            "completes. Verify with diff_sequence_files (start with summary_only=true). Reference " +
-            "measurement: 8 sequences of a 30-sequence file with 13 object-oriented Python steps, 5 " +
-            "packed-library LabVIEW steps and a cross-file call rebuild to exactly ONE FileDiffer " +
-            "difference (a named-type instance's enum member reading as explicitly set — an API limit).",
+            "completes. Verify with diff_sequence_files. Reference measurements: a WHOLE-file rebuild " +
+            "(17 sequences, 79 steps, 43 variables, 18 packed-library LabVIEW panes from two libraries, " +
+            "4 cross-file calls, 2 ActiveX steps, 49 types) reaches identical:true — ZERO differences — " +
+            "in 4 MCP calls with no warnings; a SUBSET rebuild (8 of 30 sequences, 13 object-oriented " +
+            "Python steps, 5 packed-library LabVIEW steps, 1 cross-file call) has zero differences " +
+            "inside the imported scope, the remaining rows being the sequences deliberately left out. " +
+            "A CLEAN DIFF IS NOT THE WHOLE PROOF: the FileDiffer cannot see type-registration " +
+            "conflicts. Run audit_type_consistency on the result as well.",
             s => s
                 .AddRequired("model_path", "string", "Path to the JSON model written by export_sequence_file")
                 .AddRequired("dest_file_path", "string", "Sequence file to build into")
@@ -1868,6 +1913,12 @@ public class TestStandToolRegistry
                 .AddOptional("prototype_timeout_seconds", "integer",
                     "Per-step timeout for a real prototype load, i.e. only for labview_panes='load' / " +
                     "cross_file_prototypes='load' (default 120; the cross-file worker floors it at 300).", 120)
+                .AddOptional("remove_default_main_sequence", "boolean",
+                    "Delete the destination's leftover default 'MainSequence' when the model contains no " +
+                    "sequence of that name (default true). create_sequence_file always creates one, so " +
+                    "without this a rebuild keeps a stray empty sequence that the FileDiffer reports. " +
+                    "Never touches a MainSequence the model actually brings. Reported as " +
+                    "'defaultMainSequenceRemoved'.", true)
                 .AddOptional("save", "boolean", "Save the destination file at the end (default true).", true),
             ImportSequenceFileAsync);
 
@@ -1896,11 +1947,16 @@ public class TestStandToolRegistry
             "max_results, and group_by='category'|'sequence'. Categories: labview_vicall, " +
             "python_module, seqcall_args, module_other, step_properties, variables, " +
             "sequence_properties, file_properties, types, other. TIP: exclude_categories=" +
-            "['labview_vicall'] hides the LabVIEW connector-pane metadata, which is IRREDUCIBLE " +
-            "headlessly (a VI inside a .lvlibp never loads, so the pane cannot be regenerated — only " +
-            "copy_step_module reproduces it) and would otherwise dominate the list. Counts are always " +
-            "reported against the unfiltered total and any filtering/truncation is stated explicitly, " +
-            "so a shortened answer can never be mistaken for 'almost identical'.",
+            "['labview_vicall'] hides the LabVIEW connector-pane metadata, which is verbose and " +
+            "dominates the list — but do NOT write it off as irreducible: those panes reproduce with " +
+            "ZERO differences when they are CLONED from a source file (copy_step_module, or " +
+            "import_sequence_file's default labview_panes='copy'). Counts are always reported against " +
+            "the unfiltered total and any filtering/truncation is stated explicitly, so a shortened " +
+            "answer can never be mistaken for 'almost identical'. " +
+            "WHAT THIS DIFF CANNOT SEE: type-registration conflicts. A file that opens in the Sequence " +
+            "Editor with a 'type conflict' dialog is still reported identical:true here, because the " +
+            "FileDiffer compares content and not the type registry. After a rebuild, run " +
+            "audit_type_consistency as well — identical:true alone does not prove the file is sound.",
             s => s
                 .AddRequired("file_path_1", "string", "Path to the first (base) sequence file")
                 .AddRequired("file_path_2", "string", "Path to the second sequence file to diff against file 1")
@@ -1921,8 +1977,11 @@ public class TestStandToolRegistry
                 .AddOptional("change_types", "array",
                     "Keep only these change types: Insert, Delete, ValueChange, Conflict, Moved.")
                 .AddOptional("max_results", "integer",
-                    "Cap the number of individual differences returned (0 = unlimited). Truncation is " +
-                    "reported in 'truncated'/'note'."),
+                    "Cap the number of individual differences returned. DEFAULT 150 — a full list of a " +
+                    "whole-file rebuild's differences does not fit one tool result, so the cap is " +
+                    "applied unless you override it. Truncation is always reported in " +
+                    "'truncated'/'note', and the tallies count ALL differences regardless. Pass 0 for " +
+                    "unlimited.", DiffReportShaper.DefaultMaxResults),
             DiffSequenceFilesAsync);
 
         // ── Sync Manager ─────────────────────────────────────────────────────
@@ -2285,15 +2344,16 @@ public class TestStandToolRegistry
             "Deep-clone a whole sequence — EVERY step, code module, local, parameter, the sequence " +
             "Comment and all settings (RunMode/RecordResults/failure+cleanup options) — within the same " +
             "file or into a DIFFERENT file (target_file_path). This is a flag-preserving copy (not a " +
-            "name-only shell), so it is the FASTEST and most faithful primitive for a 1:1 cross-file " +
-            "rebuild: it replaces the per-step insert_steps_bulk + copy_step_module dance with ONE call " +
-            "per sequence. For a cross-file clone the referenced data types must already exist in the " +
-            "target (run copy_typedefs FIRST) — the clone carries type references by GUID. " +
-            "FULL 1:1 REBUILD RECIPE: (1) create_sequence_file; (2) copy_typedefs (all types); " +
-            "(3) duplicate_sequence source→target for each sequence, in source order, keeping the same " +
-            "name; (4) delete_sequence the default 'MainSequence'; (5) copy_file_globals (globals are " +
-            "not part of any sequence); (6) copy_file_attributes + set_file_properties (comment/" +
-            "version); (7) save_sequence_file, then verify with diff_sequence_files.",
+            "name-only shell), so it is the fastest primitive for cloning ONE sequence. For a cross-file " +
+            "clone the referenced data types must already exist in the target (run copy_typedefs FIRST) " +
+            "— the clone carries type references by GUID. " +
+            "NOT THE TOOL FOR A WHOLE-FILE REBUILD: use export_sequence_file + import_sequence_file " +
+            "instead. That pair rebuilds a complete file in about 4 calls and reaches identical:true on " +
+            "the reference file (17 sequences, 79 steps, 18 packed-library LabVIEW panes, 49 types), " +
+            "because it also carries what a sequence clone cannot: the file comment/version, the file " +
+            "globals, the type attach state and the per-step authored config. Reach for " +
+            "duplicate_sequence when you want a SINGLE sequence copied — a variant of an existing test, " +
+            "or one sequence lifted out of another file.",
             s => s
                 .AddRequired("source_file_path", "string", "Path to the source sequence file")
                 .AddRequired("source_sequence_name", "string", "Name of the sequence to copy")
@@ -2971,12 +3031,15 @@ public class TestStandToolRegistry
             "Configure a step's LabVIEW code module: the VI path (LabVIEW adapter). After the VI " +
             "path is set, the VI's connector pane is loaded (editor 'Load Prototype') so the " +
             "parameter interface is populated — returned in the result's 'parameters' list. " +
-            "FOR A PACKED-LIBRARY VI (.lvlibp) PASS load_prototype=false AND CALL " +
-            "load_module_prototype AFTERWARDS: the auto-load here runs in-process through the " +
-            "adapter's AutoDetect, which resolves a LabVIEW Run-Time (lvrt.dll) and faults on such a " +
-            "VI. load_module_prototype routes the adapter to the LabVIEW ExecServer instead and loads " +
-            "the same pane in ~5s (with isolate=false). The pane IS reproducible headless — do not " +
-            "settle for an empty one. " +
+            "FOR A PACKED-LIBRARY VI (.lvlibp) THE AUTO-LOAD IS SKIPPED AUTOMATICALLY and the result " +
+            "carries a 'note' saying so: that load runs in-process, and in-process it raises the " +
+            "native delay-load fault 0xC06D007E, which escapes managed try/catch and KILLS THE SERVER. " +
+            "The VI path is still written, so the step is configured — only its connector pane stays " +
+            "empty. Reproduce the pane by CLONING it, which needs no LabVIEW: copy_step_module from a " +
+            "source .seq that has the step, or import_sequence_file with its default " +
+            "labview_panes='copy' (~1s per step). Do NOT reach for load_module_prototype here — " +
+            "neither of its isolate settings can load a packed-library VI on this station " +
+            "(in-process is fatal, the isolated worker cannot bind the running LabVIEW and times out). " +
             "Do NOT use on a None-adapter LabVIEW UTILITY step (e.g. NI_LV_RunVIAsynchronously, " +
             "'Run VI Asynchronously') — its VI config lives in the step's own properties and " +
             "switching to the LabVIEW adapter corrupts it; this tool now REFUSES such steps. Use " +
@@ -3153,13 +3216,19 @@ public class TestStandToolRegistry
                     "get_prototype_load_status (default TRUE for LabVIEW, false otherwise). Set false " +
                     "to wait inline for the result (may hit the ~60s transport timeout for a slow load).")
                 .AddOptional("isolate", "boolean", "LabVIEW only: run in a crash-safe isolated worker " +
-                    "process (default TRUE). NEITHER SETTING RELIABLY LOADS A PACKED-LIBRARY VI: the " +
-                    "worker is a separate process that does NOT inherit the attachment to the running " +
-                    "LabVIEW ADE, so it starts its own and usually times out; isolate=false loads " +
-                    "in-process and can raise the native delay-load fault 0xC06D007E, which is NOT " +
-                    "catchable and KILLS THE SERVER. For a .lvlibp step prefer copy_step_module (or " +
-                    "import_sequence_file's labview_panes='copy'), which clones the cached connector " +
-                    "pane from a source file without LabVIEW.")
+                    "process (default TRUE). NEITHER SETTING LOADS A PACKED-LIBRARY VI: the worker is " +
+                    "a separate process that does NOT inherit the attachment to the running LabVIEW " +
+                    "ADE, so it starts its own and times out; isolate=false loads in-process and " +
+                    "raises the native delay-load fault 0xC06D007E, which is NOT catchable and KILLS " +
+                    "THE SERVER — so that combination is now REFUSED with an error naming the working " +
+                    "route. For a .lvlibp step use copy_step_module (or import_sequence_file's " +
+                    "labview_panes='copy'), which clones the cached connector pane from a source file " +
+                    "without LabVIEW.")
+                .AddOptional("force_unsafe_inprocess", "boolean", "Lift the refusal of an in-process " +
+                    "(isolate=false) load for a packed-library VI. The load is PROCESS-FATAL — the " +
+                    "server dies and the NI Error Reporter appears. Only for deliberately reproducing " +
+                    "that fault; there is no case where it produces a connector pane. Default false.",
+                    false)
                 .AddOptional("labview_server", "string", "LabVIEW server routing before the load: " +
                     "'deferred' (default) = running LabVIEW ADE via ActiveX, launched on first use " +
                     "(matches the editor; avoids the lvrt.dll delay-load); 'exec' = same but connect " +
@@ -3191,11 +3260,19 @@ public class TestStandToolRegistry
             "options (TS.ErrorDialogOptions, e.g. the NI_Wait/DQMH pattern) and the NI_Wait timeout " +
             "flag (Result.TimeoutOccurred), each copied only when present on the source — so it also " +
             "reproduces a NON-adapter step (e.g. an NI_Wait) faithfully, not just LabVIEW/DLL/.NET/" +
-            "SequenceCall modules. Every subtree is CLONED (flag-preserving) before it is attached, so " +
-            "an attached source object no longer trips 'already has a parent object'. This " +
-            "is the reliable way to reproduce a LabVIEW step whose VI lives in a packed library " +
-            "(.lvlibp) that cannot load headless (Load Prototype fails, so the connector pane can't " +
-            "be regenerated) — the cached metadata is copied verbatim from a source .seq instead. " +
+            "SequenceCall modules. This is THE way to reproduce a LabVIEW step whose VI lives in a " +
+            "packed library (.lvlibp): such a VI's connector pane cannot be loaded on this station at " +
+            "all (in-process the load kills the server, the isolated worker times out), so the cached " +
+            "metadata is cloned verbatim from a source .seq instead — about a second per step, no " +
+            "LabVIEW involved. " +
+            "IT WRITES AS LITTLE AS POSSIBLE, on purpose. A scalar leaf is compared first and written " +
+            "BY VALUE only when it differs, an empty array/argument list is skipped, and only a real " +
+            "subtree is object-copied (flag-preserving clone, so an attached source object no longer " +
+            "trips 'already has a parent object'). Replacing a property that belongs to the step TYPE " +
+            "would register a second, conflicting instance of that type and the rebuilt file would open " +
+            "with a 'type conflict' dialog — which the FileDiffer does NOT report. Measured: deciding " +
+            "per property instead of cloning everything took 79 writes down to 47 and made the dialog " +
+            "disappear. So 'copiedPaths' being shorter than you expect is the tool working correctly. " +
             "Run copy_typedefs FIRST so the module types exist in the target file. Returns " +
             "{sourceStep, targetStep, adapter, copiedPaths[], warnings[]}.",
             s => s
@@ -3511,9 +3588,11 @@ public class TestStandToolRegistry
 
     private async Task<CallToolResult> CreateSequenceFileAsync(JsonElement? args)
     {
-        var path   = args!.Value.GetRequiredString("file_path");
-        var result = await _ts.CreateSequenceFileAsync(path);
-        return Ok($"New sequence file created: {result}");
+        var path      = args!.Value.GetRequiredString("file_path");
+        var overwrite = args!.Value.GetBoolOrDefault("overwrite", false);
+        var result    = await _ts.CreateSequenceFileAsync(path, overwrite);
+        return Ok($"New sequence file created: {result}"
+                  + (overwrite ? " (any existing file at that path was closed and replaced)" : ""));
     }
 
     private async Task<CallToolResult> InsertSequenceAsync(JsonElement? args)
@@ -3640,6 +3719,14 @@ public class TestStandToolRegistry
         var sequenceName = args!.Value.GetStringOrNull("sequence_name");
         var data   = await _ts.ReadReferenceAuditDataAsync(filePath, sequenceName);
         var result = ReferenceAuditor.Audit(data);
+        return OkJson(result);
+    }
+
+    private async Task<CallToolResult> AuditTypeConsistencyAsync(JsonElement? args)
+    {
+        var result = await _ts.AuditTypeConsistencyAsync(
+            args!.Value.GetRequiredString("file_path"),
+            args!.Value.GetStringOrNull("reference_file_path"));
         return OkJson(result);
     }
 
@@ -5124,7 +5211,8 @@ public class TestStandToolRegistry
             args!.Value.GetStringOrDefault("cross_file_prototypes", "copy"),
             args!.Value.GetBoolOrDefault("keep_unused_types", true),
             args!.Value.GetStringOrDefault("variables", "copy"),
-            args!.Value.GetStringOrDefault("modules", "copy"));
+            args!.Value.GetStringOrDefault("modules", "copy"),
+            args!.Value.GetBoolOrDefault("remove_default_main_sequence", true));
         return OkJson(outcome);
     }
 
@@ -5151,7 +5239,11 @@ public class TestStandToolRegistry
             ExcludeCategories = StrList(args!.Value, "exclude_categories"),
             PathFilter        = args!.Value.GetStringOrNull("path_filter"),
             ChangeTypes       = StrList(args!.Value, "change_types"),
-            MaxResults        = args!.Value.GetIntOrDefault("max_results", 0),
+            // Capped BY DEFAULT: an unlimited list of a whole-file rebuild's 600+ differences does not
+            // fit one tool result, and being truncated by the transport loses the tallies too. 0 still
+            // means unlimited for a caller who explicitly wants everything.
+            MaxResults        = args!.Value.GetIntOrDefault("max_results",
+                                                           DiffReportShaper.DefaultMaxResults),
         };
         return OkJson(DiffReportShaper.Shape(report, opts));
     }
@@ -5510,7 +5602,9 @@ public class TestStandToolRegistry
             args!.Value.GetBoolOrNull("isolate"),
             args!.Value.GetIntOrDefault("timeout_seconds", 120),
             args!.Value.GetBoolOrNull("async"),
-            args!.Value.GetStringOrNull("labview_server"));
+            args!.Value.GetStringOrNull("labview_server"),
+            null,
+            args!.Value.GetBoolOrDefault("force_unsafe_inprocess", false));
         return OkJson(result);
     }
 

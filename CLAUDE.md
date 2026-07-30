@@ -7,32 +7,39 @@ For a whole-file reproduction, migration or bulk edit, use the export/import pai
 
 ```
 export_sequence_file(file_path)                    → writes <file>.model.json, returns a summary
-create_sequence_file(dest)
+create_sequence_file(dest, overwrite=true)         → overwrite handles the close+delete dance
 import_sequence_file(model_path, dest_file_path)   → rebuilds everything, returns counts + warnings[]
-delete_sequence(dest, "MainSequence")              → the model has none
-diff_sequence_files(orig, dest, summary_only=true) → verify
+diff_sequence_files(orig, dest)                    → verify the CONTENT (rows capped at 150 by default)
+audit_type_consistency(dest, reference_file_path=orig) → verify the TYPE REGISTRY (the diff can't)
 ```
+
+The import removes the destination's leftover `MainSequence` itself when the model has none, so there
+is no `delete_sequence` step any more.
 
 Measured 2026-07-29 on 8 sequences of `TFW_MDC_com_Python.seq` (47 steps, 13 object-oriented Python
 steps, 5 LabVIEW `.lvlibp` steps, 1 cross-file SequenceCall): **3 MCP calls and ZERO FileDiffer
 differences inside the imported scope** (the only rows left are the 22 sequences not imported). The same
 rebuild with the granular tools took ~700 calls, 3 diff iterations and left 224 differences.
 
-### NEVER load a LabVIEW prototype to rebuild a pane — CLONE it (measured 2026-07-29)
-An earlier version of this file claimed an in-process `.lvlibp` pane load works in ~5 s and that the
-isolated worker is the broken one. **Both halves are wrong, and following that advice kills the server.**
-- `load_module_prototype(isolate:false)` on a `.lvlibp` VI raised the MSVC delay-load SEH
-  **`0xC06D007E`** (the LabVIEW Run-Time `lvrt.dll`) **with LabVIEW 2026 32-bit already started and
-  responsive**. It escapes managed `try/catch`, so the server PROCESS DIES and the NI Error Reporter
-  appears. The ExecServer routing that was supposed to avoid the Run-Time did not prevent it, and the
-  in-process path has none of the worker's silent-death guards — those live in `LoadPrototypeWorker`
-  and cannot help a fault raised in the server itself.
-- `isolate:true` is crash-safe but cannot bind the running LabVIEW ADE, so it only times out.
-- **So there is no working prototype-load route for a packed-library VI on this station.** The route
-  that DOES work is cloning the cached `ViCall` subtree from a source `.seq` — `copy_step_module`, or
-  `import_sequence_file`'s `labview_panes='copy'` (the DEFAULT). ~1 s per step, no LabVIEW, and the
-  panes come out with zero differences: `Parms` with their `ArgVal`/`UseDefaultValues` bindings,
-  namespace, VI description, connector-pane checksum.
+### A `.lvlibp` pane is CLONED, never loaded — and the server now ENFORCES that (2026-07-30)
+This used to be a rule you had to remember, and forgetting it killed the server. It is a guard now:
+- **`load_module_prototype(isolate:false)` on a packed-library VI is REFUSED** with an error that names
+  the working route (`InputGuards.IsPackedLibraryModulePath` + the refusal message). Only
+  `force_unsafe_inprocess:true` lifts it, and there is no case where that produces a pane.
+- **`configure_labview_module` SKIPS its automatic prototype load** for a `.lvlibp` VI and says so in
+  the result's `note`. The VI path is still written, so the step is configured — no `load_prototype:false`
+  to remember.
+- Why: the in-process load raised the MSVC delay-load SEH **`0xC06D007E`** (the LabVIEW Run-Time
+  `lvrt.dll`) **with LabVIEW 2026 32-bit already started and responsive**. It escapes managed
+  `try/catch`, so the server PROCESS DIED and the NI Error Reporter appeared. `isolate:true` is
+  crash-safe but cannot bind the running LabVIEW ADE, so it only times out. There is no working
+  prototype-load route for a packed-library VI on this station.
+- The route that DOES work is cloning the cached `ViCall` subtree from a source `.seq` —
+  `copy_step_module`, or `import_sequence_file`'s `labview_panes='copy'` (the DEFAULT). ~1 s per step,
+  no LabVIEW, and the panes come out with zero differences: `Parms` with their
+  `ArgVal`/`UseDefaultValues` bindings, namespace, VI description, connector-pane checksum.
+- `labview_panes='load'` still exists for a plain `.vi`; on a packed-library step the guard turns into
+  an import *warning* instead of a dead server.
 - After a crash, `get_prototype_load_status` reports the job as "unknown or expired" — indistinguishable
   from a genuinely expired job. A vanished job right after a LabVIEW load means the process died; check
   whether the server's PID changed.
@@ -64,12 +71,14 @@ isolated worker is the broken one. **Both halves are wrong, and following that a
   in-memory type list still lists a type the save just dropped — re-attaches them and names them in
   `warnings`. Cost: the rebuild embeds more types than the original, which the FileDiffer does not show.
 
-**Reading a big diff:** always start `diff_sequence_files(..., summary_only=true)`. Every response
-carries `byCategory` / `byChangeType` / `bySequence` over ALL differences; the individual rows are the
-expensive part (600+ of them blows the tool-result budget). Then drill in with `include_categories` /
-`exclude_categories` / `path_filter` / `change_types` / `max_results` and
-`group_by='category'|'sequence'`. When you rebuild only SOME sequences, the omitted ones dominate the
-count as `other` Deletes — subtract them (`exclude_categories=['other']`) before judging the rebuild.
+**Reading a big diff:** the rows are **capped at 150 by default** (`DiffReportShaper.DefaultMaxResults`,
+applies to `compare_sequence_files` in native mode too) and any truncation is stated in
+`truncated`/`note`, so a big diff can no longer blow the tool-result budget — `summary_only=true` is now
+an option, not a precaution. Every response carries `byCategory` / `byChangeType` / `bySequence` over ALL
+differences regardless of the cap. Drill in with `include_categories` / `exclude_categories` /
+`path_filter` / `change_types` / `max_results` (0 = unlimited) and `group_by='category'|'sequence'`. When
+you rebuild only SOME sequences, the omitted ones dominate the count as `other` Deletes — subtract them
+(`exclude_categories=['other']`) before judging the rebuild.
 
 **Connector-pane BINDINGS need their own writer.** `set_module_parameter` always clears a control's
 `UseDefaultValues` as a side effect, so binding every parameter through it flips that flag wherever the
@@ -121,19 +130,30 @@ opens in the Sequence Editor with a **type-conflict dialog** ("… conflicts wit
 loaded") even though it is functionally complete. Fix: for a typed node, write the LEAF SCALARS by
 value (`SetValString`/`SetValNumber`/`SetValBoolean` on the existing node) instead of swapping the
 object. Measured: `modulesCloned` dropped 79 → 47 and the dialog disappeared.
-- The same trap applies to `copy_step_module` and to `set_property_node value_type='named_type'` —
-  those instantiate/replace deliberately, so only reach for them when the node does NOT already exist.
-- **THE FILEDIFFER CANNOT SEE THIS.** It reported `identical: true` for the file that raised the
-  dialog. So `diff_sequence_files` alone does NOT prove a rebuild is sound — a clean diff plus a clean
-  `audit_sequence_references` still leaves type conflicts, and the ONLY check that catches them is
-  OPENING THE FILE in the editor. Ask the user to open it; SeqEdit 2026 cannot be automated (CEF).
+- `copy_step_module` and the import **already do this** — the decision lives in `StepCopyPolicy`
+  (scalar compared and written by value, empty list-like node skipped, object copy last resort) and is
+  pinned by tests in `T35`. A shorter `copiedPaths` than you expect is the policy working. The trap is
+  still live for `set_property_node value_type='named_type'`, which instantiates deliberately — reach
+  for it only when the node does NOT already exist.
+- **THE FILEDIFFER CANNOT SEE THIS.** It reported `identical: true` for the file that raised the dialog.
+  So `diff_sequence_files` alone does NOT prove a rebuild is sound.
+- **Use `audit_type_consistency` for it** (2026-07-30). It reads the file's `TypeUsageList` RAW —
+  duplicates included, which `EnumerateFileTypeDefs` deliberately hides — and reports
+  `E_DUPLICATE_TYPE_NAME` (the same type name registered twice: the dialog's actual cause),
+  `W_MODIFIED_TYPE`, and with `reference_file_path` also `E_TYPE_VERSION_MISMATCH` /
+  `W_TYPE_STRUCTURE_MISMATCH` / the one-sided `W_TYPE_ONLY_IN_*`. `valid` keys off the ERRORS only, so
+  read the warnings too. **Run it after every rebuild, next to the diff**: the diff proves the content
+  matches, the audit proves the type registry is sane. Opening the file in the editor is still the
+  belt-and-braces check when it matters, but it is no longer the only one.
 
-## Rebuilding a .seq 1:1 (whole-sequence clone) — the older per-sequence path
+## Cloning ONE sequence — `duplicate_sequence`
 
-To reproduce an existing sequence file (a "rebuild"), prefer the **whole-sequence
-clone** over the per-step insert+configure dance. `duplicate_sequence` deep-clones a
-whole sequence (steps, modules, locals, parameters, comment, all settings) — within a
-file or **cross-file** via `target_file_path`. Recipe:
+`duplicate_sequence` deep-clones a whole sequence (steps, modules, locals, parameters, comment, all
+settings) — within a file or **cross-file** via `target_file_path`. Use it for a SINGLE sequence: a
+variant of an existing test, or one sequence lifted out of another file. For a whole FILE use
+export/import above — it also carries the file comment/version, the globals, the type attach state and
+the per-step authored config, which a sequence clone cannot. The per-sequence recipe below is kept for
+the case where you deliberately rebuild sequence by sequence:
 
 1. `create_sequence_file` (the new file)
 2. `copy_typedefs` (all types) — so cloned sequences/globals resolve their types by GUID
@@ -144,7 +164,8 @@ file or **cross-file** via `target_file_path`. Recipe:
 7. `save_sequence_file`, then **verify with `diff_sequence_files`** (the native FileDiffer)
 
 **Verification semantics** (`diff_sequence_files` / `compare_sequence_files mode=native`
-are the SAME diff — use `diff_sequence_files`):
+are the SAME diff — use `diff_sequence_files`; pair it with `audit_type_consistency`, which
+covers the type-registration conflicts the diff is blind to):
 - In the diff values, `{val}` = TYPE-DEFAULT (not explicitly set), `[val]` = EXPLICITLY
   set. An enum/member already at its type default must be **left unset** — setting it
   flips `{val}`→`[val]` and creates a spurious diff.
@@ -383,6 +404,32 @@ Driven by the ~700-call rebuild above. See memory `teststand-rebuild-efficiency-
 - **Reminder:** new tool NAMES and new enum values/optional params need a FRESH MCP session — the
   client caches the tool catalog at session start.
 
+## Rules moved OUT of this file and INTO the server (2026-07-30)
+
+Six rules that lived here as prose are now guards, defaults or a tool — so they hold for any client and
+any fresh session, not only for a reader of this file. Do not re-add the prose versions.
+
+- **A packed-library in-process prototype load is REFUSED**, not warned about
+  (`InputGuards.IsPackedLibraryModulePath`, `force_unsafe_inprocess` to override), and
+  `configure_labview_module` skips its own auto-load for such a VI with a `note`. The tool descriptions
+  no longer recommend `isolate:false` — that advice had survived its retraction and was the one place
+  where following the catalog killed the server.
+- **`diff_sequence_files` caps its rows at 150 by default** (`DiffReportShaper.DefaultMaxResults`, on
+  `Options` so `compare_sequence_files` native mode inherits it); `max_results=0` restores unlimited.
+- **`create_sequence_file(overwrite=true)`** performs the close → retry-delete → create dance.
+- **`import_sequence_file` removes the destination's leftover `MainSequence`** when the model has none
+  (`remove_default_main_sequence`, default true; reported as `defaultMainSequenceRemoved`).
+- **`audit_type_consistency`** is new — the only automated check for the type-registration conflicts the
+  FileDiffer cannot see.
+- Stale tool descriptions fixed: `duplicate_sequence` no longer advertises itself as the whole-file
+  rebuild path, `import_sequence_file` reports the measured 0 differences instead of "one, an API limit",
+  `diff_sequence_files` no longer calls the LabVIEW panes irreducible, and `copy_step_module` documents
+  its minimal-write policy.
+
+New tool NAMES and new params need a **FRESH MCP session** (the client caches the catalog at session
+start): `audit_type_consistency`, `force_unsafe_inprocess`, `overwrite`,
+`remove_default_main_sequence`, and the changed `max_results` default.
+
 ## General Conventions
 
 - **Sequence file for tests:** Always use `DemoTestsequenz.seq`
@@ -406,11 +453,12 @@ descriptions; the cross-cutting rules below apply regardless of which tool you c
 - **Single in-process engine only.** A second engine cannot be torn down cleanly
   while the first one lives → the host hangs on exit. The MCP server uses exactly
   one engine; never spin up a second. (`T01`, see also memory `teststand-testhost-teardown-hang`.)
-- **Recreating a `.seq` that already exists:** the engine releases the OS file
-  handle *asynchronously*. The working pattern (from `TestDataBuilder.Step00`):
-  1. `close_sequence_file` for any loaded file matching the path,
-  2. delete from disk inside a short retry loop (≈5× with a ~300 ms back-off),
-  3. then `create_sequence_file`. Deleting without closing first throws a sharing violation.
+- **Recreating a `.seq` that already exists: `create_sequence_file(overwrite=true)`.** The engine
+  releases the OS file handle *asynchronously*, so the close → retry-delete (≈5× / ~300 ms) → create
+  dance is required — the tool does it internally now, so there is nothing to open-code. Without
+  `overwrite` a pre-existing or still-loaded file fails with a sharing violation, which is the honest
+  outcome for an accidental overwrite. A genuine failure (file open in the editor, read-only) surfaces
+  with its real reason.
 - **Verify persistence by re-opening:** after `save_sequence_file`, call
   `open_sequence_file` again and read back to confirm the write→save→reload round-trip.
 
@@ -459,13 +507,14 @@ descriptions; the cross-cutting rules below apply regardless of which tool you c
 - **Undo/redo is not auto-recorded** by the headless API (it's a Sequence Editor
   feature). `CanUndo` is false on a fresh file; MCP edits won't be undoable. Revert by
   performing the inverse operation explicitly. (`T08`.)
-- **A `.lvlibp` `ViCall` pane cannot be LOADED headless on this station — clone it instead.** Both
-  routes fail, in different ways: `isolate:false` (in-process) raised the delay-load SEH `0xC06D007E`
-  and KILLED THE SERVER even with LabVIEW warm, and `isolate:true` cannot bind the running LabVIEW ADE
-  and times out. Use `copy_step_module` (or `import_sequence_file`'s default `labview_panes='copy'`),
-  which reproduces `ViCall.Parms` and all the VI metadata from a source `.seq` in ~1 s without LabVIEW.
-  `configure_labview_module`'s built-in auto-load faults the same way — pass `load_prototype:false`.
-  See the corrected section at the top of this file for the measurements.
+- **A `.lvlibp` `ViCall` pane cannot be LOADED headless on this station — clone it instead, and the
+  server enforces that now.** `isolate:false` (in-process) raised the delay-load SEH `0xC06D007E` and
+  KILLED THE SERVER even with LabVIEW warm, `isolate:true` cannot bind the running LabVIEW ADE and times
+  out. So `load_module_prototype` REFUSES the in-process variant for a packed-library VI and
+  `configure_labview_module` skips its auto-load with a `note` — no `load_prototype:false` to remember.
+  Use `copy_step_module` (or `import_sequence_file`'s default `labview_panes='copy'`), which reproduces
+  `ViCall.Parms` and all the VI metadata from a source `.seq` in ~1 s without LabVIEW. See the section
+  at the top of this file for the measurements.
 - **The engine connection auto-reconnects.** If the MCP host restarts the server mid-session,
   `EnsureConnected` does a one-shot lazy reconnect (default engine path) before failing; mutating
   tools also auto-load their file on demand. So a transient "Not connected" self-heals on the next
@@ -624,17 +673,19 @@ max+1. (`T22`.)
     `Initialize()`, restored afterward. Configurable via **`labview_server`**: `deferred` (default,
     running ADE launched on first use), `exec` (connect now), `rte` (legacy AutoDetect), `auto` (leave
     config untouched).
-  - **NEITHER `isolate` setting loads a packed-library VI — do not keep hunting for the right one
-    (measured twice, 2026-07-29).** `isolate:true` (the default) is a separate process that does not
-    inherit the attachment to the running LabVIEW ADE, starts its own and TIMES OUT (8 steps × 120 s,
-    all timeouts). It also reads the file from DISK, so a load after `save:false` edits reports the step
-    as out of range — which reads like an unloadable VI but is an unsaved file. `isolate:false`
-    (in-process) **KILLS THE SERVER**: it raised `0xC06D007E`, the MSVC delay-load fault for the LabVIEW
-    Run-Time, with LabVIEW 2026 32-bit already running and responsive; the fault escapes managed
-    `try/catch` and the in-process path has no guards. An earlier note here recommended `isolate:false`
-    on the strength of one apparently-good run — that recommendation caused a server crash and an NI
-    Error Reporter dialog, and is retracted. What the worker still buys is crash containment
-    (`prototypeLoaded:false`, `workerOutcome:"crashed"`/`"timeout"`, server lives).
+  - **NEITHER `isolate` setting loads a packed-library VI — and the fatal one is now REFUSED
+    (measured twice, 2026-07-29; guard added 2026-07-30).** `isolate:true` (the default) is a separate
+    process that does not inherit the attachment to the running LabVIEW ADE, starts its own and TIMES
+    OUT (8 steps × 120 s, all timeouts). It also reads the file from DISK, so a load after `save:false`
+    edits reports the step as out of range — which reads like an unloadable VI but is an unsaved file.
+    `isolate:false` (in-process) **KILLED THE SERVER**: it raised `0xC06D007E`, the MSVC delay-load
+    fault for the LabVIEW Run-Time, with LabVIEW 2026 32-bit already running and responsive; the fault
+    escapes managed `try/catch` and the in-process path has no guards. An earlier note here recommended
+    `isolate:false` on the strength of one apparently-good run — that recommendation caused a server
+    crash and an NI Error Reporter dialog, and is retracted. **The combination now throws instead**
+    (`force_unsafe_inprocess:true` to override, which only reproduces the crash). What the worker still
+    buys is crash containment for a non-packed VI (`prototypeLoaded:false`,
+    `workerOutcome:"crashed"`/`"timeout"`, server lives).
     **`copy_step_module` is not the fallback — it is THE way.**
   - **SILENT worker death — no WER box AND no NI Error Reporter dialog.** `SetErrorMode` alone only
     hides the OS fault box; NI's green "…encountered a problem and needs to close" reporter is an
@@ -709,6 +760,9 @@ Three facts measured while verifying a rebuild. Two of them cost an hour of chas
   `E_UNDECLARED_FILEGLOBAL`. Returns `{valid, issueCount, issues[], stats{}}`. Omit
   `sequence_name` to audit every sequence in the file. Read-only/advisory — it reports, it never
   modifies. Other scopes (`StationGlobals`, `RunState.*`, `Step.*`) are intentionally not audited.
+- `audit_type_consistency` is the second half of a post-rebuild check: `audit_sequence_references`
+  covers the EXPRESSIONS, `audit_type_consistency` covers the TYPE REGISTRY (see the type-conflict
+  section above), `diff_sequence_files` covers the CONTENT. All three are read-only.
 - **Run it AFTER building** and after any `set_flow_condition` / `set_step_expression`. It is the
   complement to `validate_sequence_plan`, which (pre-build) checks `Locals.X` in the build PLAN and
   — since 2026-07 — also `Parameters.X` **when you pass a `parameters` list** (`E_UNDECLARED_PARAM`;
