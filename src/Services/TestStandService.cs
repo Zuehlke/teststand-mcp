@@ -294,7 +294,7 @@ public interface ITestStandService : IDisposable
     Task<ImportOutcome> ImportSequenceFileAsync(SequenceFileModel model, string destFilePath,
         bool copyTypeDefs = true, bool save = true, string labViewPanes = "copy",
         int prototypeTimeoutSeconds = 120, string crossFilePrototypes = "copy",
-        bool keepUnusedTypes = true, string variables = "copy");
+        bool keepUnusedTypes = true, string variables = "copy", string modules = "copy");
 
     // Sequence Analyzer
     /// <summary>Runs the TestStand Sequence Analyzer on the given file and returns any messages.</summary>
@@ -925,11 +925,16 @@ public interface ITestStandService : IDisposable
     /// copy_typedefs first). Does NOT load LabVIEW.
     /// <para><paramref name="paths"/> restricts which subtrees are copied (null = all of them, which is
     /// what the MCP tool does). Passing a subset also SKIPS the adapter alignment, so an internal caller
-    /// can add authored step config to a step whose module is already configured.</para></summary>
+    /// can add authored step config to a step whose module is already configured.</para>
+    /// <para><paramref name="includeUnmodelledStepConfig"/> DISCOVERS the paths on the source step
+    /// instead: every step-root child that is not framework plumbing plus every <c>TS</c> child the
+    /// export/import model does not author. That covers step types and adapters the model knows nothing
+    /// about, which is what a 1:1 rebuild needs.</para></summary>
     Task<Dictionary<string, object>> CopyStepModuleAsync(
         string sourceFilePath, string sourceSequenceName, string sourceStepGroup, string sourceStepName,
         string targetFilePath, string targetSequenceName, string targetStepGroup, string targetStepName,
-        bool save = true, IReadOnlyList<string>? paths = null);
+        bool save = true, IReadOnlyList<string>? paths = null,
+        bool includeUnmodelledStepConfig = false);
 
     // ── Sequence Analyzer (detailed) ─────────────────────────────────────────
     /// <summary>Runs the Sequence Analyzer and returns a detailed result filtered by minimum
@@ -13228,11 +13233,79 @@ public sealed class TestStandService : ITestStandService
         "TS.ErrorDialogOptions", "Result.TimeoutOccurred",
     };
 
+    /// <summary>Reads a scalar property as comparable text, picking the getter by its displayed type
+    /// (an enum rejects the plain string getter, hence the CoerceToString retry). Null when unreadable.
+    /// </summary>
+    private static string? ReadScalarText(NiPropertyObject po, string path, string typeDisp)
+    {
+        try
+        {
+            if (typeDisp.Contains("Boolean", StringComparison.Ordinal))
+                return po.GetValBoolean(path, 0) ? "True" : "False";
+            if (typeDisp.Contains("Number", StringComparison.Ordinal))
+                return po.GetValNumber(path, 0)
+                    .ToString(System.Globalization.CultureInfo.InvariantCulture);
+            return po.GetValString(path, 0);
+        }
+        catch
+        {
+            try { return po.GetValString(path, 128 /* PropOption_CoerceToString */); }
+            catch { return null; }
+        }
+    }
+
+    /// <summary>Writes a scalar property by VALUE (never replacing the property object, which would alter
+    /// a type-owned property's structure). False when the write is not possible.</summary>
+    private static bool TryWriteScalar(NiPropertyObject po, string path, string typeDisp, string value)
+    {
+        try
+        {
+            if (typeDisp.Contains("Boolean", StringComparison.Ordinal))
+            {
+                po.SetValBoolean(path, 0, value.Equals("True", StringComparison.OrdinalIgnoreCase));
+                return true;
+            }
+            if (typeDisp.Contains("Number", StringComparison.Ordinal))
+            {
+                po.SetValNumber(path, 0, double.Parse(value,
+                    System.Globalization.NumberStyles.Any,
+                    System.Globalization.CultureInfo.InvariantCulture));
+                return true;
+            }
+            po.SetValString(path, 0, value);
+            return true;
+        }
+        catch { return false; }
+    }
+
+    /// <summary>The <c>TS.*</c> children that the export/import model itself authors. Everything ELSE
+    /// under <c>TS</c> is authored in the editor and invisible to the model, so a 1:1 rebuild has to
+    /// clone it — measured on TFW_Symphony_DutCom.seq, the model covers 13 of 49 TS properties, and the
+    /// gap showed up as 9 differences on <c>TS.LoopOpt</c> alone. <c>Id</c> is excluded because it is the
+    /// step's identity, <c>SData</c> because the module is handled by its own pass.</summary>
+    private static readonly HashSet<string> ModelAuthoredTsProperties = new(StringComparer.Ordinal)
+    {
+        "Id", "SData",
+        "PreCond", "PreExpr", "PostExpr", "StatusExpr",
+        "Mode", "PassAct", "FailAct", "LoopType",
+        "ResultOption", "IgnoreRTE", "StepFCSeqF", "LoadOpt", "UnloadOpt",
+    };
+
+    /// <summary>Step-root children that belong to the framework, not to the step type. Everything else at
+    /// the step root IS step-type-specific authored config (an NI_Wait's WaitForTarget/ThreadRefExpr/
+    /// TimeoutExpr, a limit test's Limits, a utility step's VIModule) and none of it is in the
+    /// model — measured: 1 of an NI_Wait's 10 root properties.</summary>
+    private static readonly HashSet<string> FrameworkStepRootProperties = new(StringComparer.Ordinal)
+    {
+        "TS", "Result",
+    };
+
     /// <inheritdoc/>
     public async Task<Dictionary<string, object>> CopyStepModuleAsync(
         string sourceFilePath, string sourceSequenceName, string sourceStepGroup, string sourceStepName,
         string targetFilePath, string targetSequenceName, string targetStepGroup, string targetStepName,
-        bool save = true, IReadOnlyList<string>? paths = null)
+        bool save = true, IReadOnlyList<string>? paths = null,
+        bool includeUnmodelledStepConfig = false)
     {
         EnsureConnected();
         return await Task.Run(() =>
@@ -13254,9 +13327,10 @@ public sealed class TestStandService : ITestStandService
             //    ChangeAdapter would otherwise reset the module we are about to copy.
             //    Skipped for a restricted path set: the caller is then copying authored step CONFIG only
             //    and the target's module is already configured — ChangeAdapter would reset it.
+            bool fullCopy = paths is null && !includeUnmodelledStepConfig;
             string srcAdapter = TryGetString(srcStep, "AdapterKeyName");
             string tgtAdapter = TryGetString(tgtStep, "AdapterKeyName");
-            if (paths is null && !string.IsNullOrEmpty(srcAdapter) &&
+            if (fullCopy && !string.IsNullOrEmpty(srcAdapter) &&
                 !string.Equals(srcAdapter, tgtAdapter, StringComparison.OrdinalIgnoreCase))
             {
                 try { ((dynamic)tgtStep).ChangeAdapter((object)srcAdapter); result["adapterChangedTo"] = srcAdapter; }
@@ -13278,11 +13352,85 @@ public sealed class TestStandService : ITestStandService
             //    SetPropertyObject refuses an object that "already has a parent object. You must first clone
             //    the item". So CLONE the subtree first (PropOption_CopyAllFlags = a flag-preserving deep copy
             //    that returns a detached, independent object) and attach the clone to the target.
-            foreach (var path in paths ?? AllStepModulePaths)
+            // With includeUnmodelledStepConfig the path list is DISCOVERED on the source step instead of
+            // being a fixed list: every step-root child that is not framework plumbing, plus every TS
+            // child the model does not author. That is what makes the rebuild adapter- and step-type-
+            // agnostic — a step type nobody wrote model support for still comes out right.
+            IReadOnlyList<string> pathList;
+            if (includeUnmodelledStepConfig)
+            {
+                var discovered = new List<string>();
+                try
+                {
+                    int rootCount = srcPo.GetNumSubProperties("");
+                    for (int i = 0; i < rootCount; i++)
+                    {
+                        string nm = (string)srcPo.GetNthSubPropertyName("", i, 0);
+                        if (!FrameworkStepRootProperties.Contains(nm)) discovered.Add(nm);
+                    }
+                }
+                catch (Exception ex)
+                { warnings.Add($"Could not enumerate the source step's properties: {ex.Message}"); }
+                try
+                {
+                    NiPropertyObject srcTs = (NiPropertyObject)(object)srcPo.GetPropertyObject("TS", 0);
+                    int tsCount = srcTs.GetNumSubProperties("");
+                    for (int i = 0; i < tsCount; i++)
+                    {
+                        string nm = (string)srcTs.GetNthSubPropertyName("", i, 0);
+                        if (!ModelAuthoredTsProperties.Contains(nm)) discovered.Add("TS." + nm);
+                    }
+                }
+                catch (Exception ex)
+                { warnings.Add($"Could not enumerate the source step's TS properties: {ex.Message}"); }
+
+                discovered.Add("Result.TimeoutOccurred");
+                if (paths != null) discovered.AddRange(paths);
+                pathList = discovered;
+            }
+            else pathList = paths ?? AllStepModulePaths;
+
+            foreach (var path in pathList)
             {
                 // Existence probe on the source step (GetPropertyObject throws if the path is absent).
-                try { _ = (NiPropertyObject)(object)srcPo.GetPropertyObject(path, 0); }
+                NiPropertyObject srcNode;
+                try { srcNode = (NiPropertyObject)(object)srcPo.GetPropertyObject(path, 0); }
                 catch { continue; } // not present on the source step
+
+                // WRITE AS LITTLE AS POSSIBLE. SetPropertyObject REPLACES the property object, and on a
+                // step that is cheap-looking but expensive: many step properties belong to the step TYPE,
+                // so replacing them makes the file's copy of e.g. NI_Flow_If differ from the loaded one
+                // and the Sequence Editor greets the rebuild with a "Type Conflict in File" dialog — which
+                // the FileDiffer does NOT report (it called the file identical). So:
+                //   • a SCALAR leaf is compared first and only written when it actually differs, by VALUE;
+                //   • an EMPTY container/array carries nothing, so it is skipped entirely.
+                // On a plain flow step that leaves nothing to write at all, which is the point.
+                string typeDisp = "";
+                try { typeDisp = srcNode.GetTypeDisplayString("", 0); } catch { }
+                int srcSub = 0;
+                try { srcSub = srcNode.GetNumSubProperties(""); } catch { }
+                bool listLike = typeDisp.Contains("Array", StringComparison.Ordinal)
+                                || typeDisp.Contains("Argument List", StringComparison.Ordinal);
+
+                if (srcSub == 0 && !listLike)
+                {
+                    string? want = ReadScalarText(srcPo, path, typeDisp);
+                    string? have = ReadScalarText(tgtPo, path, typeDisp);
+                    if (want == have) continue;                       // identical — do not touch the step
+                    if (want != null && TryWriteScalar(tgtPo, path, typeDisp, want))
+                    { copied.Add(path); continue; }
+                    // fall through to the object copy when the value write is not possible
+                }
+                else if (srcSub == 0 && listLike)
+                {
+                    int srcElems = 0;
+                    try { srcElems = srcNode.GetNumElements(); } catch { }
+                    int tgtElems = 0;
+                    try { tgtElems = ((NiPropertyObject)(object)tgtPo.GetPropertyObject(path, 0))
+                              .GetNumElements(); } catch { }
+                    if (srcElems == 0 && tgtElems == 0) continue;      // both empty — nothing to carry
+                }
+
                 try
                 {
                     NiPropertyObject srcClone = (NiPropertyObject)(object)srcPo.Clone(
@@ -13299,7 +13447,7 @@ public sealed class TestStandService : ITestStandService
 
             // Only a full copy is expected to find a module; a restricted path set legitimately finds
             // nothing when the source step authored no result hints or dialog options.
-            if (copied.Count == 0 && paths is null)
+            if (copied.Count == 0 && fullCopy)
                 warnings.Add("No module subtree (TS.SData / VIModule) was found on the source step.");
 
             if (save)
@@ -14196,12 +14344,77 @@ public sealed class TestStandService : ITestStandService
 
     // Reads whichever module shape the step actually has. Discriminating on the stored subtree rather
     // than on the adapter name keeps this working for an Action step switched to the Sequence adapter.
+    // Walks TS.SData and records every SCALAR leaf as path/value/type. This is what keeps the model
+    // adapter-agnostic: the typed branches below cover Python/SequenceCall/LabVIEW/Wait, but a real module
+    // has far more (a SequenceCall's SData has 29 properties, of which the typed fields read 4) and an
+    // adapter nobody wrote a branch for — Automation/ActiveX — would otherwise export as no module at all.
+    // Containers, arrays and argument lists are skipped: those are either in Arguments or cloned.
+    private void ExportModuleProperties(NiPropertyObject sdata, string prefix,
+        List<ModulePropModel> into, int depth = 0)
+    {
+        if (depth > 4) return;                       // SData is shallow; this only guards against cycles
+        int n;
+        try { n = sdata.GetNumSubProperties(""); } catch { return; }
+        for (int i = 0; i < n; i++)
+        {
+            string name;
+            try { name = (string)sdata.GetNthSubPropertyName("", i, 0); } catch { continue; }
+            string path = prefix.Length == 0 ? name : prefix + "." + name;
+
+            NiPropertyObject child;
+            try { child = (NiPropertyObject)(object)sdata.GetNthSubProperty("", i, 0); } catch { continue; }
+
+            string type = "";
+            try { type = child.GetTypeDisplayString("", 0); } catch { }
+            if (type.Contains("Argument List", StringComparison.Ordinal)
+                || type.Contains("Array", StringComparison.Ordinal)) continue;
+
+            int sub = 0;
+            try { sub = child.GetNumSubProperties(""); } catch { }
+            if (sub > 0) { ExportModuleProperties(child, path, into, depth + 1); continue; }
+
+            var entry = new ModulePropModel { Path = path };
+            if (type.Contains("Boolean", StringComparison.Ordinal))
+            {
+                entry.Type = "boolean";
+                try { entry.Value = child.GetValBoolean("", 0) ? "True" : "False"; } catch { continue; }
+            }
+            else if (type.Contains("Number", StringComparison.Ordinal))
+            {
+                entry.Type = "number";
+                try
+                {
+                    entry.Value = child.GetValNumber("", 0)
+                        .ToString(System.Globalization.CultureInfo.InvariantCulture);
+                }
+                catch { continue; }
+            }
+            else
+            {
+                entry.Type = "string";
+                try { entry.Value = child.GetValString("", 0); } catch { continue; }
+            }
+            into.Add(entry);
+        }
+    }
+
     private StepModuleModel? ExportStepModule(NiPropertyObject po, string stepType, string stepName)
     {
         var m = new StepModuleModel();
         string? Str(string path) { try { return NullIfEmpty(po.GetValString(path, 0)); } catch { return null; } }
         bool?   Bool(string path) { try { return po.GetValBoolean(path, 0); } catch { return null; } }
         int?    Num(string path) { try { return (int)po.GetValNumber(path, 0); } catch { return null; } }
+
+        // The adapter-agnostic property bag, collected once and attached to whichever branch matches.
+        var bag = new List<ModulePropModel>();
+        try
+        {
+            var sdata = (NiPropertyObject)(object)po.GetPropertyObject("TS.SData", 0);
+            ExportModuleProperties(sdata, "", bag);
+        }
+        catch (Exception ex)
+        { _logger.LogDebug(ex, "No TS.SData to enumerate on '{Step}'.", stepName); }
+        m.Properties = bag.Count > 0 ? bag : null;
 
         // NI_Wait keeps its target in step-root properties, not in a module.
         if (stepType.Contains("Wait", StringComparison.OrdinalIgnoreCase))
@@ -14308,6 +14521,11 @@ public sealed class TestStandService : ITestStandService
             }
             return m;
         }
+
+        // No typed branch matched, but the step HAS a module — e.g. the Automation/ActiveX adapter, which
+        // has no typed representation at all. Report it as "Other" with the property bag, so the export is
+        // a complete record instead of silently claiming the step has no module.
+        if (m.Properties != null) { m.Kind = "Other"; return m; }
         return null;
     }
 
@@ -14316,7 +14534,7 @@ public sealed class TestStandService : ITestStandService
         string destFilePath, bool copyTypeDefs = true, bool save = true,
         string labViewPanes = "copy", int prototypeTimeoutSeconds = 120,
         string crossFilePrototypes = "copy", bool keepUnusedTypes = true,
-        string variables = "copy")
+        string variables = "copy", string modules = "copy")
     {
         EnsureConnected();
         var outcome = new ImportOutcome();
@@ -14331,9 +14549,19 @@ public sealed class TestStandService : ITestStandService
         string paneMode  = NormalizeModuleMode(labViewPanes,        nameof(labViewPanes));
         string protoMode = NormalizeModuleMode(crossFilePrototypes, nameof(crossFilePrototypes));
         string varMode   = NormalizeVariableMode(variables);
+        string moduleMode = NormalizeVariableMode(modules);
         string? sourcePath = FirstExistingPath(model.SourcePath, model.TypeDefsSourcePath);
         if (sourcePath is null)
         {
+            if (moduleMode == "copy")
+            {
+                moduleMode = "model";
+                outcome.Warnings.Add(
+                    "modules='copy' needs the file the model was exported from — falling back to " +
+                    "'model'. The model describes only part of a step's module (measured: 4 of a " +
+                    "SequenceCall's 29 SData properties, nothing at all for the Automation/ActiveX " +
+                    "adapter), so expect module differences.");
+            }
             if (varMode == "copy")
             {
                 varMode = "model";
@@ -14365,6 +14593,7 @@ public sealed class TestStandService : ITestStandService
         outcome.LabViewPaneMode        = paneMode;
         outcome.CrossFilePrototypeMode = protoMode;
         outcome.VariableMode           = varMode;
+        outcome.ModuleMode             = moduleMode;
 
         // 1) Types first — cloned sequences, typed locals and enum members all resolve against them.
         if (copyTypeDefs && !string.IsNullOrWhiteSpace(model.TypeDefsSourcePath))
@@ -14549,7 +14778,13 @@ public sealed class TestStandService : ITestStandService
         // Parms with their ArgVal/UseDefaultValues bindings) out of the file the model was exported
         // from — the same thing copy_step_module does. Measured: all 5 packed-library steps of this
         // file reproduced in ~1 s each with 0 pane differences, versus a dead process for the load.
-        if (paneMode == "copy" && pendingViLoads.Count > 0)
+        // Skipped entirely when modules='copy': pass 6b then clones TS.SData for every step, which
+        // reproduces the connector pane along with everything else.
+        if (moduleMode == "copy")
+        {
+            // nothing to do — the pane comes with the module clone in pass 6b
+        }
+        else if (paneMode == "copy" && pendingViLoads.Count > 0)
         {
             foreach (var (vSeq, vGroup, vSel, vStep) in pendingViLoads)
             {
@@ -14639,44 +14874,62 @@ public sealed class TestStandService : ITestStandService
         // WITHOUT an in-process SequenceCall prototype load: that load would (a) be poisoned by the
         // LabVIEW pane loads just done and (b) poison any further LabVIEW load. Pass 7 does the load
         // out-of-process instead.
-        foreach (var (mSeq, mGroup, mSteps) in pendingModulePasses)
+        // Only in modules='model' — otherwise pass 6b clones the module wholesale and configuring it from
+        // the model first would just be overwritten work.
+        if (moduleMode == "model")
         {
-            for (int i = 0; i < mSteps.Count; i++)
+            foreach (var (mSeq, mGroup, mSteps) in pendingModulePasses)
             {
-                try
+                for (int i = 0; i < mSteps.Count; i++)
                 {
-                    await ApplyStepDetailsAsync(destFilePath, mSeq, mGroup, $"@idx:{i}", mSteps[i],
-                        outcome, null, StepPass.SequenceCallAndPython);
+                    try
+                    {
+                        await ApplyStepDetailsAsync(destFilePath, mSeq, mGroup, $"@idx:{i}", mSteps[i],
+                            outcome, null, StepPass.SequenceCallAndPython);
+                    }
+                    catch (Exception ex)
+                    { outcome.Warnings.Add($"module '{mSeq}'/{mGroup}[{i}] '{mSteps[i].Name}': {ex.Message}"); }
                 }
-                catch (Exception ex)
-                { outcome.Warnings.Add($"module '{mSeq}'/{mGroup}[{i}] '{mSteps[i].Name}': {ex.Message}"); }
             }
         }
 
-        // 6b) AUTHORED step-config subtrees, for EVERY step. These are not part of the model and no
-        // configure_* tool writes them: the result-logging hints (TS.AdditionalResultsHints,
-        // TS.CustomResults), the error-dialog options and the NI_Wait timeout-result flag are authored in
-        // the editor and a freshly inserted step does not inherit them from its step-type template. They
-        // showed up as the last non-module residual — an NI_Wait whose AdditionalResultsHints array had
-        // one element in the original and none in the rebuild. Cloning them from the source step is
-        // value-neutral: the source IS the target, so this can only remove differences. The module
-        // subtrees are deliberately NOT in this set — those belong to passes 5/6/7.
+        // 6b) EVERYTHING ABOUT A STEP THE MODEL CANNOT DESCRIBE, cloned from the source step.
+        //
+        // The declarative model captures a FRACTION of a step: measured on TFW_Symphony_DutCom.seq it
+        // covers 13 of 49 TS properties, 4 of a SequenceCall's 29 SData properties, 1 of an NI_Wait's 10
+        // root properties, and it has no branch at all for the Automation/ActiveX adapter. Completing it
+        // field by field is whack-a-mole — every new file brings new gaps. So the paths are DISCOVERED on
+        // the source step (see includeUnmodelledStepConfig) rather than listed, which covers step types
+        // and adapters nobody wrote model support for.
+        //
+        // With modules='copy' the code MODULE is cloned here too (TS.SData for any adapter, plus the
+        // step-own VIModule), which makes passes 5 and 7 redundant — one clone reproduces the LabVIEW
+        // connector pane, the cross-file Prototype cache, a SequenceCall's threading options and an
+        // ActiveX call in one go. With modules='model' only the unmodelled remainder is cloned and the
+        // model keeps authoring the module, so an EDITED model still takes effect.
+        // The WIDE discovery runs only in 'copy' mode. 'model' keeps the narrow, long-proven set, so it
+        // stays a genuine escape hatch: fewer writes onto a step, and the model authors everything else.
         if (sourcePath is not null)
         {
+            bool wide = moduleMode == "copy";
+            var moduleClonePaths = wide ? new[] { "TS.SData", "VIModule" } : AuthoredStepConfigPaths;
             foreach (var (mSeq, mGroup, mSteps) in pendingModulePasses)
                 for (int i = 0; i < mSteps.Count; i++)
                 {
                     try
                     {
-                        await CopyStepModuleAsync(sourcePath, mSeq, mGroup, $"@idx:{i}",
+                        var res = await CopyStepModuleAsync(sourcePath, mSeq, mGroup, $"@idx:{i}",
                             destFilePath, mSeq, mGroup, $"@idx:{i}", save: false,
-                            paths: AuthoredStepConfigPaths);
+                            paths: moduleClonePaths, includeUnmodelledStepConfig: wide);
+                        if (moduleMode == "copy" && res.TryGetValue("copiedPaths", out var cp)
+                            && cp is List<string> cpl && cpl.Contains("TS.SData"))
+                            outcome.ModulesCloned++;
                     }
                     catch (Exception ex)
                     {
                         outcome.Warnings.Add(
-                            $"step config '{mSeq}'/{mGroup}[{i}] '{mSteps[i].Name}': could not copy the " +
-                            $"authored result/dialog subtrees: {ex.Message}");
+                            $"step config '{mSeq}'/{mGroup}[{i}] '{mSteps[i].Name}': could not clone the " +
+                            $"unmodelled step properties: {ex.Message}");
                     }
                 }
         }
@@ -14708,7 +14961,12 @@ public sealed class TestStandService : ITestStandService
             }
 
         outcome.CrossFilePrototypeCandidates = crossFileCalls.Count;
-        if (crossFileCalls.Count > 0 && protoMode == "copy")
+        if (moduleMode == "copy")
+        {
+            // The whole SData subtree — Prototype cache included — already came over in pass 6b.
+            outcome.CrossFilePrototypesCopied = crossFileCalls.Count;
+        }
+        else if (crossFileCalls.Count > 0 && protoMode == "copy")
         {
             foreach (var (cSeq, cGroup, cIdx, cStep) in crossFileCalls)
             {

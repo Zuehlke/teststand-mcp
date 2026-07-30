@@ -109,6 +109,25 @@ imported. All of these are CLOSED, each by the same mechanism (clone from the so
 - **`NI.Analyzer.IgnoredMessages`** is invisible to the engine API (see below), so the rebuild shows a
   few extra analyzer warnings the original suppresses.
 
+A WHOLE-file rebuild reaches **`identical: true`** — 0 differences, verified 2026-07-29 on
+`TFW_Symphony_DutCom.seq` (17 sequences, 79 steps, 43 variables, 18 `.lvlibp` panes from TWO packed
+libraries, 4 cross-file calls, 2 ActiveX steps, 49 types) in 4 MCP calls with 0 warnings.
+
+### NEVER replace a TYPED PropertyObject with a clone — write its scalars BY VALUE (2026-07-29)
+Cloning a whole module subtree (`Clone(path, CopyAllFlags)` → `SetPropertyObject`) is right for
+`TS.SData`, `VIModule` and the authored config arrays, but doing it for a subtree whose node carries a
+NAMED TYPE re-registers a second, conflicting instance of that type in the destination. The file then
+opens in the Sequence Editor with a **type-conflict dialog** ("… conflicts with the type already
+loaded") even though it is functionally complete. Fix: for a typed node, write the LEAF SCALARS by
+value (`SetValString`/`SetValNumber`/`SetValBoolean` on the existing node) instead of swapping the
+object. Measured: `modulesCloned` dropped 79 → 47 and the dialog disappeared.
+- The same trap applies to `copy_step_module` and to `set_property_node value_type='named_type'` —
+  those instantiate/replace deliberately, so only reach for them when the node does NOT already exist.
+- **THE FILEDIFFER CANNOT SEE THIS.** It reported `identical: true` for the file that raised the
+  dialog. So `diff_sequence_files` alone does NOT prove a rebuild is sound — a clean diff plus a clean
+  `audit_sequence_references` still leaves type conflicts, and the ONLY check that catches them is
+  OPENING THE FILE in the editor. Ask the user to open it; SeqEdit 2026 cannot be automated (CEF).
+
 ## Rebuilding a .seq 1:1 (whole-sequence clone) — the older per-sequence path
 
 To reproduce an existing sequence file (a "rebuild"), prefer the **whole-sequence

@@ -234,6 +234,29 @@ public class StepModuleModel
 
     /// <summary>NI_Wait only: the wait time expression (seconds).</summary>
     public string? WaitTimeExpression { get; set; }
+
+    /// <summary>EVERY scalar leaf under <c>TS.SData</c>, as a path/value/type triple — the adapter-agnostic
+    /// remainder that the typed fields above do not cover. The typed fields describe a fraction of a real
+    /// module (measured: 4 of a SequenceCall's 29 SData properties, and the Automation/ActiveX adapter has
+    /// no typed branch at all), and enumerating the rest per adapter is endless, so the export simply walks
+    /// the subtree. Containers, arrays and argument lists are left out — those have their own
+    /// representation in <see cref="Arguments"/> or are reproduced by cloning.
+    /// <para>Used when <c>modules='model'</c>; with the default <c>modules='copy'</c> the whole subtree is
+    /// cloned from the source file and this list is informational. It is also what makes the exported JSON
+    /// a complete record of a step's module for reading and hand-editing.</para></summary>
+    public List<ModulePropModel>? Properties { get; set; }
+}
+
+/// <summary>One scalar module property: its path relative to <c>TS.SData</c>, its value as text and the
+/// value type needed to write it back.</summary>
+public class ModulePropModel
+{
+    /// <summary>Dotted path relative to <c>TS.SData</c>, e.g. "ThreadOpt" or "Call.Member Name".</summary>
+    public string Path { get; set; } = "";
+    /// <summary>Value as text.</summary>
+    public string? Value { get; set; }
+    /// <summary>number / string / boolean.</summary>
+    public string Type { get; set; } = "string";
 }
 
 /// <summary>One module argument / parameter binding.</summary>
@@ -344,6 +367,13 @@ public class ImportOutcome
     public int VariablesCopied { get; set; }
     /// <summary>Which route reproduced the variables: copy / model.</summary>
     public string? VariableMode { get; set; }
+    /// <summary>Step code MODULES reproduced by cloning the whole <c>TS.SData</c> subtree from the model's
+    /// source file (<c>modules='copy'</c>, the default). The model describes only a fraction of a module —
+    /// measured: 4 of a SequenceCall's 29 SData properties and nothing at all for the Automation/ActiveX
+    /// adapter — so the clone is what makes a rebuild adapter-agnostic.</summary>
+    public int ModulesCloned { get; set; }
+    /// <summary>Which route reproduced the step modules: copy / model.</summary>
+    public string? ModuleMode { get; set; }
     /// <summary>Which route reproduced the LabVIEW connector panes: copy / load / skip.</summary>
     public string? LabViewPaneMode { get; set; }
     /// <summary>Which route reproduced the cross-file prototype caches: copy / load / skip.</summary>

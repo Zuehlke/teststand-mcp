@@ -1822,6 +1822,20 @@ public class TestStandToolRegistry
                     "measured: one 3 MB callee ran it into a 300 s timeout and produced nothing. 'skip' " +
                     "leaves the cache empty; the calls still work.",
                     "copy", new[] { "copy", "load", "skip" })
+                .AddOptional("modules", "string",
+                    "How each step's CODE MODULE and its unmodelled step properties are reproduced. " +
+                    "'copy' (DEFAULT) clones the whole TS.SData subtree from the model's source file for " +
+                    "every step, whatever the adapter, and makes labview_panes / cross_file_prototypes " +
+                    "redundant (the connector pane and the Prototype cache come with it). This is the " +
+                    "only complete route: the model describes a FRACTION of a step — measured on one real " +
+                    "file, 4 of a SequenceCall's 29 SData properties, 1 of an NI_Wait's 10 root " +
+                    "properties, and NOTHING for the Automation/ActiveX adapter. 'model' configures the " +
+                    "module from the model instead, so an EDITED model takes effect; expect module " +
+                    "differences against the original. Either way the step properties the model does not " +
+                    "author (TS.LoopOpt, step-type-specific root properties, result-logging hints) are " +
+                    "always cloned when the source file is available. Falls back to 'model' with a " +
+                    "warning when it is not.",
+                    "copy", new[] { "copy", "model" })
                 .AddOptional("variables", "string",
                     "How file globals, parameters and locals are reproduced. 'copy' (DEFAULT) clones each " +
                     "one from the model's source file, which is the only way to reproduce a type " +
@@ -5094,7 +5108,8 @@ public class TestStandToolRegistry
             args!.Value.GetIntOrDefault("prototype_timeout_seconds", 120),
             args!.Value.GetStringOrDefault("cross_file_prototypes", "copy"),
             args!.Value.GetBoolOrDefault("keep_unused_types", true),
-            args!.Value.GetStringOrDefault("variables", "copy"));
+            args!.Value.GetStringOrDefault("variables", "copy"),
+            args!.Value.GetStringOrDefault("modules", "copy"));
         return OkJson(outcome);
     }
 
