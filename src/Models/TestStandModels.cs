@@ -615,6 +615,10 @@ public class DataTypeInfo
     public bool IsArray { get; set; }
     /// <summary>Fields/properties of the data type.</summary>
     public List<DataTypePropertyInfo> Properties { get; init; } = new();
+    /// <summary>The enumerators, when this type is an enumeration AND the caller asked for values.
+    /// Null otherwise, so a plain listing stays compact. Reading every enum of a file used to cost one
+    /// <c>get_enum_values</c> call per type (17 on a real protocol file).</summary>
+    public List<EnumValueInfo>? Values { get; set; }
 }
 
 /// <summary>A single field/property of a custom data type.</summary>

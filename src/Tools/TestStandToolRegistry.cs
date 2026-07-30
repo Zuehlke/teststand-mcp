@@ -906,8 +906,16 @@ public class TestStandToolRegistry
             "LabVIEW-cluster container typedefs that get_data_types cannot see (those are stored in " +
             "the TypeUsageList, not as file-root subproperties). Each entry has the type name, a " +
             "coarse kind, and whether it is attached to the file. Use together with copy_typedefs to " +
-            "reproduce such types in a rebuilt file.",
-            s => s.AddRequired("file_path", "string", "Path to the sequence file"),
+            "reproduce such types in a rebuilt file. " +
+            "Set include_values=true to get the ENUMERATORS of every enumeration in the same call — " +
+            "reading a protocol file's enums otherwise costs one get_enum_values call per type (17 on a " +
+            "real file). For a container type's FIELDS use get_data_type_fields, which resolves " +
+            "TypeUsageList types too.",
+            s => s
+                .AddRequired("file_path", "string", "Path to the sequence file")
+                .AddOptional("include_values", "boolean",
+                    "Also return each enumeration's name→value constants, in order (default false, so a " +
+                    "plain listing stays compact). Non-enum types are unaffected.", false),
             GetFileTypeDefsAsync);
 
         Register("copy_typedefs",
@@ -3341,7 +3349,13 @@ public class TestStandToolRegistry
             AddDataTypeFieldAsync);
 
         Register("get_data_type_fields",
-            "List the fields (subproperties) of a custom data type.",
+            "List the fields (subproperties) of a custom data type, each with its type display string. " +
+            "Resolves the type in BOTH places one can live: the file-root subproperties AND the file's " +
+            "TypeUsageList — which is where every real custom type actually sits (LabVIEW cluster " +
+            "typedefs, enums, protocol containers). Previously it looked only at the file root and threw " +
+            "'Unknown variable or property name' for the very types list_file_typedefs reports. " +
+            "For an ENUMERATION use get_enum_values (or list_file_typedefs with include_values=true) — " +
+            "an enum's constants are not subproperties.",
             s => s
                 .AddRequired("file_path", "string", "Path to the sequence file")
                 .AddRequired("type_name", "string", "Name of the custom data type"),
@@ -4162,7 +4176,8 @@ public class TestStandToolRegistry
     private async Task<CallToolResult> GetFileTypeDefsAsync(JsonElement? args)
     {
         var filePath = args!.Value.GetRequiredString("file_path");
-        var types = await _ts.GetFileTypeDefsAsync(filePath);
+        var types = await _ts.GetFileTypeDefsAsync(filePath,
+            args!.Value.GetBoolOrDefault("include_values", false));
         return OkJson(types);
     }
 

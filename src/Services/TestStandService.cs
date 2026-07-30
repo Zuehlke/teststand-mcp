@@ -363,7 +363,7 @@ public interface ITestStandService : IDisposable
     /// LabVIEW-cluster container typedefs that <see cref="GetDataTypesAsync"/> cannot see (those live
     /// in the TypeUsageList, not as file-root subproperties). Each entry carries the type name,
     /// whether it is attached to the file, and a coarse kind.</summary>
-    Task<List<DataTypeInfo>> GetFileTypeDefsAsync(string filePath);
+    Task<List<DataTypeInfo>> GetFileTypeDefsAsync(string filePath, bool includeValues = false);
     /// <summary>Copies custom data type definitions from one sequence file into another. This is the
     /// ONLY way to reproduce LabVIEW-cluster typedefs in a rebuilt file — they carry GUIDs/structure
     /// that cannot be recreated field-by-field. Pass explicit <paramref name="typeNames"/> (reliable)
@@ -6041,9 +6041,10 @@ public sealed class TestStandService : ITestStandService
     /// (proven to work) until it runs off the end, reading each definition's Name. Robust for both
     /// listing and copy-all.
     /// </summary>
-    private List<(string Name, bool Attached, string Kind)> EnumerateFileTypeDefs(NiTypeUsageList tul)
+    private List<(string Name, bool Attached, string Kind, NiPropertyObject Def)> EnumerateFileTypeDefs(
+        NiTypeUsageList tul)
     {
-        var outp = new List<(string, bool, string)>();
+        var outp = new List<(string, bool, string, NiPropertyObject)>();
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         // MUST use TYPED interop here — the C# dynamic-COM binder throws TargetParameterCountException
@@ -6069,13 +6070,70 @@ public sealed class TestStandService : ITestStandService
             try { kind = InferValueKind(def, out _, out _); }
             catch (Exception ex) { _logger.LogDebug(ex, "InferValueKind failed for type '{Type}'.", name); }
 
-            outp.Add((name, attached, kind));
+            outp.Add((name, attached, kind, def));
         }
         return outp;
     }
 
+    /// <summary>Reads a type definition's fields (its immediate subproperties) with their type display
+    /// strings. Shared by <c>get_data_type_fields</c> and the typedef listing so a TypeUsageList type and
+    /// a file-root type are read identically.</summary>
+    private List<TypeFieldInfo> ReadTypeFields(NiPropertyObject typeDef)
+    {
+        var fields = new List<TypeFieldInfo>();
+        int count;
+        try { count = typeDef.GetNumSubProperties(""); }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "GetNumSubProperties failed on the type definition.");
+            return fields;
+        }
+        for (int i = 0; i < count; i++)
+        {
+            try
+            {
+                string fname = typeDef.GetNthSubPropertyName("", i, 0);
+                var fp = (NiPropertyObject)(object)typeDef.GetNthSubProperty("", i, 0);
+                string ftype = "";
+                // PropertyObject has no TypeName — the display string is the only readable type label.
+                try { ftype = fp.GetTypeDisplayString("", 0); }
+                catch (Exception ex)
+                { _logger.LogDebug(ex, "Type display string failed for field '{Field}'.", fname); }
+                fields.Add(new TypeFieldInfo { Name = fname, DataType = ftype });
+            }
+            catch (Exception ex) { _logger.LogDebug(ex, "Failed to read type field at index {Index}.", i); }
+        }
+        return fields;
+    }
+
+    /// <summary>Resolves a named custom type to its definition object, looking in BOTH places a type can
+    /// live: the file-root subproperties AND the file's TypeUsageList. The TypeUsageList is where every
+    /// real custom type actually sits (LabVIEW cluster typedefs, enums, the MDC protocol containers), and
+    /// resolving only against the file root is why <c>get_data_type_fields</c> used to fail with
+    /// "Unknown variable or property name" on a type that <c>list_file_typedefs</c> had just listed.</summary>
+    private NiPropertyObject ResolveTypeDefinition(dynamic sf, string typeName, out string foundIn)
+    {
+        try
+        {
+            dynamic sfPo = sf.AsPropertyObjectFile();
+            var po = (NiPropertyObject)(object)sfPo.GetPropertyObject((object)typeName, (object)0);
+            if (po != null) { foundIn = "file-root"; return po; }
+        }
+        catch (Exception ex)
+        { _logger.LogDebug(ex, "Type '{Type}' is not a file-root subproperty; trying the TypeUsageList.", typeName); }
+
+        NiTypeUsageList tul = GetTypeUsageList(sf);
+        foreach (var (name, _, _, def) in EnumerateFileTypeDefs(tul))
+            if (string.Equals(name, typeName, StringComparison.OrdinalIgnoreCase))
+            { foundIn = "type-usage-list"; return def; }
+
+        throw new ArgumentException(
+            $"Type '{typeName}' was not found — neither as a file-root subproperty nor in the file's " +
+            "TypeUsageList. Use list_file_typedefs to see the available custom types.");
+    }
+
     /// <inheritdoc/>
-    public async Task<List<DataTypeInfo>> GetFileTypeDefsAsync(string filePath)
+    public async Task<List<DataTypeInfo>> GetFileTypeDefsAsync(string filePath, bool includeValues = false)
     {
         EnsureConnected();
         return await Task.Run(() =>
@@ -6083,14 +6141,25 @@ public sealed class TestStandService : ITestStandService
             var sf  = GetOrLoadSeqFile(filePath);
             NiTypeUsageList tul = GetTypeUsageList(sf);
             var result = new List<DataTypeInfo>();
-            foreach (var (name, attached, kind) in EnumerateFileTypeDefs(tul))
-                result.Add(new DataTypeInfo
+            foreach (var (name, attached, kind, def) in EnumerateFileTypeDefs(tul))
+            {
+                var info = new DataTypeInfo
                 {
                     Name        = name,
                     BaseType    = kind,
                     IsArray     = false,
                     Description = attached ? "attached-to-file" : "not-attached",
-                });
+                };
+                // The enumerators are already reachable through the def object we just walked, so the
+                // whole file's enums cost ONE call instead of one get_enum_values per type.
+                if (includeValues && string.Equals(kind, "Enum", StringComparison.OrdinalIgnoreCase))
+                {
+                    try { info.Values = ReadEnumerators(def); }
+                    catch (Exception ex)
+                    { _logger.LogDebug(ex, "Could not read the enumerators of '{Type}'.", name); }
+                }
+                result.Add(info);
+            }
             return result;
         });
     }
@@ -6115,7 +6184,7 @@ public sealed class TestStandService : ITestStandService
             // copied type embeds types the original does not, which the FileDiffer reports as a
             // difference (observed: 59 attached instead of 7 on TFW_MDC_com_Python.seq).
             var srcAttached = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
-            foreach (var (n, att, _) in EnumerateFileTypeDefs(srcTul)) srcAttached[n] = att;
+            foreach (var (n, att, _, _) in EnumerateFileTypeDefs(srcTul)) srcAttached[n] = att;
 
             // Explicit names are the reliable path (GetTypeIndex(name) resolves directly). With no
             // names, copy every embedded type in the source.
@@ -9230,30 +9299,13 @@ public sealed class TestStandService : ITestStandService
         EnsureConnected();
         return await Task.Run(() =>
         {
-            var result   = new List<TypeFieldInfo>();
-            var sf       = GetOrLoadSeqFile(filePath);
-            dynamic sfPo = sf.AsPropertyObjectFile();
-            dynamic typePo = sfPo.GetPropertyObject((object)typeName, (object)0);
-            var tObj = (object)typePo;
-            int count = Convert.ToInt32(tObj.GetType().InvokeMember(
-                "GetNumSubProperties", _comFlags, null, tObj, new object[] { "" }));
-            for (int i = 0; i < count; i++)
-            {
-                try
-                {
-                    string fname = tObj.GetType().InvokeMember(
-                        "GetNthSubPropertyName", _comFlags, null, tObj, new object[] { "", i, 0 })?.ToString() ?? "";
-                    dynamic fp = tObj.GetType().InvokeMember(
-                        "GetNthSubProperty", _comFlags, null, tObj, new object[] { "", i, 0 })!;
-                    // Type name via GetTypeDisplayString — PropertyObject has no `TypeName`.
-                    string fieldType = "";
-                    try { fieldType = (string)fp.GetTypeDisplayString("", (object)0); }
-                    catch (Exception ex) { _logger.LogDebug(ex, "Failed to get type display string for field '{Field}'.", fname); }
-                    result.Add(new TypeFieldInfo { Name = fname, DataType = fieldType });
-                }
-                catch (Exception ex) { _logger.LogDebug(ex, "Failed to read data type field at index {Index}.", i); }
-            }
-            return result;
+            var sf = GetOrLoadSeqFile(filePath);
+            // Resolve in BOTH places a type can live. A custom container like MDC_com_CmdGeneric sits in
+            // the TypeUsageList, not at the file root, and the old file-root-only lookup threw
+            // "Unknown variable or property name" for exactly the types list_file_typedefs reports.
+            NiPropertyObject typeDef = ResolveTypeDefinition(sf, typeName, out string foundIn);
+            _logger.LogDebug("Type '{Type}' resolved from {Source}.", typeName, foundIn);
+            return ReadTypeFields(typeDef);
         });
     }
 
@@ -13409,27 +13461,31 @@ public sealed class TestStandService : ITestStandService
                 try { typeDisp = srcNode.GetTypeDisplayString("", 0); } catch { }
                 int srcSub = 0;
                 try { srcSub = srcNode.GetNumSubProperties(""); } catch { }
-                bool listLike = typeDisp.Contains("Array", StringComparison.Ordinal)
-                                || typeDisp.Contains("Argument List", StringComparison.Ordinal);
+                bool listLike = StepCopyPolicy.IsListLike(typeDisp);
 
+                // Read only the pair the applicable branch needs — no COM call for a branch that the
+                // node's shape rules out. The decision itself lives in StepCopyPolicy so the
+                // type-conflict regression is covered by a pure test.
+                string? want = null, have = null;
+                int srcElems = 0, tgtElems = 0;
                 if (srcSub == 0 && !listLike)
                 {
-                    string? want = ReadScalarText(srcPo, path, typeDisp);
-                    string? have = ReadScalarText(tgtPo, path, typeDisp);
-                    if (want == have) continue;                       // identical — do not touch the step
-                    if (want != null && TryWriteScalar(tgtPo, path, typeDisp, want))
-                    { copied.Add(path); continue; }
-                    // fall through to the object copy when the value write is not possible
+                    want = ReadScalarText(srcPo, path, typeDisp);
+                    have = ReadScalarText(tgtPo, path, typeDisp);
                 }
-                else if (srcSub == 0 && listLike)
+                else if (srcSub == 0)
                 {
-                    int srcElems = 0;
                     try { srcElems = srcNode.GetNumElements(); } catch { }
-                    int tgtElems = 0;
                     try { tgtElems = ((NiPropertyObject)(object)tgtPo.GetPropertyObject(path, 0))
                               .GetNumElements(); } catch { }
-                    if (srcElems == 0 && tgtElems == 0) continue;      // both empty — nothing to carry
                 }
+
+                var action = StepCopyPolicy.Decide(typeDisp, srcSub, want, have, srcElems, tgtElems);
+                if (action == StepPropertyAction.SkipIdentical) continue;
+                if (action == StepPropertyAction.WriteScalarValue
+                    && TryWriteScalar(tgtPo, path, typeDisp, want!))
+                { copied.Add(path); continue; }
+                // Otherwise fall through to the object copy (also when the value write was not possible).
 
                 try
                 {
@@ -14048,7 +14104,7 @@ public sealed class TestStandService : ITestStandService
                 try
                 {
                     NiTypeUsageList tul = GetTypeUsageList(sf);
-                    foreach (var (name, attached, _) in EnumerateFileTypeDefs(tul))
+                    foreach (var (name, attached, _, _) in EnumerateFileTypeDefs(tul))
                         model.TypeDefs.Add(new TypeDefModel { Name = name, Attached = attached });
                 }
                 catch (Exception ex) { _logger.LogDebug(ex, "Enumerating type definitions failed."); }
@@ -15123,7 +15179,7 @@ public sealed class TestStandService : ITestStandService
     }
 
     /// <summary>Validates a copy/load/skip module-reproduction mode and normalises its casing.</summary>
-    private static string NormalizeModuleMode(string? mode, string paramName)
+    internal static string NormalizeModuleMode(string? mode, string paramName)
     {
         string m = (mode ?? "copy").Trim().ToLowerInvariant();
         return m switch
@@ -15137,7 +15193,7 @@ public sealed class TestStandService : ITestStandService
 
     /// <summary>Validates the variable-reproduction mode: 'copy' clones each variable from the model's
     /// source file, 'model' rebuilds it declaratively from the model's own description.</summary>
-    private static string NormalizeVariableMode(string? mode)
+    internal static string NormalizeVariableMode(string? mode)
     {
         string m = (mode ?? "copy").Trim().ToLowerInvariant();
         return m switch
@@ -15150,7 +15206,7 @@ public sealed class TestStandService : ITestStandService
     }
 
     /// <summary>First of the candidate paths that exists on disk, or null.</summary>
-    private static string? FirstExistingPath(params string?[] candidates)
+    internal static string? FirstExistingPath(params string?[] candidates)
     {
         foreach (var c in candidates)
             if (!string.IsNullOrWhiteSpace(c) && System.IO.File.Exists(c)) return c;

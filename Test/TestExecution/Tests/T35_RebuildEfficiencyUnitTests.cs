@@ -483,4 +483,226 @@ public class T35_RebuildEfficiencyUnitTests
         Assert.That(prop.GetProperty("type").GetString(), Is.EqualTo("boolean"));
         Assert.That(prop.GetProperty("description").GetString(), Does.Contain("DEPRECATED"));
     }
+
+    [Test]
+    public void ImportSchema_Modules_DefaultToBeingClonedFromTheSourceFile()
+    {
+        var prop = ImportSchema().GetProperty("modules");
+
+        Assert.That(prop.GetProperty("default").GetString(), Is.EqualTo("copy"));
+        Assert.That(prop.GetProperty("enum").EnumerateArray().Select(e => e.GetString()).ToList(),
+            Is.EquivalentTo(new[] { "copy", "model" }));
+    }
+
+    // ── Type-inspection tool gaps (found comparing Python enums against a .seq) ──
+
+    private static System.Text.Json.JsonElement SchemaOf(string toolName)
+    {
+        using var editor = new SequenceEditorService(NullLogger<SequenceEditorService>.Instance);
+        var registry = new TestStandToolRegistry(
+            new TestStandService(NullLogger<TestStandService>.Instance), editor,
+            NullLogger<TestStandToolRegistry>.Instance);
+        var tool = registry.GetTools().FirstOrDefault(t => t.Name == toolName);
+        Assert.That(tool, Is.Not.Null, $"{toolName} is not registered");
+        return tool!.InputSchema.GetProperty("properties");
+    }
+
+    [Test]
+    public void ListFileTypedefs_CanReturnEnumeratorsInOneCall_ButNotByDefault()
+    {
+        // Comparing a protocol file's 17 enums against their Python definitions cost 17 separate
+        // get_enum_values calls. Values stay opt-in so a plain listing does not carry ~230 constants.
+        var prop = SchemaOf("list_file_typedefs").GetProperty("include_values");
+
+        Assert.That(prop.GetProperty("type").GetString(), Is.EqualTo("boolean"));
+        Assert.That(prop.GetProperty("default").GetBoolean(), Is.False);
+    }
+
+    [Test]
+    public void GetDataTypeFields_DocumentsThatItResolvesTypeUsageListTypes()
+    {
+        // The behaviour itself needs an engine; what a pure test can pin is that the tool no longer
+        // advertises a file-root-only lookup — that description is what sends a caller down the wrong
+        // path after get_data_type_fields threw on a type list_file_typedefs had just reported.
+        using var editor = new SequenceEditorService(NullLogger<SequenceEditorService>.Instance);
+        var registry = new TestStandToolRegistry(
+            new TestStandService(NullLogger<TestStandService>.Instance), editor,
+            NullLogger<TestStandToolRegistry>.Instance);
+        string desc = registry.GetTools().First(t => t.Name == "get_data_type_fields").Description;
+
+        Assert.That(desc, Does.Contain("TypeUsageList"));
+        Assert.That(desc, Does.Contain("get_enum_values"),
+            "an enum's constants are not subproperties — the description must point elsewhere");
+    }
+
+    // ── StepCopyPolicy — the TYPE-CONFLICT regression ────────────────────────────
+    //
+    // Cloning every module path replaced step properties that belong to the step TYPE, which registers a
+    // conflicting instance of that type: the rebuilt file opened with a "Type Conflict in File" dialog
+    // while the native FileDiffer reported it as IDENTICAL. No automated check caught it, so these tests
+    // are the guard — each one pins a case where the policy must NOT reach for the object copy.
+
+    [Test]
+    public void Decide_ScalarAlreadyEqual_TouchesNothing()
+    {
+        // The common case on a plain flow step. Writing here is what produced the dialog.
+        Assert.That(StepCopyPolicy.Decide("Number", 0, "3", "3", 0, 0),
+            Is.EqualTo(StepPropertyAction.SkipIdentical));
+    }
+
+    [Test]
+    public void Decide_ScalarDiffers_IsWrittenByValue_NotCloned()
+    {
+        Assert.That(StepCopyPolicy.Decide("Number", 0, "5", "3", 0, 0),
+            Is.EqualTo(StepPropertyAction.WriteScalarValue));
+    }
+
+    [Test]
+    public void Decide_EmptyArgumentListOnBothSides_IsSkipped()
+    {
+        // An "Argument List" reports 0 subproperties, so without the list-like check it would land in
+        // the scalar branch, read null on both sides and be skipped for the WRONG reason — and a
+        // NON-empty one would then never be carried at all.
+        Assert.That(StepCopyPolicy.Decide("Argument List", 0, null, null, 0, 0),
+            Is.EqualTo(StepPropertyAction.SkipIdentical));
+    }
+
+    [TestCase(2, 0)]
+    [TestCase(0, 2)]
+    public void Decide_ArgumentListWithElementsOnEitherSide_IsCloned(int srcElems, int tgtElems)
+    {
+        Assert.That(StepCopyPolicy.Decide("Argument List", 0, null, null, srcElems, tgtElems),
+            Is.EqualTo(StepPropertyAction.CloneSubtree));
+    }
+
+    [Test]
+    public void Decide_ContainerWithMembers_IsCloned()
+    {
+        // A real module subtree (TS.SData with 29 members) — the payload IS the subtree.
+        Assert.That(StepCopyPolicy.Decide("SeqCallStepAdditions", 29, null, null, 0, 0),
+            Is.EqualTo(StepPropertyAction.CloneSubtree));
+    }
+
+    [Test]
+    public void Decide_UnreadableSourceScalar_FallsBackToTheObjectCopy()
+    {
+        // An exotic leaf the scalar reader cannot render: copying the object is still better than
+        // leaving the target's differing value in place.
+        Assert.That(StepCopyPolicy.Decide("Path", 0, null, "C:\\old.vi", 0, 0),
+            Is.EqualTo(StepPropertyAction.CloneSubtree));
+    }
+
+    [TestCase("Number", false)]
+    [TestCase("Boolean", false)]
+    [TestCase("Number [Array]", true)]
+    [TestCase("Argument List", true)]
+    [TestCase(null, false)]
+    public void IsListLike_RecognisesArraysAndArgumentLists(string? typeDisplay, bool expected)
+    {
+        Assert.That(StepCopyPolicy.IsListLike(typeDisplay), Is.EqualTo(expected));
+    }
+
+    // ── Mode normalisation ───────────────────────────────────────────────────────
+
+    [TestCase("copy", "copy")]
+    [TestCase("load", "load")]
+    [TestCase("skip", "skip")]
+    [TestCase("  COPY  ", "copy")]
+    [TestCase("", "copy")]
+    [TestCase(null, "copy")]
+    public void NormalizeModuleMode_AcceptsTheThreeModes_AndDefaultsToCopy(string? input, string expected)
+    {
+        Assert.That(TestStandService.NormalizeModuleMode(input, "labview_panes"), Is.EqualTo(expected));
+    }
+
+    [Test]
+    public void NormalizeModuleMode_RejectsAnUnknownMode_NamingTheParameter()
+    {
+        // A typo must not silently degrade to the default and quietly skip a fidelity pass.
+        var ex = Assert.Throws<System.ArgumentException>(
+            () => TestStandService.NormalizeModuleMode("clone", "labview_panes"));
+        Assert.That(ex!.Message, Does.Contain("labview_panes"));
+    }
+
+    [TestCase("copy", "copy")]
+    [TestCase("model", "model")]
+    [TestCase("MODEL", "model")]
+    [TestCase(null, "copy")]
+    public void NormalizeVariableMode_AcceptsCopyAndModel(string? input, string expected)
+    {
+        Assert.That(TestStandService.NormalizeVariableMode(input), Is.EqualTo(expected));
+    }
+
+    [Test]
+    public void NormalizeVariableMode_RejectsAModuleModeThatDoesNotApplyHere()
+    {
+        // 'skip' is valid for panes but meaningless for variables — accepting it would drop them.
+        Assert.Throws<System.ArgumentException>(() => TestStandService.NormalizeVariableMode("skip"));
+    }
+
+    // ── Source-file resolution ───────────────────────────────────────────────────
+
+    [Test]
+    public void FirstExistingPath_PrefersTheFirstCandidateThatIsOnDisk()
+    {
+        string real = System.IO.Path.GetTempFileName();
+        try
+        {
+            Assert.That(TestStandService.FirstExistingPath(null, "  ", @"X:\gone.seq", real),
+                Is.EqualTo(real));
+        }
+        finally { System.IO.File.Delete(real); }
+    }
+
+    [Test]
+    public void FirstExistingPath_NoCandidateExists_IsNull()
+    {
+        // This is what makes the import fall back from 'copy' to 'model' with a warning instead of
+        // throwing when the model outlived the file it was exported from.
+        Assert.That(TestStandService.FirstExistingPath(null, "", @"X:\gone.seq"), Is.Null);
+    }
+
+    // ── The module property bag ──────────────────────────────────────────────────
+
+    [Test]
+    public void ModuleProperties_SurviveTheJsonRoundTrip()
+    {
+        // The typed fields cover a fraction of a real module (4 of a SequenceCall's 29 SData
+        // properties), so the export walks every scalar leaf. An ActiveX step has no typed branch at
+        // all and is carried as kind "Other" plus this bag.
+        var model = new SequenceFileModel { SourcePath = @"C:\src.seq" };
+        model.Sequences.Add(new SequenceModel
+        {
+            Name  = "Init",
+            Steps =
+            {
+                new StepModel
+                {
+                    Name = "ActiveX call", StepType = "Action", Adapter = "Automation Adapter",
+                    Module = new StepModuleModel
+                    {
+                        Kind       = "Other",
+                        Properties = new List<ModulePropModel>
+                        {
+                            new() { Path = "ThreadOpt",         Value = "0",    Type = "number"  },
+                            new() { Path = "Call.Member Name",  Value = "Open", Type = "string"  },
+                            new() { Path = "Call.UseDefault",   Value = "true", Type = "boolean" },
+                        },
+                    },
+                },
+            },
+        });
+
+        var json  = System.Text.Json.JsonSerializer.Serialize(model, SequenceFileModel.Json);
+        var back  = System.Text.Json.JsonSerializer.Deserialize<SequenceFileModel>(
+                        json, SequenceFileModel.Json)!;
+        var props = back.Sequences[0].Steps[0].Module!.Properties!;
+
+        Assert.That(back.Sequences[0].Steps[0].Module!.Kind, Is.EqualTo("Other"));
+        Assert.That(props.Select(p => p.Path),
+            Is.EqualTo(new[] { "ThreadOpt", "Call.Member Name", "Call.UseDefault" }),
+            "order matters — a nested member needs its parent written first");
+        Assert.That(props[2].Type, Is.EqualTo("boolean"));
+        Assert.That(props[1].Value, Is.EqualTo("Open"));
+    }
 }
