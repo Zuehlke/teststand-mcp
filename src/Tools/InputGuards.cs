@@ -139,6 +139,53 @@ public static class InputGuards
         return isNoneAdapter;
     }
 
+    // ── A6: in-process prototype load of a PACKED-LIBRARY VI is process-fatal ────
+    // Measured twice (2026-07-29): loading the connector pane of a VI inside a packed library
+    // (.lvlibp) IN-PROCESS raises the MSVC delay-load SEH 0xC06D007E for the LabVIEW Run-Time —
+    // even with a LabVIEW 2026 32-bit ADE already started and responsive. That fault escapes
+    // managed try/catch, so the SERVER PROCESS DIES and the NI Error Reporter appears; the
+    // silent-death guards only exist in the isolated worker and cannot help a fault raised in the
+    // server itself. The isolated worker is crash-safe but cannot bind the running ADE, so it only
+    // times out. There is therefore NO working prototype-load route for such a VI on this station —
+    // the connector pane has to be CLONED from a source .seq (copy_step_module, or
+    // import_sequence_file's default labview_panes='copy'), which needs no LabVIEW at all.
+    //
+    // This guard is the reason that fact no longer has to be REMEMBERED: an in-process load of a
+    // packed-library VI is refused outright, and the auto-load inside configure_labview_module is
+    // skipped for such a VI instead of taking the server down.
+
+    /// <summary>True when a module path points into a LabVIEW packed library (<c>.lvlibp</c>), whose
+    /// VIs cannot have their connector pane loaded on this station — in-process the load is
+    /// process-fatal, in the isolated worker it times out.</summary>
+    public static bool IsPackedLibraryModulePath(string? modulePath) =>
+        !string.IsNullOrWhiteSpace(modulePath)
+        && modulePath!.IndexOf(".lvlibp", StringComparison.OrdinalIgnoreCase) >= 0;
+
+    /// <summary>The refusal message for an in-process prototype load of a packed-library VI: what
+    /// would happen, and the route that actually works.</summary>
+    public static string PackedLibraryInProcessLoadRefusal(string stepName, string? viPath) =>
+        $"Step '{stepName}' calls a VI inside a packed library" +
+        (string.IsNullOrWhiteSpace(viPath) ? "" : $" ('{viPath}')") +
+        ". Loading its connector pane IN-PROCESS (isolate=false) raises the native delay-load fault " +
+        "0xC06D007E, which escapes managed try/catch and KILLS THE SERVER PROCESS — measured with a " +
+        "running, responsive LabVIEW ADE. The isolated worker (isolate=true) cannot bind that ADE and " +
+        "only times out, so there is no working load route for such a VI. CLONE the cached connector " +
+        "pane instead: copy_step_module from a source .seq that already has the step, or " +
+        "import_sequence_file with its default labview_panes='copy' (~1s per step, no LabVIEW). " +
+        "Pass force_unsafe_inprocess=true only if you accept losing the server process.";
+
+    /// <summary>The advisory note for a <c>configure_labview_module</c> call on a packed-library VI
+    /// whose automatic prototype load was skipped to keep the server alive.</summary>
+    public static string PackedLibraryAutoLoadSkippedNote(string? viPath) =>
+        "The automatic prototype load was SKIPPED because the VI lives in a packed library" +
+        (string.IsNullOrWhiteSpace(viPath) ? "" : $" ('{viPath}')") +
+        ", where an in-process load raises the native delay-load fault 0xC06D007E and would take the " +
+        "server down. The VI path was still written, so the step is configured. Its connector pane was " +
+        "NOT refreshed from the VI: 'parameters' reports whatever was already cached on the step — the " +
+        "full pane when you reconfigured an existing step, empty on a freshly inserted one. To produce " +
+        "a missing pane, CLONE it: copy_step_module from a source .seq that has the step, or " +
+        "import_sequence_file with its default labview_panes='copy'.";
+
     // ── A4 / A5: flow-branch condition targets ───────────────────────────────────
     // set_flow_condition and the bulk 'expression' auto-routing only make sense on the flow steps
     // that actually EVALUATE a branch condition. NI_Flow_End (and any non-branch step) cannot hold

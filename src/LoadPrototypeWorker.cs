@@ -82,6 +82,10 @@ internal static class LoadPrototypeWorker
         string? step = GetArg(args, "--step");
         string  lvsrv = GetArg(args, "--lv-server") ?? "deferred";
         string? searchDirsFile = GetArg(args, "--search-dirs");
+        // Extra sequence files to open before the load. A CROSS-FILE SequenceCall's prototype cache is
+        // only filled when the CALLEE file is loaded in the same engine, and this worker owns a fresh
+        // engine that knows nothing about what the parent had open.
+        string? openFilesFile  = GetArg(args, "--open-files");
 
         // Logger → STDERR only (keeps STDOUT clean for the single result line).
         using var loggerFactory = LoggerFactory.Create(b =>
@@ -127,6 +131,24 @@ internal static class LoadPrototypeWorker
             }
 
             await svc.OpenSequenceFileAsync(file);
+
+            // Open the callee files BEFORE the load: a cross-file SequenceCall's LoadPrototype only
+            // fills TS.SData.Prototype when the target file is resolvable in THIS engine.
+            if (openFilesFile != null && System.IO.File.Exists(openFilesFile))
+            {
+                try
+                {
+                    using var doc = JsonDocument.Parse(System.IO.File.ReadAllText(openFilesFile));
+                    foreach (var el in doc.RootElement.EnumerateArray())
+                    {
+                        string? p = el.GetString();
+                        if (string.IsNullOrWhiteSpace(p)) continue;
+                        try { await svc.OpenSequenceFileAsync(p!); }
+                        catch (Exception ex) { log.LogWarning(ex, "Worker could not open callee '{File}'.", p); }
+                    }
+                }
+                catch (Exception ex) { log.LogWarning(ex, "Worker could not read the callee file list."); }
+            }
 
             // Fault injection (tests only) — emulate the user's native crash so the parent's
             // crash-survival AND the silent-death guards can be verified on a box that does not
