@@ -21,6 +21,21 @@ steps, 5 LabVIEW `.lvlibp` steps, 1 cross-file SequenceCall): **3 MCP calls and 
 differences inside the imported scope** (the only rows left are the 22 sequences not imported). The same
 rebuild with the granular tools took ~700 calls, 3 diff iterations and left 224 differences.
 
+### The on-disk FORMAT is reproduced too — and the diff is blind to it (2026-07-31)
+A `.seq` is stored either as compressed **binary** (`TOF1` magic, zlib body — step names are NOT
+text-searchable) or as **XML** (a UTF-8 BOM then `<?xml`), and the engine's default for a new file is
+binary. `MEDELA_TFW`'s real files are XML, so a rebuild used to come out binary: **content-identical
+(`diff_sequence_files` says `identical`) yet different in every byte, 25 KB against 3.4 MB** on
+`TFW_MDC_com_Python` — ×133, pure serialization.
+- The export now captures the source format (`file.fileFormat` in the model) and **the import
+  reproduces it by default** — nothing to pass for a 1:1 rebuild; the outcome reports `fileFormat`.
+- `get_file_properties` reports `fileFormat`; `create_sequence_file`, `save_sequence_file`,
+  `set_file_properties` and `import_sequence_file` take **`file_format`** = `binary`|`xml`|`ini`.
+  The format is stored IN the file, so it survives; an ordinary save never converts it back.
+- Before reading a large size drop as data loss, **check the first bytes** (`TOF1` vs `<?xml`).
+- XML is the format to pick for anything that lives in git — binary `.seq` diffs are opaque.
+- This is the serialization, NOT the TestStand version target (that is the `version` field).
+
 ### A `.lvlibp` pane is CLONED, never loaded — and the server now ENFORCES that (2026-07-30)
 This used to be a rule you had to remember, and forgetting it killed the server. It is a guard now:
 - **`load_module_prototype(isolate:false)` on a packed-library VI is REFUSED** with an error that names
@@ -353,6 +368,17 @@ one another instead of rendering them as siblings.
 - Actions: `Statement`, `Action`, `MessagePopup`, `CallExecutable`, `SequenceCall`
 - Legacy (avoid): `Goto`, `Label`
 
+**Which flow steps are actually CONFIGURABLE headless** (property-tree audit; the mandate above is about
+STRUCTURE, this is about being able to fill one in):
+- Fully tool-covered: `If`/`ElseIf`/`Else`/`End`, `While`/`DoWhile` (condition → `ConditionExpr`),
+  `For` (`configure_for_loop`, or bulk `init_expr`/`expression`/`increment_expr`), `ForEach`
+  (`configure_foreach_loop`, or bulk `array_expr`/`element_expr`), `Select`/`Case` (incl. bulk
+  `is_default`), `Break`/`Continue` (the validator enforces the loop context).
+- **`NI_Flow_SweepLoop` and `NI_Flow_StreamLoop` have NO configure tool.** A Sweep keeps its sweep
+  table in `Parameters[]` (`NI_SweepParameter`) plus Input/Output containers, a Stream its data source
+  plus `IterationExpr` — reach them with `set_step_property`, or author them in the editor. Inserting
+  one is fine; do not assume it can be filled in with a `configure_*` call.
+
 ---
 
 ## Rebuild-efficiency batch (2026-07-29) — behaviour changes to know
@@ -397,6 +423,12 @@ Driven by the ~700-call rebuild above. See memory `teststand-rebuild-efficiency-
   whole list in order rather than patching it (argument ORDER is compared positionally).
 - **Bulk writers**: `insert_sequences_bulk`, `insert_variables_bulk`, `set_property_nodes`,
   `set_module_parameters` — one call, one save, applied in array order.
+  **Why this dominates:** almost every mutating tool saves the WHOLE file, and the save is ~90 % of the
+  cost. Measured on a 21-step/11-KB file: one `Save()` ≈ 26 ms, building all 21 steps without saving
+  ≈ 4.7 ms; the same build via single-op tools (~27 saves) ≈ 630 ms vs. bulk (3 saves) ≈ 71 ms — 89 %
+  less, and the gap grows with file size. So prefer a bulk writer, and pass `save:false` on the tools
+  that offer it (35 of them today) until the last write. Engine start is expensive but amortized — it is
+  a cached singleton, only paid again after a server rebuild.
 - **`get_property_tree` addresses a sequence/step BY NAME** (`sequence_name` / `step_group` /
   `step_name`); the raw path is `Data.Seq[i].Main[j]` and there is no `Sequences` node.
 - **`get_module_parameters` reads Python arguments** (`TS.SData.PythonCall.Parameters`); it returned
@@ -430,9 +462,37 @@ New tool NAMES and new params need a **FRESH MCP session** (the client caches th
 start): `audit_type_consistency`, `force_unsafe_inprocess`, `overwrite`,
 `remove_default_main_sequence`, and the changed `max_results` default.
 
+## More rules moved INTO the server (2026-07-31)
+
+Three further memory-only facts are now behaviour or catalog text rather than prose here:
+
+- **The on-disk format is a first-class property.** `file_format` (`binary`|`xml`|`ini`) on
+  `create_sequence_file` / `save_sequence_file` / `set_file_properties` / `import_sequence_file`,
+  `fileFormat` reported by `get_file_properties` and carried in the export model — so a 1:1 rebuild
+  reproduces an XML original as XML instead of silently writing binary. `TestStandService`
+  `ParseFileWritingFormat` / `ApplyFileWritingFormat`; pinned by `T36_FileFormatTests` (13 tests,
+  asserting the RAW bytes: `TOF1` vs a UTF-8 BOM + `<?xml` — the FileDiffer cannot see this).
+  An unknown format name THROWS rather than falling back to binary, which is the whole point.
+- **`wait_for_execution` / `get_execution_status` now state the headless `Paused` trap** (a run-time
+  error parks on a dialog nobody can answer; raising the timeout never helps) and that `step_results`
+  need a process-model entry point.
+- **`set_station_global` warns against being polled** from a running sequence — the busy loop starves
+  the write and can drop the connection.
+
+Needs a **FRESH MCP session**: the `file_format` params.
+
 ## General Conventions
 
 - **Sequence file for tests:** Always use `DemoTestsequenz.seq`
+- **`.Demo_jcm/` is ANONYMIZED demo material — keep it that way.** Those sequences are derived from a
+  real customer file and carry a codename instead of the product. When you build, clone or comment
+  anything in there: keep the existing codename, and write comments that state the FUNCTIONAL purpose
+  only — never the customer, the real product name, the physical measurand or concrete measurement
+  values. Sensitive detail lives in the leaf subsequences; if you only scaffold the top sequence, leave
+  those as empty stubs. The folder is gitignored on purpose — do NOT record the codename↔product
+  mapping in this file or any other tracked file. (The mapping itself is in memory
+  `demo-jcm-anonymization-ufo-symphony`.) Comments round-trip through Windows-1252, so ASCII
+  punctuation only.
 - **MCP server restart:** After code changes always rebuild yourself:
   `taskkill //F //IM TestStandMCP.exe` + `dotnet build --configuration Debug --framework net8.0-windows -p:Platform=x86`
   (Target framework is **net8.0-windows / x86**. The TestStand engine requires the host's
@@ -449,10 +509,31 @@ These are hard-won behaviors from the `Test/TestExecution` suite (T01–T21,
 re-discover them by trial-and-error. Per-tool gotchas already live in the tool
 descriptions; the cross-cutting rules below apply regardless of which tool you call.
 
+### Calling the TestStand COM API from C# (applies to every tool you add)
+- **Any interop method with an `out`/`ref` parameter MUST be called on a TYPED reference.** Via
+  `dynamic` or `Type.InvokeMember` the byref params do not marshal: the call throws, a surrounding
+  best-effort `catch` swallows it, and the tool returns a plausible DEFAULT instead of an error. Every
+  instance of this class of bug was silent and expensive: `Execution.GetStates(out,out)` made **every**
+  execution report `Stopped` (so `wait_for_execution` returned instantly), `Thread.GetSequenceContext(0,
+  out id)` emptied `get_execution_threads`/`get_thread_status`/`get_thread_call_stack`, and
+  `Engine.FindFile` returned the literal `"True"` where a path was expected. A `var x = ...` taken off a
+  `dynamic` re-poisons the chain, so cast at the boundary.
+- Same rule for the **enum/type APIs**: `TypeUsageList.GetTypeDefinition` throws
+  `TargetParameterCountException` under the dynamic binder, and the typed `LabVIEWAdapter` cast is what
+  makes `SetServerInfo`/`Initialize` do anything at all (late-bound they no-op silently).
+- Related signature traps: `Execution.Restart(bool breakOnEntry)` takes an argument; a `Thread`'s depth
+  is **`CallStackSize`** (no `StackDepth`) and it has **no `State`** — read the owning execution's run
+  state. (`T23`–`T29`; memories `teststand-getstates-reflection-fails`, `teststand-findfile-modal-prompt`.)
+
 ### Engine lifecycle & file handling
 - **Single in-process engine only.** A second engine cannot be torn down cleanly
   while the first one lives → the host hangs on exit. The MCP server uses exactly
   one engine; never spin up a second. (`T01`, see also memory `teststand-testhost-teardown-hang`.)
+- **An execution only advances while the ENGINE-CREATION thread pumps Windows messages.** TestStand
+  posts progress to a hidden window owned by that thread; the server therefore owns the engine on one
+  dedicated, persistent MTA thread running a continuous pump. A pump on any other thread does not work
+  (apartment is irrelevant). Do not move engine creation into a transient `Task.Run` — that was the
+  original "executions never run" bug. (Memory `teststand-execution-needs-waitforendex-pump`.)
 - **Recreating a `.seq` that already exists: `create_sequence_file(overwrite=true)`.** The engine
   releases the OS file handle *asynchronously*, so the close → retry-delete (≈5× / ~300 ms) → create
   dance is required — the tool does it internally now, so there is nothing to open-code. Without
@@ -499,6 +580,21 @@ descriptions; the cross-cutting rules below apply regardless of which tool you c
   `null` limit + a comparison like `"LT"`/`"GT"`; two-sided uses `"GELE"` etc. (`T05`, `TestDataBuilder`.)
 
 ### Headless limitations = EXPECTED outcomes (not bugs)
+- **An unhandled run-time error PAUSES the execution — it never becomes a terminal `Error`.**
+  TestStand's default action opens the interactive error dialog, and headless nobody answers it, so the
+  run sits `Paused` and `wait_for_execution` burns its whole timeout and returns `Paused`. That IS the
+  failure report: read the error, then `terminate_execution` (or patch state with
+  `set_runtime_variable` and resume). Raising the timeout never helps. A `MessagePopup` parks the same
+  way but reports `Running` — which makes it the deterministic way to hold a thread open for
+  `inspect_thread_context`. (`T24`, `T25`.)
+- **`step_results` stay EMPTY for a direct sequence run.** Only a process-model entry point populates
+  the ResultList — `start_execution` with `"Single Pass"` runs unattended and does yield step results;
+  `"Test UUTs"` parks on the UUT serial dialog (and its report generator stalls on a `NONE` serial)
+  unless you override `PreUUT`/`PostUUT` locally via `add_callback_override` + `set_step_run_mode`
+  `Skip`. (`T27`; memory `teststand-process-model-entry-points`.)
+- **Never poll a StationGlobal from a running sequence.** A `While StationGlobals.Flag == 1` step-loop
+  pegs a core and reads continuously, starving a concurrent `set_station_global` — the write times out
+  and can drop the MCP connection. Use an `NI_Wait` (`set_wait_time`) as the long-runner instead.
 - `create_sync_object` / `create_batch_sync_object`: headless has no SyncManager →
   `InvalidOperationException` / `NotSupportedException` are expected. (`T19`.)
 - `post_ui_message` / `add_report_section`: require a **live `execution_id`**; an

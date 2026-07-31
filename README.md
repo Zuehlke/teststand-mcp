@@ -146,6 +146,10 @@ TestStandMCP.exe --list-tools  # Print all registered tool names and description
 - Logging is written to **stderr** and is visible in the separate console window that opens automatically.
 - Always call `save_sequence_file` after editing a sequence to persist changes to disk.
 - Use `NI_Flow_If / NI_Flow_Else / NI_Flow_End` for conditional branching — never `Goto/Label`.
+- A `.seq` is written as compressed **binary** by default (`TOF1` magic, not text-searchable). Pass
+  `file_format: "xml"` to `create_sequence_file` / `save_sequence_file` for a human-readable, git-diffable
+  file; `get_file_properties` reports the current format, and `import_sequence_file` reproduces the
+  exported file's format automatically.
 
 ---
 

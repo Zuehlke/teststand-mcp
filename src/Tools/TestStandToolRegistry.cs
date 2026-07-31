@@ -112,8 +112,18 @@ public class TestStandToolRegistry
             GetSequenceAsync);
 
         Register("save_sequence_file",
-            "Save changes to an open sequence file back to disk.",
-            s => s.AddRequired("file_path", "string", "Path to the sequence file to save"),
+            "Save changes to an open sequence file back to disk. " +
+            "ON-DISK FORMAT: TestStand writes compressed BINARY by default (the file starts with the " +
+            "'TOF1' magic and step names are NOT findable as text); XML is opt-in per file. Pass " +
+            "file_format to change it — the format is stored IN the file, so it survives without " +
+            "repeating the argument. get_file_properties reports the current one.",
+            s => s
+                .AddRequired("file_path", "string", "Path to the sequence file to save")
+                .AddOptional("file_format", "string",
+                    "Switch the on-disk SERIALIZATION before saving: 'binary' (compressed, the engine " +
+                    "default), 'xml' (human-readable, diffable in git) or 'ini'. Omit to keep the " +
+                    "file's current format. This is the serialization, NOT the TestStand version " +
+                    "target."),
             SaveSequenceFileAsync);
 
         Register("create_sequence_file",
@@ -128,7 +138,14 @@ public class TestStandToolRegistry
                     "Replace an existing file at that path: close it in the engine, delete it from " +
                     "disk (retrying briefly — the engine releases the OS handle asynchronously, so an " +
                     "immediate delete loses the race), then create the new one. Without this a " +
-                    "pre-existing file makes the call fail. Default false.", false),
+                    "pre-existing file makes the call fail. Default false.", false)
+                .AddOptional("file_format", "string",
+                    "On-disk SERIALIZATION of the new file: 'binary' (compressed — the engine's own " +
+                    "default, 'TOF1' magic, not text-searchable), 'xml' (human-readable, diffable in " +
+                    "git) or 'ini'. REBUILDING AN EXISTING FILE: match the original, or the rebuild " +
+                    "differs in every byte while diff_sequence_files still reports it identical — " +
+                    "read the original's format from get_file_properties, or let " +
+                    "import_sequence_file reproduce it from the model (it does so by default)."),
             CreateSequenceFileAsync);
 
         Register("insert_sequence",
@@ -605,15 +622,27 @@ public class TestStandToolRegistry
             StartExecutionAsync);
 
         Register("wait_for_execution",
-            "Wait for a running execution to complete and return the full result.",
+            "Wait for a running execution to complete and return the full result. " +
+            "HEADLESS: A RETURNED STATUS OF 'Paused' IS THE NORMAL SHAPE OF A FAILURE, not a timeout " +
+            "bug. TestStand's default on-run-time-error action opens the interactive error dialog, and " +
+            "with no UI to answer it the execution simply sits Paused — so this call burns its full " +
+            "timeout and returns Paused. Do not raise the timeout; read the error and " +
+            "terminate_execution (or resume after fixing state via set_runtime_variable). A " +
+            "MessagePopup step parks the same way but reports 'Running'. " +
+            "STEP RESULTS: empty for a direct sequence run — only a process-model entry point " +
+            "('Single Pass') populates them.",
             s => s
                 .AddRequired("execution_id", "string", "Execution ID returned by start_execution")
                 .AddOptional("timeout_seconds", "integer",
-                    "Maximum seconds to wait (default: 300)", 300),
+                    "Maximum seconds to wait (default: 300). Raising it does NOT help a run that is " +
+                    "parked Paused on a run-time error or blocked on a MessagePopup — nothing headless " +
+                    "will ever answer those.", 300),
             WaitForExecutionAsync);
 
         Register("get_execution_status",
-            "Get the current status of a running or recently completed execution.",
+            "Get the current status of a running or recently completed execution. Headless, 'Paused' " +
+            "usually means an unhandled run-time error is waiting on the error dialog that no one can " +
+            "answer, and a MessagePopup parks as 'Running' — both need terminate_execution.",
             s => s.AddRequired("execution_id", "string", "Execution ID to query"),
             GetExecutionStatusAsync);
 
@@ -742,7 +771,12 @@ public class TestStandToolRegistry
 
         Register("set_station_global",
             "Set the value of a StationGlobal variable. The change is committed to StationGlobals.ini " +
-            "on disk so it persists across engine restarts (creates the global if it does not exist).",
+            "on disk so it persists across engine restarts (creates the global if it does not exist). " +
+            "DO NOT use a StationGlobal as a running sequence's poll flag: a tight step-loop such as " +
+            "'While StationGlobals.Flag == 1' pegs a core AND reads the global continuously, which " +
+            "STARVES this write — it times out and can drop the MCP connection. For a controllable " +
+            "long-running execution use an NI_Wait step (set_wait_time); to hold a thread open for " +
+            "inspection use a MessagePopup, which parks headless.",
             s => s
                 .AddRequired("variable_name", "string", "Name of the StationGlobal variable")
                 .AddRequired("value", "string", "New value"),
@@ -1783,7 +1817,9 @@ public class TestStandToolRegistry
             "configuration and argument bindings each needed their own call, and some (a non-Statement " +
             "Post expression, the retained SequenceCall file path, a UInt64 representation) were not " +
             "reachable through any reader at all. Export/import replaces that with two calls. " +
-            "The model contains: file comment/version; every custom data type WITH its attach state; " +
+            "The model contains: file comment/version AND the file's on-disk format (binary/xml/ini, so " +
+            "an XML original rebuilds as XML instead of silently becoming the engine's default binary); " +
+            "every custom data type WITH its attach state; " +
             "file globals as full node trees; and per sequence its description, result-recording flag, " +
             "parameters, locals (nested container/array members, enum ordinal AND symbolic name, " +
             "PropFlags, numeric representation/format, comments) and all steps in order with their " +
@@ -1919,6 +1955,14 @@ public class TestStandToolRegistry
                     "without this a rebuild keeps a stray empty sequence that the FileDiffer reports. " +
                     "Never touches a MainSequence the model actually brings. Reported as " +
                     "'defaultMainSequenceRemoved'.", true)
+                .AddOptional("file_format", "string",
+                    "On-disk SERIALIZATION to rebuild in: 'binary' (compressed, the engine default), " +
+                    "'xml' or 'ini'. OMIT THIS — by default the model reproduces the format of the file " +
+                    "it was exported from, which is what a 1:1 rebuild wants. Only set it to " +
+                    "deliberately convert. Note this is the one deviation diff_sequence_files cannot " +
+                    "see: it compares property trees, so a binary rebuild of an XML original reports " +
+                    "'identical' while differing in every byte on disk (measured 25 KB vs 3.4 MB for " +
+                    "the same 30-sequence file — serialization, not data loss).")
                 .AddOptional("save", "boolean", "Save the destination file at the end (default true).", true),
             ImportSequenceFileAsync);
 
@@ -2326,16 +2370,25 @@ public class TestStandToolRegistry
         // ── File Properties ───────────────────────────────────────────────────
 
         Register("get_file_properties",
-            "Get metadata and properties of a sequence file: comment, version, GUID, modification state, and sequence count.",
+            "Get metadata and properties of a sequence file: comment, version, GUID, modification " +
+            "state, sequence count, and 'fileFormat' — the ON-DISK SERIALIZATION ('binary' = " +
+            "compressed 'TOF1', the engine default / 'xml' / 'ini'). Read fileFormat BEFORE rebuilding " +
+            "a file: two files can be content-identical (diff_sequence_files says 'identical') and " +
+            "still differ in every byte and by a factor of 100 in size because of it.",
             s => s.AddRequired("file_path", "string", "Path to the sequence file"),
             GetFilePropertiesAsync);
 
         Register("set_file_properties",
-            "Set metadata of a sequence file. Provide at least one of: comment, version.",
+            "Set metadata of a sequence file. Provide at least one of: comment, version, file_format.",
             s => s
                 .AddRequired("file_path", "string", "Path to the sequence file")
                 .AddOptional("comment", "string", "File comment / description to set")
-                .AddOptional("version", "string", "Version string to set (e.g. '1.2.3')"),
+                .AddOptional("version", "string", "Version string to set (e.g. '1.2.3')")
+                .AddOptional("file_format", "string",
+                    "On-disk SERIALIZATION: 'binary' (compressed, the engine default), 'xml' " +
+                    "(human-readable, diffable in git) or 'ini'. Converts the file on the save this " +
+                    "call performs. This is the serialization, NOT the TestStand version target — for " +
+                    "that use 'version'."),
             SetFilePropertiesAsync);
 
         // ── Duplicate Sequence ─────────────────────────────────────────────────
@@ -3581,18 +3634,22 @@ public class TestStandToolRegistry
 
     private async Task<CallToolResult> SaveSequenceFileAsync(JsonElement? args)
     {
-        var path = args!.Value.GetRequiredString("file_path");
-        await _ts.SaveSequenceFileAsync(path);
-        return Ok($"Sequence file saved: {path}");
+        var path   = args!.Value.GetRequiredString("file_path");
+        var format = args!.Value.GetStringOrNull("file_format");
+        await _ts.SaveSequenceFileAsync(path, format);
+        return Ok($"Sequence file saved: {path}"
+                  + (format != null ? $" (on-disk format: {format})" : ""));
     }
 
     private async Task<CallToolResult> CreateSequenceFileAsync(JsonElement? args)
     {
         var path      = args!.Value.GetRequiredString("file_path");
         var overwrite = args!.Value.GetBoolOrDefault("overwrite", false);
-        var result    = await _ts.CreateSequenceFileAsync(path, overwrite);
+        var format    = args!.Value.GetStringOrNull("file_format");
+        var result    = await _ts.CreateSequenceFileAsync(path, overwrite, format);
         return Ok($"New sequence file created: {result}"
-                  + (overwrite ? " (any existing file at that path was closed and replaced)" : ""));
+                  + (overwrite ? " (any existing file at that path was closed and replaced)" : "")
+                  + (format != null ? $" (on-disk format: {format})" : ""));
     }
 
     private async Task<CallToolResult> InsertSequenceAsync(JsonElement? args)
@@ -5212,7 +5269,8 @@ public class TestStandToolRegistry
             args!.Value.GetBoolOrDefault("keep_unused_types", true),
             args!.Value.GetStringOrDefault("variables", "copy"),
             args!.Value.GetStringOrDefault("modules", "copy"),
-            args!.Value.GetBoolOrDefault("remove_default_main_sequence", true));
+            args!.Value.GetBoolOrDefault("remove_default_main_sequence", true),
+            args!.Value.GetStringOrNull("file_format"));
         return OkJson(outcome);
     }
 
@@ -6000,9 +6058,10 @@ public class TestStandToolRegistry
         var filePath = args!.Value.GetRequiredString("file_path");
         var comment  = args!.Value.GetStringOrNull("comment");
         var version  = args!.Value.GetStringOrNull("version");
-        if (comment == null && version == null)
-            return Error("At least one of 'comment' or 'version' must be provided.");
-        await _ts.SetFilePropertiesAsync(filePath, comment, version);
+        var format   = args!.Value.GetStringOrNull("file_format");
+        if (comment == null && version == null && format == null)
+            return Error("At least one of 'comment', 'version' or 'file_format' must be provided.");
+        await _ts.SetFilePropertiesAsync(filePath, comment, version, format);
         var msg = $"File properties updated for: {filePath}";
         var warn = InputGuards.DescribeLatin1Loss(comment, "comment");
         return Ok(warn == null ? msg : msg + " " + warn);

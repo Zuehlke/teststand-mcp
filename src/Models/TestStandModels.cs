@@ -1637,6 +1637,10 @@ public class FilePropertiesInfo
     public bool IsModified { get; set; }
     /// <summary>Number of sequences in the file.</summary>
     public int NumSequences { get; set; }
+    /// <summary>On-disk serialization: <c>binary</c> (the engine default — compressed, <c>TOF1</c>
+    /// magic), <c>xml</c> or <c>ini</c>. Two files can be content-identical and still differ in every
+    /// byte because of this, so check it before reading a large size delta as data loss.</summary>
+    public string? FileFormat { get; set; }
 }
 
 // ── Array Variable Models ────────────────────────────────────────────────────

@@ -26,6 +26,9 @@ using NiSequenceContext   = NationalInstruments.TestStand.Interop.API.SequenceCo
 using NiStepGroups        = NationalInstruments.TestStand.Interop.API.StepGroups;
 using PropertyObjectFile  = NationalInstruments.TestStand.Interop.API.PropertyObjectFile;
 using NiWriteFileFormat   = NationalInstruments.TestStand.Interop.API.WriteFileFormat;
+// The on-disk SERIALIZATION (Ini/Binary/Xml) — distinct from NiWriteFileFormat above, which is the
+// TestStand VERSION a file is written for.
+using NiFileWritingFormats = NationalInstruments.TestStand.Interop.API.FileWritingFormats;
 using NiPropOptions       = NationalInstruments.TestStand.Interop.API.PropertyOptions;
 using NiEvalOptions       = NationalInstruments.TestStand.Interop.API.EvaluationOptions;
 using NiOutputSeverity    = NationalInstruments.TestStand.Interop.API.OutputMessageSeverityTypes;
@@ -75,14 +78,18 @@ public interface ITestStandService : IDisposable
     Task<List<SequenceFileSummary>> GetLoadedSequenceFilesSummaryAsync();
     /// <summary>Returns the details of the named sequence within the given sequence file.</summary>
     Task<SequenceInfo> GetSequenceAsync(string filePath, string sequenceName);
-    /// <summary>Saves the sequence file at the given path to disk.</summary>
-    Task SaveSequenceFileAsync(string filePath);
+    /// <summary>Saves the sequence file at the given path to disk. <paramref name="fileFormat"/>
+    /// (<c>binary</c>/<c>xml</c>/<c>ini</c>) switches the on-disk SERIALIZATION before saving; null keeps
+    /// the file's current format.</summary>
+    Task SaveSequenceFileAsync(string filePath, string? fileFormat = null);
     /// <summary>Creates a new empty sequence file at the given path and returns the path.</summary>
     /// <summary>Creates a new empty sequence file. With <paramref name="overwrite"/> an existing file at
     /// the path is closed in this engine and deleted first (with the retry the engine's ASYNCHRONOUS
     /// handle release requires) — without it, creating over a loaded/existing file fails with a sharing
-    /// violation.</summary>
-    Task<string> CreateSequenceFileAsync(string filePath, bool overwrite = false);
+    /// violation. <paramref name="fileFormat"/> (<c>binary</c>/<c>xml</c>/<c>ini</c>) picks the on-disk
+    /// serialization; the engine's own default is compressed BINARY.</summary>
+    Task<string> CreateSequenceFileAsync(string filePath, bool overwrite = false,
+        string? fileFormat = null);
     /// <summary>Inserts a new sequence with the given name into the specified sequence file.</summary>
     Task InsertSequenceAsync(string filePath, string sequenceName);
     /// <summary>Inserts a single step into the specified sequence and step group at the given index.</summary>
@@ -294,12 +301,14 @@ public interface ITestStandService : IDisposable
     /// Order is fixed so cross-references resolve: types → file metadata/globals → all sequences with
     /// their interfaces → all steps (so every callee's parameters exist before a caller is
     /// configured). Returns per-item counts plus a warning for anything that could not be applied —
-    /// a partial import is reported, never silently swallowed.</summary>
+    /// a partial import is reported, never silently swallowed. <paramref name="fileFormat"/> overrides
+    /// the on-disk serialization; by default the model's own (i.e. the exported file's) format is
+    /// reproduced.</summary>
     Task<ImportOutcome> ImportSequenceFileAsync(SequenceFileModel model, string destFilePath,
         bool copyTypeDefs = true, bool save = true, string labViewPanes = "copy",
         int prototypeTimeoutSeconds = 120, string crossFilePrototypes = "copy",
         bool keepUnusedTypes = true, string variables = "copy", string modules = "copy",
-        bool removeDefaultMainSequence = true);
+        bool removeDefaultMainSequence = true, string? fileFormat = null);
 
     // Sequence Analyzer
     /// <summary>Runs the TestStand Sequence Analyzer on the given file and returns any messages.</summary>
@@ -749,8 +758,10 @@ public interface ITestStandService : IDisposable
     // File Properties
     /// <summary>Returns the file-level properties (comment, version, etc.) for the given sequence file.</summary>
     Task<FilePropertiesInfo> GetFilePropertiesAsync(string filePath);
-    /// <summary>Sets file-level properties (comment, version) on the given sequence file.</summary>
-    Task SetFilePropertiesAsync(string filePath, string? comment = null, string? version = null);
+    /// <summary>Sets file-level properties (comment, version, on-disk format) on the given sequence
+    /// file. <paramref name="fileFormat"/> is <c>binary</c>/<c>xml</c>/<c>ini</c>.</summary>
+    Task SetFilePropertiesAsync(string filePath, string? comment = null, string? version = null,
+        string? fileFormat = null);
 
     // Duplicate Sequence
     /// <summary>Duplicates the named sequence into a new sequence (optionally in a different file) and returns the new sequence name.</summary>
@@ -1455,7 +1466,7 @@ public sealed class TestStandService : ITestStandService
     }
 
     /// <inheritdoc/>
-    public async Task SaveSequenceFileAsync(string filePath)
+    public async Task SaveSequenceFileAsync(string filePath, string? fileFormat = null)
     {
         EnsureConnected();
         await Task.Run(() =>
@@ -1463,22 +1474,101 @@ public sealed class TestStandService : ITestStandService
             var sf = _loadedSequenceFiles.TryGetValue(filePath, out var cached)
                 ? cached
                 : _engine!.GetSequenceFileEx(filePath, 0, (NiConflictHandler)4);
+            ApplyFileWritingFormat(sf, fileFormat);
             SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
         });
     }
 
     /// <inheritdoc/>
-    public async Task<string> CreateSequenceFileAsync(string filePath, bool overwrite = false)
+    public async Task<string> CreateSequenceFileAsync(string filePath, bool overwrite = false,
+        string? fileFormat = null)
     {
         EnsureConnected();
+        // Validate the format BEFORE the overwrite deletes anything — otherwise a typo costs the
+        // existing file and still fails.
+        if (fileFormat != null) ParseFileWritingFormat(fileFormat);
         if (overwrite) await ReplaceExistingSequenceFileOnDiskAsync(filePath);
         return await Task.Run(() =>
         {
             var sf = _engine!.NewSequenceFile();
+            // Format BEFORE the first save — a new file defaults to compressed binary, and the very
+            // first Save is what puts bytes on disk.
+            ApplyFileWritingFormat(sf, fileFormat);
             SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
             _loadedSequenceFiles[filePath] = sf;
             return filePath;
         });
+    }
+
+    // ── On-disk file format (binary / xml / ini) ───────────────────────────────
+
+    /// <summary>
+    /// Maps a caller's format name to <c>FileWritingFormats</c>. Accepts <c>binary</c>|<c>tof</c>|
+    /// <c>tof1</c>, <c>xml</c>, <c>ini</c>|<c>text</c> (case-insensitive) and the raw numbers 1–3.
+    /// </summary>
+    /// <remarks>
+    /// This is the SERIALIZATION of the file, not the TestStand VERSION target (that is
+    /// <c>WriteFileFormat_*</c>, reached through <c>set_file_properties</c>' version field).
+    /// </remarks>
+    internal static int ParseFileWritingFormat(string fileFormat)
+    {
+        if (string.IsNullOrWhiteSpace(fileFormat))
+            throw new ArgumentException("file_format must not be empty.", nameof(fileFormat));
+
+        switch (fileFormat.Trim().ToLowerInvariant())
+        {
+            case "ini": case "text": case "1": return (int)NiFileWritingFormats.FileWritingFormat_Ini;
+            case "binary": case "bin": case "tof": case "tof1": case "2":
+                return (int)NiFileWritingFormats.FileWritingFormat_Binary;
+            case "xml": case "3": return (int)NiFileWritingFormats.FileWritingFormat_Xml;
+            default:
+                throw new ArgumentException(
+                    $"Unknown file_format '{fileFormat}'. Expected 'binary', 'xml' or 'ini'.",
+                    nameof(fileFormat));
+        }
+    }
+
+    /// <summary>Inverse of <see cref="ParseFileWritingFormat"/> — the name reported back to callers.</summary>
+    internal static string DescribeFileWritingFormat(int format) => format switch
+    {
+        (int)NiFileWritingFormats.FileWritingFormat_Ini    => "ini",
+        (int)NiFileWritingFormats.FileWritingFormat_Binary => "binary",
+        (int)NiFileWritingFormats.FileWritingFormat_Xml    => "xml",
+        _ => $"unknown({format})",
+    };
+
+    /// <summary>
+    /// Sets the file's on-disk serialization when <paramref name="fileFormat"/> is supplied; a null
+    /// leaves the file's current format alone (so the ~83 internal save sites keep behaving exactly
+    /// as before).
+    /// <para>WHY THIS MATTERS FOR A 1:1 REBUILD. A file created by <c>NewSequenceFile</c> writes
+    /// compressed BINARY (the <c>TOF1</c> magic), while a project's real files may well be stored as
+    /// XML. The content then matches — <c>diff_sequence_files</c> reports <c>identical</c> — yet the
+    /// rebuilt file differs from the original in every byte and can be orders of magnitude smaller
+    /// (measured: 25 KB binary vs 3.4 MB XML for the same 30-sequence file). That is serialization,
+    /// not data loss, and this is the knob that removes the difference.</para>
+    /// </summary>
+    private void ApplyFileWritingFormat(dynamic sf, string? fileFormat)
+    {
+        if (string.IsNullOrWhiteSpace(fileFormat)) return;
+        int format = ParseFileWritingFormat(fileFormat!);
+        var pof = (PropertyObjectFile)(object)sf.AsPropertyObjectFile();
+        pof.FileWritingFormat = (NiFileWritingFormats)format;
+    }
+
+    /// <summary>Reads the file's on-disk serialization, or null when the engine will not report it.</summary>
+    private string? ReadFileWritingFormat(dynamic sf)
+    {
+        try
+        {
+            var pof = (PropertyObjectFile)(object)sf.AsPropertyObjectFile();
+            return DescribeFileWritingFormat((int)pof.FileWritingFormat);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Reading FileWritingFormat failed.");
+            return null;
+        }
     }
 
     /// <summary>
@@ -5018,6 +5108,7 @@ public sealed class TestStandService : ITestStandService
                 info.Version    = pof.Version;
                 info.IsModified = pof.IsModified;
                 info.Comment    = string.IsNullOrEmpty(pof.Comment) ? null : pof.Comment;
+                info.FileFormat = DescribeFileWritingFormat((int)pof.FileWritingFormat);
             }
             catch (Exception ex) { _logger.LogDebug(ex, "Failed to read file properties via PropertyObjectFile interface."); }
             // NumSequences is on SequenceFile interface directly
@@ -5028,7 +5119,7 @@ public sealed class TestStandService : ITestStandService
 
     /// <inheritdoc/>
     public async Task SetFilePropertiesAsync(string filePath, string? comment = null,
-        string? version = null)
+        string? version = null, string? fileFormat = null)
     {
         EnsureConnected();
         await Task.Run(() =>
@@ -5041,6 +5132,7 @@ public sealed class TestStandService : ITestStandService
             var pof = (PropertyObjectFile)(object)sf.AsPropertyObjectFile();
             if (comment != null) pof.Comment = comment;
             if (version != null) pof.Version = version;
+            ApplyFileWritingFormat(sf, fileFormat);
 
             SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
             _loadedSequenceFiles[filePath] = sf;
@@ -14245,6 +14337,9 @@ public sealed class TestStandService : ITestStandService
             try { model.File.Comment = (string)sf.Comment; } catch (Exception ex) { _logger.LogDebug(ex, "Reading file comment failed."); }
             try { model.File.Version = (string)sf.AsPropertyObject().GetValString("Data.Version", 0); }
             catch (Exception ex) { _logger.LogDebug(ex, "Reading file version failed."); }
+            // The on-disk serialization, so an import can reproduce an XML original as XML instead of
+            // silently writing the engine's default binary.
+            model.File.FileFormat = ReadFileWritingFormat(sf);
 
             if (includeTypeDefs)
             {
@@ -14738,10 +14833,20 @@ public sealed class TestStandService : ITestStandService
         string labViewPanes = "copy", int prototypeTimeoutSeconds = 120,
         string crossFilePrototypes = "copy", bool keepUnusedTypes = true,
         string variables = "copy", string modules = "copy",
-        bool removeDefaultMainSequence = true)
+        bool removeDefaultMainSequence = true, string? fileFormat = null)
     {
         EnsureConnected();
         var outcome = new ImportOutcome();
+
+        // The on-disk serialization to rebuild in: an explicit override wins, otherwise the source
+        // file's own format as captured by the export. Without this a rebuild of an XML project file
+        // silently comes out as the engine's default binary — content-identical (the FileDiffer says
+        // so) but different in every byte, and 100× smaller.
+        // Canonicalized on the way in, so a bad name fails fast (before any pass runs) and the outcome
+        // reports 'binary' rather than whichever alias the caller happened to use.
+        string? wantFormat = fileFormat ?? model.File.FileFormat;
+        if (wantFormat != null)
+            wantFormat = DescribeFileWritingFormat(ParseFileWritingFormat(wantFormat));
 
         if (model.SchemaVersion != 1)
             throw new ArgumentException(
@@ -14817,10 +14922,15 @@ public sealed class TestStandService : ITestStandService
             }
         }
 
-        // 2) File metadata + globals.
-        if (model.File.Comment != null || model.File.Version != null)
+        // 2) File metadata + globals. The format goes on here too, so every one of the passes below
+        // already writes in the target serialization rather than converting the file at the end.
+        if (model.File.Comment != null || model.File.Version != null || wantFormat != null)
         {
-            try { await SetFilePropertiesAsync(destFilePath, model.File.Comment, model.File.Version); }
+            try
+            {
+                await SetFilePropertiesAsync(destFilePath, model.File.Comment, model.File.Version,
+                    wantFormat);
+            }
             catch (Exception ex) { outcome.Warnings.Add($"file properties: {ex.Message}"); }
         }
         var globalsFromModel = model.FileGlobals;
@@ -15334,6 +15444,27 @@ public sealed class TestStandService : ITestStandService
             }
             catch (Exception ex)
             { outcome.Warnings.Add($"type-survival check failed: {ex.Message}"); }
+        }
+
+        // 9) THE ON-DISK SERIALIZATION, re-asserted last. Pass 8 saves and RELOADS the file to find the
+        // types the save dropped, so the object carrying the format from pass 2 may no longer be the one
+        // being saved. Re-applying costs one save and makes the format an outcome that is actually
+        // guaranteed rather than merely requested.
+        if (wantFormat != null)
+        {
+            try
+            {
+                if (save) await SaveSequenceFileAsync(destFilePath, wantFormat);
+                else ApplyFileWritingFormat(GetOrLoadSeqFile(destFilePath), wantFormat);
+                outcome.FileFormat = wantFormat;
+            }
+            catch (Exception ex)
+            {
+                outcome.Warnings.Add(
+                    $"file_format '{wantFormat}' could not be applied: {ex.Message}. The rebuild is " +
+                    "complete but saved in the engine's default format (binary) — diff_sequence_files " +
+                    "will still report it as identical to the original.");
+            }
         }
 
         // The outcome is the only report of what could NOT be applied, and an import can outlive the
