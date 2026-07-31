@@ -54,6 +54,17 @@ public class FileMetaModel
     public string? Comment { get; set; }
     /// <summary>The file version string (e.g. "0.0.0.0").</summary>
     public string? Version { get; set; }
+    /// <summary>
+    /// The source file's on-disk SERIALIZATION — <c>binary</c> (the engine default: compressed, with the
+    /// <c>TOF1</c> magic), <c>xml</c> or <c>ini</c>. Import reproduces it, so a rebuild of an XML project
+    /// file comes back out as XML instead of silently becoming binary.
+    /// </summary>
+    /// <remarks>
+    /// This is the one part of a rebuild that <c>diff_sequence_files</c> cannot see: it compares the
+    /// property trees, so a binary rebuild of an XML original reports <c>identical</c> while differing in
+    /// every byte on disk — measured at 25 KB vs 3.4 MB for the same 30-sequence file.
+    /// </remarks>
+    public string? FileFormat { get; set; }
 }
 
 /// <summary>A custom data type and whether the file embeds ("attaches") it.</summary>
@@ -382,6 +393,10 @@ public class ImportOutcome
     public string? LabViewPaneMode { get; set; }
     /// <summary>Which route reproduced the cross-file prototype caches: copy / load / skip.</summary>
     public string? CrossFilePrototypeMode { get; set; }
+    /// <summary>The on-disk serialization the destination was saved in (<c>binary</c>/<c>xml</c>/<c>ini</c>),
+    /// whether that came from the model or from an explicit override. Null when the format was left
+    /// untouched.</summary>
+    public string? FileFormat { get; set; }
     /// <summary>Where this outcome was also written as JSON, so a caller whose RPC timed out can still
     /// read the warnings. Null when it could not be written.</summary>
     public string? OutcomePath { get; set; }
