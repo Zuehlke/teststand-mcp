@@ -47,6 +47,12 @@ using NiFindFilePrompt    = NationalInstruments.TestStand.Interop.API.FindFilePr
 using NiFindFileSrchList  = NationalInstruments.TestStand.Interop.API.FindFileSearchListOptions;
 using NiLabVIEWAdapter    = NationalInstruments.TestStand.Interop.AdapterAPI.LabVIEWAdapter;
 using NiLabVIEWServerTypes = NationalInstruments.TestStand.Interop.AdapterAPI.LabVIEWServerTypes;
+// The .NET adapter's module interface. Its ClassName/MemberName/MemberType properties and the
+// SetAssembly/GetAssembly pair only work on this TYPED interface — GetAssembly has two out
+// parameters, which the dynamic binder cannot marshal at all.
+using NiDotNetModule      = NationalInstruments.TestStand.Interop.AdapterAPI.DotNetModule;
+using NiDotNetAsmLocations = NationalInstruments.TestStand.Interop.AdapterAPI.DotNetModuleAssemblyLocations;
+using NiDotNetMemberTypes = NationalInstruments.TestStand.Interop.AdapterAPI.DotNetModuleMemberTypes;
 using NiPropObjType       = NationalInstruments.TestStand.Interop.API.PropertyObjectType;
 using NiPropRepresentations = NationalInstruments.TestStand.Interop.API.PropertyRepresentations;
 
@@ -8706,24 +8712,145 @@ public sealed class TestStandService : ITestStandService
     // ── Typed Adapter / Code-Module Configuration ─────────────────────────────
 
     /// <inheritdoc/>
+    /// <remarks>
+    /// Everything here goes through the TYPED <see cref="NiDotNetModule"/> interface and is VERIFIED
+    /// by reading the value back, because the previous late-bound version silently configured nothing
+    /// while reporting success. Three separate faults, all invisible to the caller:
+    /// <list type="bullet">
+    /// <item><c>SetAssembly</c> takes <c>(DotNetModuleAssemblyLocations location, string path)</c>, but
+    /// was called as <c>SetAssembly(path, true)</c> — wrong order AND wrong types, so it threw; the
+    /// fallback then set a property named "Assembly", which does not exist on the interface (the pair
+    /// is <c>GetAssembly</c>/<c>SetAssembly</c>). <c>TS.SData.AssemblyPath</c> stayed empty and the
+    /// execution failed with "Could not find file ''".</item>
+    /// <item><c>NameOfMethodToCreate</c> is a REAL settable property — it names a method for the
+    /// adapter's code GENERATION, not the member to invoke — so the <c>||</c> short-circuited on it
+    /// and <c>MemberName</c> (the member that actually gets called) was never written.</item>
+    /// <item><c>applied["assemblyPath"]</c> was recorded unconditionally and the fallback's bool was
+    /// discarded, so <c>AppliedSettings</c> claimed success in every case. Exactly the
+    /// swallowed-failure pattern CLAUDE.md warns about for late-bound interop.</item>
+    /// </list>
+    /// <c>GetAssembly</c> has two <c>out</c> parameters, which do not marshal through the dynamic
+    /// binder at all — hence the typed cast is required, not merely tidier.
+    /// <para>A write that does not land is reported in <see cref="ModuleConfigResult.Note"/> and left
+    /// OUT of <c>AppliedSettings</c> rather than thrown: a 1:1 rebuild legitimately configures steps
+    /// whose assembly is absent on the current machine, and aborting would break those bulk flows.
+    /// The caller can therefore trust <c>AppliedSettings</c> to list only what is really set.</para>
+    /// </remarks>
     public Task<ModuleConfigResult> ConfigureDotNetModuleAsync(string filePath,
         string sequenceName, string stepGroup, string stepName, string assemblyPath,
         string className, string methodName, bool save = true, bool loadPrototype = true)
-        => ConfigureModuleAsync(filePath, sequenceName, stepGroup, stepName, "DotNet", save,
+    {
+        var problems = new List<string>();
+        return ConfigureModuleAsync(filePath, sequenceName, stepGroup, stepName, "DotNet", save,
             mod =>
             {
                 var applied = new Dictionary<string, object>();
-                try { mod.SetAssembly((object)assemblyPath, (object)true); }
-                catch { TrySetModuleProp(mod, "Assembly", assemblyPath); }
-                applied["assemblyPath"] = assemblyPath;
-                if (TrySetModuleProp(mod, "ClassName", className)) applied["className"] = className;
-                // The member to invoke — property name differs across builds.
-                if (TrySetModuleProp(mod, "NameOfMethodToCreate", methodName) ||
-                    TrySetModuleProp(mod, "MemberName", methodName))
-                    applied["methodName"] = methodName;
+
+                // Typed cast: the out-parameter methods (GetAssembly) cannot be reached late-bound.
+                NiDotNetModule? dn = null;
+                try { dn = (NiDotNetModule)(object)mod; }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Step is not a .NET module — cannot configure it as one.");
+                    problems.Add("the step's module is not a .NET module (typed DotNetModule cast failed); nothing was configured");
+                    return applied;
+                }
+
+                // 1) Assembly. Location File = a path on disk (GAC would ignore the path).
+                try
+                {
+                    dn.SetAssembly(NiDotNetAsmLocations.DotNetModule_AssemblyLocation_File, assemblyPath);
+                    dn.GetAssembly(out _, out string readBackPath);
+                    if (string.Equals(readBackPath, assemblyPath, StringComparison.OrdinalIgnoreCase))
+                        applied["assemblyPath"] = assemblyPath;
+                    else
+                        problems.Add($"assemblyPath did not persist (read back '{readBackPath}')");
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "SetAssembly failed for step '{Step}'.", stepName);
+                    problems.Add($"assemblyPath could not be set ({ex.Message.Trim()})");
+                }
+
+                // 2) Class and 3) the member to invoke, each verified by read-back.
+                try
+                {
+                    dn.ClassName = className;
+                    if (string.Equals(dn.ClassName, className, StringComparison.Ordinal))
+                        applied["className"] = className;
+                    else problems.Add($"className did not persist (read back '{dn.ClassName}')");
+                }
+                catch (Exception ex) { problems.Add($"className could not be set ({ex.Message.Trim()})"); }
+
+                try
+                {
+                    dn.MemberName = methodName;
+                    if (string.Equals(dn.MemberName, methodName, StringComparison.Ordinal))
+                        applied["methodName"] = methodName;
+                    else problems.Add($"methodName did not persist (read back '{dn.MemberName}')");
+                }
+                catch (Exception ex) { problems.Add($"methodName could not be set ({ex.Message.Trim()})"); }
+
+                // 4) Without an explicit member TYPE the adapter leaves the call at DoNotCall, and the
+                //    step then executes as a no-op that still reports Passed.
+                try
+                {
+                    dn.MemberType = NiDotNetMemberTypes.DotNetMember_CallMethod;
+                    if (dn.MemberType == NiDotNetMemberTypes.DotNetMember_CallMethod)
+                        applied["memberType"] = "CallMethod";
+                    else problems.Add("memberType did not persist");
+                }
+                catch (Exception ex) { problems.Add($"memberType could not be set ({ex.Message.Trim()})"); }
+
+                // 5) Resolve the member against the assembly's metadata — the .NET adapter's own
+                //    "Load Prototype". This is what fills Params and marks the call valid; the generic
+                //    Module.LoadPrototype that ConfigureModuleAsync runs afterwards is not a
+                //    substitute, because the member has to be resolved before it can be reconciled.
+                //    Its BOOL RETURN IS NOT A RESOLUTION CHECK — measured: it returns true even for
+                //    C:\Dummy\MyAssembly.dll, which does not exist. So resolution is verified below
+                //    with DotNetCall.IsCallValid, which reports the actual reason.
+                //
+                //    MemberFlags is deliberately NOT written on the first attempt. Measured on a
+                //    `public static void` member of a `static class`: leaving the flags untouched
+                //    resolves and the step really calls the method, while pre-setting the Static bit
+                //    makes LoadMemberInfo FAIL — so the bit is not a "search for a static member"
+                //    filter and writing it speculatively does harm. The engine also leaves
+                //    Calls[0].Static at false for that member and still invokes it correctly, so the
+                //    flag is not what makes a static call work. It stays available as a fallback for
+                //    members the untouched lookup misses, and the original value is restored when
+                //    neither attempt succeeds so a re-configure cannot degrade a working step.
+                int originalMemberFlags = 0;
+                try { originalMemberFlags = dn.MemberFlags; } catch { /* not readable — treat as 0 */ }
+
+                string? invalidReason = TryLoadDotNetMember(dn, stepName);
+                if (invalidReason == null)
+                {
+                    applied["memberResolved"] = true;
+                }
+                else
+                {
+                    // Second chance with the Static bit, for a member the untouched lookup misses.
+                    try { dn.MemberFlags = StaticMemberFlag; } catch { /* keep the first reason */ }
+                    string? staticReason = TryLoadDotNetMember(dn, stepName);
+                    if (staticReason == null)
+                    {
+                        applied["memberResolved"]    = true;
+                        applied["staticFallbackUsed"] = true;
+                    }
+                    else
+                    {
+                        try { dn.MemberFlags = originalMemberFlags; } catch { /* resolution already failed */ }
+                        problems.Add($"the member could not be resolved against the assembly ({invalidReason}) "
+                                   + "— the step is configured but will not call anything");
+                    }
+                }
+
                 return applied;
             },
-            loadPrototype: loadPrototype);
+            loadPrototype: loadPrototype,
+            noteFactory: () => problems.Count == 0 ? null
+                : "NOT fully applied: " + string.Join("; ", problems));
+    }
 
     /// <inheritdoc/>
     public Task<ModuleConfigResult> ConfigureDllModuleAsync(string filePath,
@@ -8734,14 +8861,15 @@ public sealed class TestStandService : ITestStandService
             {
                 var applied = new Dictionary<string, object>();
                 // The path/function live on the CommonCModule base interface, which is
-                // not the default dispatch interface of a CVI step's Module.
+                // not the default dispatch interface of a CVI step's Module. Verified 2026-08-03:
+                // ModulePath/FunctionName reach TS.SData.Call.LibPath / .Func. The former fallback
+                // to the same names on `mod` was dead code — CVIModule does not expose them, which
+                // is exactly why AsCommonCModule() is needed.
                 dynamic target = mod;
                 try { target = mod.AsCommonCModule(); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to cast module to CommonCModule interface."); }
-                if (TrySetModuleProp(target, "ModulePath", dllPath) ||
-                    TrySetModuleProp(mod, "ModulePath", dllPath))
+                if (TrySetAndVerifyModuleProp(target, "ModulePath", dllPath))
                     applied["dllPath"] = dllPath;
-                if (TrySetModuleProp(target, "FunctionName", functionName) ||
-                    TrySetModuleProp(mod, "FunctionName", functionName))
+                if (TrySetAndVerifyModuleProp(target, "FunctionName", functionName))
                     applied["functionName"] = functionName;
                 return applied;
             },
@@ -8762,8 +8890,9 @@ public sealed class TestStandService : ITestStandService
             mod =>
             {
                 var applied = new Dictionary<string, object>();
-                if (TrySetModuleProp(mod, "VIPath", viPath) ||
-                    TrySetModuleProp(mod, "ModulePath", viPath))
+                // Verified 2026-08-03: VIPath reaches TS.SData.ViCall.VIPath. The former fallback to
+                // "ModulePath" was dead code — LabVIEWModule has no such property.
+                if (TrySetAndVerifyModuleProp(mod, "VIPath", viPath))
                     applied["viPath"] = viPath;
                 return applied;
             },
@@ -8802,10 +8931,12 @@ public sealed class TestStandService : ITestStandService
             mod =>
             {
                 var applied = new Dictionary<string, object>();
-                if (TrySetModuleProp(mod, "ModulePath", modulePath))
+                // Verified 2026-08-03: both reach TS.SData.PythonCall.{ModulePath,
+                // FunctionOrAttributeName}. The former fallback to "FunctionName" was dead code —
+                // PythonModule has no such property.
+                if (TrySetAndVerifyModuleProp(mod, "ModulePath", modulePath))
                     applied["modulePath"] = modulePath;
-                if (TrySetModuleProp(mod, "FunctionOrAttributeName", functionName) ||
-                    TrySetModuleProp(mod, "FunctionName", functionName))
+                if (TrySetAndVerifyModuleProp(mod, "FunctionOrAttributeName", functionName))
                     applied["functionName"] = functionName;
                 return applied;
             },
@@ -8995,7 +9126,8 @@ public sealed class TestStandService : ITestStandService
         Action<dynamic>? preAdapterGuard = null, bool loadPrototype = true,
         Action<NiPropertyObject, Dictionary<string, object>>? applyOnStep = null,
         Action<NiPropertyObject, Dictionary<string, object>>? applyAfterPrototype = null,
-        string? note = null)
+        string? note = null,
+        Func<string?>? noteFactory = null)
     {
         EnsureConnected();
         return await Task.Run(() =>
@@ -9075,10 +9207,57 @@ public sealed class TestStandService : ITestStandService
                 Adapter         = string.IsNullOrEmpty(actualKey) ? resolvedKey : actualKey,
                 AppliedSettings = applied,
                 Parameters      = parameters,
-                Note            = note
+                // noteFactory is evaluated HERE, not at the call site: it reports what the 'apply'
+                // callback discovered while running, so it cannot be a precomputed string.
+                Note            = note ?? noteFactory?.Invoke()
             };
         });
     }
+
+    /// <summary>
+    /// Resolves the .NET module's member against its assembly and reports whether the resulting call
+    /// is actually executable. Returns <c>null</c> on success, otherwise the reason.
+    /// <para><c>LoadMemberInfo</c>'s own bool return CANNOT be used for this: it comes back true even
+    /// for an assembly path that does not exist (measured with <c>C:\Dummy\MyAssembly.dll</c>), which
+    /// is why the first version of this fix still reported a phantom success. <c>IsCallValid</c> is the
+    /// real check — and its <c>out</c> parameter is another reason the typed interface is mandatory,
+    /// since out params do not marshal through the dynamic binder.</para>
+    /// </summary>
+    private string? TryLoadDotNetMember(NiDotNetModule dn, string stepName)
+    {
+        try { dn.LoadMemberInfo(false); }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "LoadMemberInfo threw for step '{Step}'.", stepName);
+            return ex.Message.Trim();
+        }
+
+        try
+        {
+            if (dn.Calls.Count < 1) return "the adapter created no call entry";
+            if (dn.Calls[0].IsCallValid(out string error)) return null;
+
+            // IsCallValid can report false with an empty description; fall back to the assembly-level
+            // warnings, which name a load failure (missing file, wrong bitness) explicitly.
+            if (string.IsNullOrWhiteSpace(error))
+            {
+                try { error = dn.AssemblyWarnings; } catch { /* leave it empty */ }
+            }
+            return string.IsNullOrWhiteSpace(error)
+                ? "the adapter reports the call as invalid without a reason"
+                : error.Trim();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "IsCallValid check failed for step '{Step}'.", stepName);
+            return $"validity could not be checked ({ex.Message.Trim()})";
+        }
+    }
+
+    /// <summary><c>DotNetModuleMemberFlags.DotNetMemberFlags_Static</c>. Spelled out as a constant
+    /// because the interop exposes the flags as a non-enum constants class, so there is no typed value
+    /// to pass to <c>DotNetModule.MemberFlags</c> (an <c>Int32</c> bitfield).</summary>
+    private const int StaticMemberFlag = 1;
 
     private static bool TrySetModuleProp(dynamic mod, string propName, object value)
     {
@@ -9090,6 +9269,29 @@ public sealed class TestStandService : ITestStandService
             return true;
         }
         catch { return false; }
+    }
+
+    /// <summary>
+    /// Sets a module property and CONFIRMS it by reading it back, returning false when the value did
+    /// not stick. <see cref="TrySetModuleProp"/> alone only reports that the late-bound set did not
+    /// throw, which is not the same thing: <c>configure_dotnet_module</c> used to "successfully" write
+    /// the method name to <c>NameOfMethodToCreate</c> — a real property, just not the one the engine
+    /// reads — and reported success while the step called nothing. The other adapters were audited
+    /// against their typed interfaces and the step property tree and do hit the right properties
+    /// (2026-08-03), so this is a guard against a future rename rather than a known break.
+    /// </summary>
+    private static bool TrySetAndVerifyModuleProp(dynamic mod, string propName, string value)
+    {
+        if (!TrySetModuleProp(mod, propName, value)) return false;
+        try
+        {
+            object? readBack = ((object)mod).GetType().InvokeMember(propName,
+                System.Reflection.BindingFlags.GetProperty, null, mod, null);
+            // A property that is write-only (no getter) cannot be verified — trust the set instead of
+            // falsely reporting a failure.
+            return readBack is not string s || string.Equals(s, value, StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return true; }
     }
 
     /// <summary>

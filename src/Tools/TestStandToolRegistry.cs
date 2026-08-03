@@ -3046,7 +3046,13 @@ public class TestStandToolRegistry
             "Configure a step's .NET code module: assembly, class and method. " +
             "Switches the step to the .NET adapter if needed. After the member is set, the method " +
             "prototype is loaded (editor 'Load Prototype') so the step's parameter interface is " +
-            "populated — the loaded parameters are returned in the result's 'parameters' list.",
+            "populated — the loaded parameters are returned in the result's 'parameters' list. " +
+            "EVERY setting is verified by reading it back, so 'appliedSettings' lists only what is " +
+            "really set on the step; 'memberResolved' appears only when the member actually resolved " +
+            "against the assembly and the adapter reports the call as valid. Anything that did not " +
+            "apply is named in 'note' with the adapter's own reason (e.g. \"Could not find file\") — " +
+            "read it, because a step whose member did not resolve still executes and reports Passed " +
+            "without calling anything.",
             s => s
                 .AddRequired("file_path", "string", "Path to the sequence file")
                 .AddRequired("sequence_name", "string", "Name of the sequence")
