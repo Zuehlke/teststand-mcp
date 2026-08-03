@@ -12,11 +12,9 @@ Developed by [Zühlke](https://www.zuehlke.com/en/industries/industrial-sector).
 |---|---|
 | NI TestStand | 2019 or later (2026 recommended) |
 | .NET runtime | .NET 8 — x86 build of `Microsoft.NETCore.App`, `Microsoft.WindowsDesktop.App` and `Microsoft.AspNetCore.App` (all three required by the TestStand engine) |
-| Build toolchain | .NET 8 SDK (x86) — `dotnet --info` should report `Architecture: x86` |
+| Build toolchain | .NET 8 SDK or newer — the ordinary **x64** SDK is fine; `-p:Platform=x86` is what produces the 32-bit executable. No x86 SDK needed (only the x86 *runtime* above). |
 | Platform | Windows **x86** (the TestStand engine COM server is 32-bit) |
 | Any AI of your choice | E.g. a paid version of Claude with access to Claude Code in the Desktop App |
-
-
 
 ---
 
@@ -46,9 +44,9 @@ This MCP Server can be used with any AI tool that supports MCPs. The instruction
 
    Adjust the path to match your actual download or build output location.
 
-3. Restart Claude Desktop. The TestStand tools will appear automatically.
+4. Restart Claude Desktop. The TestStand tools will appear automatically.
 
-4. In your first message, ask Claude to connect to the engine:
+5. In your first message, ask Claude to connect to the engine:
 
    > *"Connect to the TestStand engine and open my sequence file."*
 
@@ -65,15 +63,34 @@ This MCP Server can be used with any AI tool that supports MCPs. The instruction
 
 ### Sequence File Management
 - Open, create, save, and close `.seq` files
-- Compare two sequence files (structured diff)
 - Read and write file-level metadata and globals
+- Choose the on-disk format per file — compressed `binary`, `xml` (git-diffable) or `ini`
+
+### Whole-File Rebuild & Verification
+- **Export / import a complete sequence file** (`export_sequence_file`, `import_sequence_file`) —
+  writes the whole file as a JSON model and rebuilds it elsewhere: types with their attach state,
+  file globals, every sequence with parameters/locals, and all steps with their full module
+  configuration. This is the way to migrate, clone or bulk-edit a file; the granular tools are for
+  surgical single edits
+- **Native diff** (`diff_sequence_files`) — the same FileDiffer the Sequence Editor uses, with
+  category/path/change-type filters and grouping
+- **Verification tools** — `validate_sequence_plan` (checks a planned step list *before* building:
+  unclosed blocks, undeclared variables, forbidden `Goto`/`Label`), `audit_sequence_references`
+  (undeclared `Locals.`/`Parameters.`/`FileGlobals.` references in the built sequence) and
+  `audit_type_consistency` (duplicate or mismatched type registrations — which a content diff
+  cannot see)
+- Clone a single sequence within a file or across files (`duplicate_sequence`), plus type
+  definitions, file globals and file attributes
 
 ### Sequence Editing
 - Insert, rename, duplicate, and delete sequences
 - Insert, move, rename, delete, and enable/disable steps
 - Set step expressions, preconditions, pass/fail actions, and loop settings
 - Configure `MessagePopup`, `PropertyLoader`, `NumericLimitTest`, and `StringValueTest` steps
-- Manage local variables, sequence parameters, and file globals
+- Manage local variables, sequence parameters, and file globals — including typed, nested and
+  array members, numeric representation/format and property flags
+- Create and edit **enumeration data types** (`create_enum`, `add_enum_value`, `rename_enum_value`,
+  `set_enum_values`, …) stored in the sequence file
 - Full undo/redo support (including grouped undo transactions)
 
 ### Execution Control
@@ -82,6 +99,10 @@ This MCP Server can be used with any AI tool that supports MCPs. The instruction
 - Break, resume, abort, restart, and terminate executions
 - Step over / into / out at both execution and thread level
 - Set and list breakpoints; monitor watch expressions
+- **Live thread-context inspection** — read and write a running or paused thread's *runtime* state
+  (`inspect_thread_context`, `evaluate_in_thread_context`, `get_runtime_variable`,
+  `set_runtime_variable`, `get_runstate_summary`): live variable values, the execution cursor, and
+  "Set Next Step" — a scope the ordinary expression tools cannot reach
 
 ### Adapters & Step Types
 - Load/unload adapters (LabVIEW, CVI, .NET, Python)
@@ -90,7 +111,10 @@ This MCP Server can be used with any AI tool that supports MCPs. The instruction
 - **Typed code-module configuration** — dedicated tools to configure a step's module per adapter
   (`configure_dotnet_module`, `configure_dll_module`, `configure_labview_module`,
   `configure_python_module`, `configure_sequence_call_module`); the step's adapter is switched
-  automatically when needed
+  automatically when needed, and the code module's parameter interface is loaded afterwards
+  (the editor's "Load Prototype")
+- Every module setting is **verified by reading it back**, so the result reports only what really
+  landed on the step — a target that could not be resolved is named instead of silently accepted
 
 ### Reporting & Results
 - Generate HTML/XML/TXT reports for completed executions
@@ -111,7 +135,9 @@ This MCP Server can be used with any AI tool that supports MCPs. The instruction
   regex, whole-word and case options; replace operates on string-valued properties
 - Run the NI Sequence Analyzer and return messages sorted by severity
 - **Detailed analysis** (`analyze_sequence_file`) — typed messages with severity counts and a
-  minimum-severity filter
+  minimum-severity filter. Pass `async: true` and poll `get_analysis_status` for large files: the
+  analyzer loads every step's code module, so a run can take minutes and exceed the MCP request
+  window. A run that produces zero messages is reported as `resultSuspect` rather than "clean"
 
 ### User & Privilege Management
 - List users and read the currently logged-in user
@@ -131,11 +157,29 @@ This MCP Server can be used with any AI tool that supports MCPs. The instruction
 
 ---
 
+## Agents
+
+Three Claude agents ship next to the executable (`.claude\agents\`) and build on the read-only
+tools. Run `TestStandMCP.exe --setup-agents` once to make Claude Code see them in every project.
+
+| Agent | Turns a `.seq` into |
+|---|---|
+| `teststand-doc-generator` | A **Word document** — title, real table of contents, one section per sequence with its parameter table and a flow-indented step listing (original TestStand icons, tinted), plus a rendered call-dependency diagram |
+| `teststand-presentation-generator` | A single self-contained **HTML presentation** — Setup/Main/Cleanup phase cards, clickable subsequences, and a code-vs-flowchart compare view with the original step icons in full color |
+| `teststand-sequence-builder` | A **new sequence** built from a flowchart or written test description, asking per step whether to link a `SequenceCall` or insert a placeholder |
+
+Both generators are read-only toward TestStand and can be given the output language.
+
+---
+
 ## Useful CLI Flags
 
 ```bat
-TestStandMCP.exe --version     # Print version and exit
-TestStandMCP.exe --list-tools  # Print all registered tool names and descriptions
+TestStandMCP.exe --version       # Print version and exit
+TestStandMCP.exe --list-tools    # Print all registered tool names and descriptions
+TestStandMCP.exe --setup-agents  # Junction %USERPROFILE%\.claude\agents to the agents
+                                 # shipped next to the exe, so Claude Code picks them
+                                 # up in every project (see "Agents" above)
 ```
 
 ---
@@ -153,14 +197,10 @@ TestStandMCP.exe --list-tools  # Print all registered tool names and description
 
 ---
 
-## License
-
-See `LICENSE` file in this repository.
----
-
 ## Build
 
-Build with the **x86 .NET 8 SDK** (the TestStand engine COM server is 32-bit):
+`PlatformTarget=x86` is what makes the output a 32-bit executable, so it can load the in-process
+32-bit TestStand COM server. The SDK itself may be x64:
 
 ```bat
 dotnet build --configuration Debug --framework net8.0-windows -p:Platform=x86
@@ -172,17 +212,21 @@ The output executable is placed at:
 bin\x86\Debug\net8.0-windows\TestStandMCP.exe
 ```
 
-To rebuild after code changes, kill any running instance first:
+To rebuild after code changes, kill any running instance first — the engine keeps the file locked:
 
 ```bat
 taskkill /F /IM TestStandMCP.exe
 dotnet build --configuration Debug --framework net8.0-windows -p:Platform=x86
 ```
 
+Run the integration tests (they drive a real TestStand engine, so TestStand must be installed):
+
+```bat
+dotnet test Test\TestExecution\TestStandMCP.IntegrationTests.csproj --configuration Debug --framework net8.0-windows
+```
+
 ---
 
-> **Beta Notice**
->
-> This is a **beta version**. The software is provided as-is for evaluation and development purposes.
-> No warranty is given and no liability is accepted for correctness, reliability, or fitness for any
-> particular purpose. Use in production test systems is at your own risk.
+## License
+
+See the `LICENSE` file in this repository.
