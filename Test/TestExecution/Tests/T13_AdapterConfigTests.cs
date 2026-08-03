@@ -17,6 +17,11 @@ public class T13_AdapterConfigTests : TestBase
         await Ts.InsertStepAsync(TempSeqFile, Seq, Grp, stepType, stepName);
     }
 
+    /// <summary>
+    /// Asserts the step's own property tree, not just the tool's report — the weakness that let the
+    /// .NET module bug survive. Audited 2026-08-03: the CommonCModule properties really do land in
+    /// TS.SData.Call.LibPath / .Func.
+    /// </summary>
     [Test]
     public async Task ConfigureDllModule_AppliesPathAndFunction()
     {
@@ -28,7 +33,59 @@ public class T13_AdapterConfigTests : TestBase
         Assert.That(result, Is.Not.Null);
         Assert.That(result.AppliedSettings, Does.ContainKey("dllPath"),
             "DLL path should have been applied to the C/CVI module");
+        Assert.That(await ReadSDataLeafAsync("DllStep", "TS.SData.Call", "LibPath"),
+            Is.EqualTo(@"C:\Dummy\mylib.dll"), "the DLL path must reach the step, not just the report");
+        Assert.That(await ReadSDataLeafAsync("DllStep", "TS.SData.Call", "Func"),
+            Is.EqualTo("MyEntryPoint"));
         TestContext.WriteLine($"Adapter: {result.Adapter}; applied: {result.AppliedSettings.Count}");
+    }
+
+    /// <summary>Same tree-level assertion for the LabVIEW adapter: VIPath lands in
+    /// TS.SData.ViCall.VIPath. load_prototype is off so the test needs no LabVIEW.</summary>
+    [Test]
+    public async Task ConfigureLabViewModule_WritesViPathToTheStep()
+    {
+        await PrepareStepAsync("LvStep");
+
+        var result = await Ts.ConfigureLabViewModuleAsync(TempSeqFile, Seq, Grp, "LvStep",
+            @"C:\Dummy\MyVi.vi", save: true, loadPrototype: false);
+
+        Assert.That(result.AppliedSettings, Does.ContainKey("viPath"));
+        Assert.That(await ReadSDataLeafAsync("LvStep", "TS.SData.ViCall", "VIPath"),
+            Is.EqualTo(@"C:\Dummy\MyVi.vi"));
+    }
+
+    /// <summary>
+    /// The object-oriented Python settings were previously unexercised — the old test only reached
+    /// module_path + function_name. These all live in the STEP's tree (TS.SData.PythonCall.*), so a
+    /// wrong leaf name would throw rather than configure. Note the leaf is ClassInstanceLocation even
+    /// though the typed interface calls the property ClassInstanceLocationExpr.
+    /// </summary>
+    [Test]
+    public async Task ConfigurePythonModule_WritesObjectOrientedSettingsToTheStep()
+    {
+        await PrepareStepAsync("PyStep");
+
+        var result = await Ts.ConfigurePythonModuleAsync(TempSeqFile, Seq, Grp, "PyStep",
+            @"C:\Dummy\mymod.py", "do_thing", save: true, loadPrototype: false,
+            className: "MyClass", classInstanceLocation: "FileGlobals.inst",
+            operationType: 1, operationScope: 2, pythonVersion: "3.11");
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(result.AppliedSettings, Does.ContainKey("className"));
+            Assert.That(result.AppliedSettings, Does.ContainKey("operationType"));
+            Assert.That(result.AppliedSettings, Does.ContainKey("pythonVersion"));
+        });
+
+        const string pc = "TS.SData.PythonCall";
+        Assert.That(await ReadSDataLeafAsync("PyStep", pc, "ModulePath"), Is.EqualTo(@"C:\Dummy\mymod.py"));
+        Assert.That(await ReadSDataLeafAsync("PyStep", pc, "FunctionOrAttributeName"), Is.EqualTo("do_thing"));
+        Assert.That(await ReadSDataLeafAsync("PyStep", pc, "ClassName"), Is.EqualTo("MyClass"));
+        Assert.That(await ReadSDataLeafAsync("PyStep", pc, "ClassInstanceLocation"), Is.EqualTo("FileGlobals.inst"));
+        Assert.That(await ReadSDataLeafAsync("PyStep", pc, "OperationType"), Is.EqualTo("1"));
+        Assert.That(await ReadSDataLeafAsync("PyStep", pc, "OperationScope"), Is.EqualTo("2"));
+        Assert.That(await ReadSDataLeafAsync("PyStep", pc, "PythonVersion"), Is.EqualTo("3.11"));
     }
 
     [Test]
@@ -44,20 +101,85 @@ public class T13_AdapterConfigTests : TestBase
 
         Assert.That(result.AppliedSettings, Does.ContainKey("targetSequenceName"));
         Assert.That(result.AppliedSettings["targetSequenceName"], Is.EqualTo("TargetSeq"));
+        // Tree-level: the engine reads the callee off SeqName / UseCurFile, not off the report.
+        Assert.That(await ReadSDataLeafAsync("CallStep", "TS.SData", "SeqName"), Is.EqualTo("TargetSeq"));
+        Assert.That(await ReadSDataLeafAsync("CallStep", "TS.SData", "UseCurFile"), Is.EqualTo("True"));
     }
 
+    /// <summary>Reads one leaf under the step's TS.SData subtree, so the assertions below check the
+    /// property tree the ENGINE will execute rather than only the tool's own report.</summary>
+    private async Task<string?> ReadSDataLeafAsync(string stepName, string lookup, string leafName)
+    {
+        var node = await Ts.GetPropertyTreeAsync("SequenceFile", TempSeqFile, lookup,
+            maxDepth: 2, includeHidden: true, maxArrayElements: 10,
+            sequenceName: Seq, stepGroup: Grp, stepName: stepName);
+        var leaf = node.Children?.Find(c => c.Name == leafName);
+        return leaf?.Value?.ToString();
+    }
+
+    /// <summary>
+    /// Regression guard for the silent-write bug: <c>configure_dotnet_module</c> used to report
+    /// assemblyPath and methodName as applied while writing NEITHER, because SetAssembly was called
+    /// with swapped arguments and the member name went to <c>NameOfMethodToCreate</c> (code
+    /// generation) instead of <c>MemberName</c>. The step then executed as a no-op that still
+    /// reported Passed. Asserting the step's own property tree — not just AppliedSettings — is the
+    /// point: the predecessor test only checked DoesNotThrow + a non-empty dictionary, which is
+    /// exactly why the bug survived.
+    /// </summary>
     [Test]
-    public async Task ConfigureDotNetModule_DoesNotThrow()
+    public async Task ConfigureDotNetModule_WritesAssemblyClassAndMemberToTheStep()
+    {
+        await PrepareStepAsync("DotNetStep");
+        const string asm = @"C:\Dummy\MyAssembly.dll";
+
+        var result = await Ts.ConfigureDotNetModuleAsync(TempSeqFile, Seq, Grp, "DotNetStep",
+            asm, "MyNamespace.MyClass", "MyMethod", save: true);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(result.AppliedSettings, Does.ContainKey("assemblyPath"));
+            Assert.That(result.AppliedSettings, Does.ContainKey("className"));
+            Assert.That(result.AppliedSettings, Does.ContainKey("methodName"));
+            Assert.That(result.AppliedSettings, Does.ContainKey("memberType"));
+        });
+
+        // The engine reads the assembly off TS.SData and the member off the call entry — the root
+        // TS.SData.FunctionName stays empty even for a correctly configured step, so asserting that
+        // one would be wrong.
+        Assert.That(await ReadSDataLeafAsync("DotNetStep", "TS.SData", "AssemblyPath"),
+            Is.EqualTo(asm), "the assembly path must reach the step, not just the result report");
+        Assert.That(await ReadSDataLeafAsync("DotNetStep", "TS.SData.Calls[0]", "MemberName"),
+            Is.EqualTo("MyMethod"), "the member to invoke lives in TS.SData.Calls[0].MemberName");
+        Assert.That(await ReadSDataLeafAsync("DotNetStep", "TS.SData.Calls[0]", "ClassName"),
+            Is.EqualTo("MyNamespace.MyClass"));
+        Assert.That(await ReadSDataLeafAsync("DotNetStep", "TS.SData.Calls[0]", "MemberType"),
+            Is.EqualTo("1"), "1 = DotNetMember_CallMethod; 0 (DoNotCall) executes as a silent no-op");
+
+        TestContext.WriteLine($".NET applied: {string.Join(",", result.AppliedSettings.Keys)}");
+        TestContext.WriteLine($"note: {result.Note}");
+    }
+
+    /// <summary>
+    /// The other half of the honesty contract: an assembly that cannot be loaded must NOT be reported
+    /// as a resolved member, and the reason must reach the caller via Note. C:\Dummy\MyAssembly.dll
+    /// does not exist, so resolution has to fail on every machine.
+    /// </summary>
+    [Test]
+    public async Task ConfigureDotNetModule_UnresolvableAssembly_IsReportedNotFakedAsSuccess()
     {
         await PrepareStepAsync("DotNetStep");
 
-        Assert.DoesNotThrowAsync(async () =>
+        var result = await Ts.ConfigureDotNetModuleAsync(TempSeqFile, Seq, Grp, "DotNetStep",
+            @"C:\Dummy\MyAssembly.dll", "MyNamespace.MyClass", "MyMethod", save: true);
+
+        Assert.Multiple(() =>
         {
-            var result = await Ts.ConfigureDotNetModuleAsync(TempSeqFile, Seq, Grp, "DotNetStep",
-                @"C:\Dummy\MyAssembly.dll", "MyNamespace.MyClass", "MyMethod", save: true);
-            Assert.That(result.AppliedSettings, Is.Not.Empty);
-            TestContext.WriteLine($".NET applied: {string.Join(",", result.AppliedSettings.Keys)}");
+            Assert.That(result.AppliedSettings, Does.Not.ContainKey("memberResolved"),
+                "a member that cannot be resolved must never be reported as resolved");
+            Assert.That(result.Note, Is.Not.Null.And.Contains("could not be resolved"),
+                "the caller has to learn WHY the step will not call anything");
         });
+        TestContext.WriteLine($"note: {result.Note}");
     }
 
     [Test]

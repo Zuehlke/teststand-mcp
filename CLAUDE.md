@@ -524,6 +524,39 @@ descriptions; the cross-cutting rules below apply regardless of which tool you c
 - Related signature traps: `Execution.Restart(bool breakOnEntry)` takes an argument; a `Thread`'s depth
   is **`CallStackSize`** (no `StackDepth`) and it has **no `State`** — read the owning execution's run
   state. (`T23`–`T29`; memories `teststand-getstates-reflection-fails`, `teststand-findfile-modal-prompt`.)
+- **A "success" flag from the interop is not evidence — READ THE VALUE BACK.** Two measured cases in
+  `configure_dotnet_module` alone (2026-08-03): `SetAssembly` was called as `SetAssembly(path, true)`
+  when the signature is `SetAssembly(DotNetModuleAssemblyLocations location, string path)`, so it threw
+  into a `catch` that "recovered" by setting a property named `Assembly` — which does not exist — while
+  `appliedSettings` reported the path as applied; and **`DotNetModule.LoadMemberInfo` returns `true`
+  even for an assembly path that does not exist** (`C:\Dummy\MyAssembly.dll`), so it cannot be used to
+  decide whether a member resolved. The real check is `DotNetModule.Calls[0].IsCallValid(out reason)`
+  (plus `DotNetModule.AssemblyWarnings` when the reason comes back empty). Report only what a read-back
+  confirms; anything else belongs in the result's `note`. Pinned by `T13`.
+- **The other four `configure_*_module` tools were AUDITED against their typed interfaces AND the step
+  property tree (2026-08-03) — they are correct, do not re-investigate.** Verified landing spots:
+  `configure_dll_module` → `CommonCModule.ModulePath`/`.FunctionName` → `TS.SData.Call.LibPath`/`.Func`;
+  `configure_labview_module` → `LabVIEWModule.VIPath` → `TS.SData.ViCall.VIPath`;
+  `configure_python_module` → `PythonModule.ModulePath`/`.FunctionOrAttributeName` plus the raw
+  `TS.SData.PythonCall.*` writes for the object-oriented settings (note the leaf is
+  **`ClassInstanceLocation`** while the typed property is `ClassInstanceLocationExpr`);
+  `configure_sequence_call_module` → `SeqName`/`UseCurFile`/`SFPath`/`ThreadOpt`/`AsyncThreadExpr`.
+  All now go through `TrySetAndVerifyModuleProp` (set + read back), and `T13` asserts the resulting
+  TREE, not just `AppliedSettings`. The `|| "ModulePath"` / `|| "FunctionName"` fallbacks they used to
+  carry were dead code — those properties do not exist on `LabVIEWModule`/`PythonModule`/`CVIModule`.
+
+### Where a .NET step keeps its configuration (`T13`, 2026-08-03)
+- The member to invoke lives in **`TS.SData.Calls[0]`** (`ClassName`, `MemberName`, `MemberType`,
+  `Static`, `Params`), NOT in `TS.SData.FunctionName` — that root property stays EMPTY even on a
+  correctly configured step, so do not assert on it. The assembly, however, IS at the root:
+  **`TS.SData.AssemblyPath`** (+ `AssemblyLocation`: 0 = file on disk, 1 = GAC).
+- `MemberType` must be **1** (`DotNetMember_CallMethod`). At the default **0** (`DoNotCall`) the step
+  executes as a **silent no-op that still reports `Passed`** — the failure mode that hid the bug above.
+- `NameOfMethodToCreate` is a REAL settable property for the adapter's code GENERATION, not the member
+  to call. Writing the method name there succeeds and configures nothing.
+- Do **not** pre-set `MemberFlags`. Try the untouched lookup first and fall back to the Static bit
+  (`1`) only when `IsCallValid` rejects the result; `configure_dotnet_module` does this and reports
+  `staticFallbackUsed`. A static member can validate with `Calls[0].Static` still `false`.
 
 ### Engine lifecycle & file handling
 - **Single in-process engine only.** A second engine cannot be torn down cleanly
