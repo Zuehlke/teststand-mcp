@@ -48,6 +48,11 @@
   <ItemGroup>
     <None Update="CLAUDE.md" CopyToOutputDirectory="PreserveNewest" />
     <None Update="README.md" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The configuration is loaded with SetBasePath(AppContext.BaseDirectory), so appsettings.json
+         only ever takes effect from NEXT TO THE EXE. Without this copy the file was read from
+         nowhere: AddJsonFile is optional, so it failed silently, and every key in it — including the
+         long-dead TestStand:EnginePath — looked configurable while being unreachable. -->
+    <None Update="appsettings.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include=".claude\agents\**\*"
           Link=".claude\agents\%(RecursiveDir)%(Filename)%(Extension)"
           CopyToOutputDirectory="PreserveNewest" />
