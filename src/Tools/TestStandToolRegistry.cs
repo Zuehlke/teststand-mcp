@@ -69,7 +69,26 @@ public class TestStandToolRegistry
                 @"Accepts the engine DLL (…\Bin\teapi.dll), the Bin directory, or the install root " +
                 @"(…\National Instruments\TestStand 2026). Leave empty to resolve automatically " +
                 "(engine Bin -> %TESTSTANDBIN% -> COM registration -> newest install). A path that " +
-                "does not exist is rejected with an error. Does NOT select which engine is loaded."),
+                "does not exist is rejected with an error. Does NOT select which engine is loaded.")
+             .AddOptional("tsenv_path", "string",
+                "Optional alternate TestStand ENVIRONMENT: the path to a .tsenv file, the in-process " +
+                @"equivalent of the Sequence Editor's /env switch. It redirects the engine's " +
+                "CommonAppData/Public/LocalAppData roots, which is how a station isolates several " +
+                "products from each other. Pass 'auto' to search upwards from tsenv_search_from. " +
+                "IMPORTANT: the environment can only " +
+                "be chosen BEFORE the engine is created, so it is fixed for the life of the server " +
+                "process — calling this again with a different path is an error, restart the server to " +
+                "switch. Omit it to use the global environment (the previous behaviour). The result " +
+                "reports the environment the engine actually ended up in, verified against the engine, " +
+                "and get_engine_paths shows the redirected roots.")
+             .AddOptional("tsenv_search_from", "string",
+                "Starting point for tsenv_path='auto': a .seq file or a directory. The search walks up " +
+                "the ancestors and checks each one BOTH in itself AND in its immediate subdirectories, " +
+                @"so the common layout <root>\Config\Product.tsenv next to " +
+                @"<root>\Components\Sequences\Main.seq resolves (Config is a sibling of the walked path, " +
+                "never an ancestor). One level deep only; the directory itself wins over its " +
+                "subdirectories, and several .tsenv files at the same ancestor are reported as " +
+                "ambiguous rather than guessed."),
             ConnectEngineAsync);
 
         Register("disconnect_engine",
@@ -3581,11 +3600,28 @@ public class TestStandToolRegistry
 
     private async Task<CallToolResult> ConnectEngineAsync(JsonElement? args)
     {
-        var path   = args?.GetStringOrNull("engine_path");
-        var result = await _ts.ConnectAsync(path);
-        return result
-            ? Ok("Successfully connected to NI TestStand engine.")
-            : Error("Failed to connect to TestStand engine. Ensure NI TestStand is installed.");
+        var path       = args?.GetStringOrNull("engine_path");
+        var tsenv      = args?.GetStringOrNull("tsenv_path");
+        var searchFrom = args?.GetStringOrNull("tsenv_search_from");
+
+        var result = await _ts.ConnectAsync(path, tsenv, searchFrom);
+        if (!result)
+            return Error("Failed to connect to TestStand engine. Ensure NI TestStand is installed.");
+
+        // Without an environment the message is byte-identical to what it always was; the extra lines
+        // only appear when the engine really is running redirected, and then they are the one place a
+        // caller can see WHICH environment everything below will resolve against.
+        var text = "Successfully connected to NI TestStand engine.";
+        if (_ts.ActiveEnvironmentPath is not null)
+        {
+            var paths = await _ts.GetEnginePathsAsync();
+            text += $"\nEnvironment : {_ts.ActiveEnvironmentPath}" +
+                    (paths.EnvironmentDetectedFrom.Length > 0 ? $" (auto-detected in {paths.EnvironmentDetectedFrom})" : "") +
+                    $"\nCommonAppData: {paths.CommonAppDataDirectory}" +
+                    $"\nPublic       : {paths.PublicDirectory}" +
+                    $"\nLocalAppData : {paths.LocalAppDataDirectory}";
+        }
+        return Ok(text);
     }
 
     private async Task<CallToolResult> DisconnectEngineAsync(JsonElement? _)

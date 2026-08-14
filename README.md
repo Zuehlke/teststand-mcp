@@ -60,6 +60,7 @@ This MCP Server can be used with any AI tool that supports MCPs. The instruction
 - Connect / disconnect from the TestStand engine
 - Read station info, globals, options, and process model
 - Validate expressions and expand path macros
+- Connect against an alternate **TestStand environment** (`.tsenv`) — see below
 
 ### Sequence File Management
 - Open, create, save, and close `.seq` files
@@ -154,6 +155,115 @@ This MCP Server can be used with any AI tool that supports MCPs. The instruction
 - Read and write CSV files via the TestStand **CSV record streams**
 - Create result-log helpers, batch-sync objects, and set up interactive step execution
   (model/execution-bound features; availability depends on engine context)
+
+---
+
+## TestStand Environments (`.tsenv`)
+
+A station that hosts several products usually isolates each one's TestStand `CommonAppData`,
+`Public` and `LocalAppData` directories in a separate **environment**. The Sequence Editor selects
+one with its `/env <path.tsenv>` command-line switch; this server does the same thing in-process.
+
+By default nothing changes: without an environment the server connects to the **global** one exactly
+as before.
+
+### Configuring it
+
+The environment is applied when the engine is created and is then **fixed for the life of the server
+process**, so it is a property of the server, not of a call. Configure it where the server is
+defined and restart the server to change it.
+
+**The recommended way — pin it in your MCP host's config** (`claude_desktop_config.json`,
+`.mcp.json`, …), so it holds no matter which tool runs first:
+
+```json
+{
+  "mcpServers": {
+    "teststand": {
+      "command": "C:\\path\\to\\TestStandMCP.exe",
+      "args": ["--TestStand:EnvironmentPath=C:\\MyProduct\\Config\\MyProduct.tsenv"]
+    }
+  }
+}
+```
+
+An environment variable does the same job if you prefer `env` over `args` — note the double
+underscore, which is how .NET maps a nested key:
+
+```json
+"env": { "TESTSTAND_MCP_TestStand__EnvironmentPath": "C:\\MyProduct\\Config\\MyProduct.tsenv" }
+```
+
+**Or in `appsettings.json`** — the one **next to the executable**, which is the only one that is
+read. The copy in the repository root is just the source; the build deploys it to the output
+directory, so edit the source and rebuild rather than the deployed copy:
+
+```jsonc
+"TestStand": {
+  "EnvironmentPath": "C:\\MyProduct\\Config\\MyProduct.tsenv",
+  "EnvironmentAutoDetect": false,
+  "ConnectTimeoutSeconds": 120
+}
+```
+
+**Or per call** — useful for a one-off, but see the warning below:
+
+```
+connect_engine(tsenv_path: "C:\\MyProduct\\Config\\MyProduct.tsenv")
+connect_engine(tsenv_path: "auto", tsenv_search_from: "C:\\MyProduct\\Components\\Sequences\\Main.seq")
+```
+
+> **`connect_engine(tsenv_path: …)` has to be the first engine call of the session.** Any other tool
+> before it connects the engine implicitly — to the *global* environment — and the environment can no
+> longer be changed afterwards; you then get an error telling you to restart the server. The config
+> routes above have no such ordering requirement, which is why they are the recommended ones.
+
+**Precedence**, highest first: the `connect_engine` argument → `--TestStand:EnvironmentPath=…` on the
+command line → the `TESTSTAND_MCP_…` environment variable → `appsettings.json`. `EnvironmentAutoDetect`
+and `ConnectTimeoutSeconds` have no tool parameter; they come from the three configuration channels
+only, in the same order.
+
+New parameters need a **fresh MCP session**: clients cache the tool catalog when the session starts,
+so `tsenv_path` and `tsenv_search_from` only appear after reconnecting the server.
+
+### How `auto` finds the file
+
+`auto` walks up from the given `.seq` (or directory) and checks every ancestor **both in itself and
+in its immediate subdirectories** — so the common layout
+
+```
+C:\Product\Config\Product.tsenv            <- the environment
+C:\Product\Components\Sequences\Main.seq   <- the sequence files
+```
+
+resolves at `C:\Product`, even though `Config` is a *sibling* of the walked path and never an
+ancestor of it. The scan is one level deep, the directory itself wins over its subdirectories, and
+several `.tsenv` files at the same ancestor are reported as **ambiguous** rather than guessed. For a
+layout this does not cover, name the file with `tsenv_path` instead.
+
+Setting `EnvironmentAutoDetect: true` applies the same search to the first sequence file opened, so
+callers need not pass anything — it is off by default because it pins the environment implicitly,
+from a file path.
+
+### Three things worth knowing
+
+- **The environment is fixed for the life of the server process.** TestStand only accepts it before
+  the engine is created, so `connect_engine` with a *different* `tsenv_path` is an error — restart
+  the server to switch. A lazy reconnect after a server restart keeps the environment it had.
+- **It is verified, not assumed.** After connecting, the engine is asked what it actually did
+  (`GetEnvironmentPath`, plus the effective roots compared against their global counterparts). If the
+  redirect did not take, the connect fails instead of silently working against the wrong
+  `CommonAppData`. `get_engine_paths` reports `environmentPath`, `environmentActive` and the three
+  effective directories.
+- **A bad environment fails loudly and early.** A `.tsenv` whose `CommonAppData` TestStand has never
+  initialized (no `Cfg\GeneralEngine.cfg`) makes the engine raise an interactive dialog no headless
+  caller can answer. The file is validated up front, TestStand's own `CanInitializeEngine()` is asked
+  before the engine is constructed, and the connect itself is bounded by `ConnectTimeoutSeconds` — so
+  a misconfiguration returns an error naming the defect instead of hanging the session.
+
+`open_sequence_file` additionally warns when a file belongs to a *different* environment than the one
+the engine runs in. The file still opens; the warning exists because its process models, type
+palettes and station globals resolve from another `CommonAppData`.
 
 ---
 

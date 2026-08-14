@@ -124,6 +124,20 @@ internal class Program
 
         var sp = services.BuildServiceProvider();
 
+        // ── Station defaults ──────────────────────────────────────────────────
+        // Read here rather than injecting IConfiguration into the service, so TestStandService stays
+        // framework-agnostic (and constructible from the tests with nothing but a logger). The
+        // TestStand ENVIRONMENT belongs in configuration, not in a per-call parameter: it can only be
+        // chosen before the engine is created, so it is a property of the server process, and MCP
+        // hosts configure a server exactly once — through args/env in their mcp.json.
+        // Deliberately NOT reading the older TestStand:AutoConnect / TestStand:EnginePath keys: they
+        // have never been consumed, and quietly activating them now would change behaviour on any
+        // station that filled them in expecting them to work.
+        sp.GetRequiredService<ITestStandService>().ApplyStationDefaults(
+            environmentPath:       config["TestStand:EnvironmentPath"],
+            environmentAutoDetect: bool.TryParse(config["TestStand:EnvironmentAutoDetect"], out var autoDetect) && autoDetect,
+            connectTimeoutSeconds: int.TryParse(config["TestStand:ConnectTimeoutSeconds"], out var timeout) ? timeout : 0);
+
         // ── Run ───────────────────────────────────────────────────────────────
         var logger = sp.GetRequiredService<ILogger<Program>>();
         logger.LogInformation("TestStand MCP Server v1.0.0 starting...");

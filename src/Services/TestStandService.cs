@@ -55,6 +55,12 @@ using NiDotNetAsmLocations = NationalInstruments.TestStand.Interop.AdapterAPI.Do
 using NiDotNetMemberTypes = NationalInstruments.TestStand.Interop.AdapterAPI.DotNetModuleMemberTypes;
 using NiPropObjType       = NationalInstruments.TestStand.Interop.API.PropertyObjectType;
 using NiPropRepresentations = NationalInstruments.TestStand.Interop.API.PropertyRepresentations;
+// TestStand ENVIRONMENT support (.tsenv). The settings coclass has no registered ProgID, so unlike the
+// engine it is constructed directly; its SetEnvironmentPath is only legal BEFORE the first engine
+// exists. NiTestStandPaths carries both the effective roots and their Global* counterparts — comparing
+// the two is what proves an environment actually took effect.
+using NiEngineInitSettings = NationalInstruments.TestStand.Interop.API.EngineInitializationSettingsClass;
+using NiTestStandPaths    = NationalInstruments.TestStand.Interop.API.TestStandPaths;
 
 namespace TestStandMCP.Services;
 
@@ -66,12 +72,29 @@ public interface ITestStandService : IDisposable
     // Engine
     /// <summary>Returns station and engine information for the currently connected TestStand engine.</summary>
     Task<StationInfo> GetStationInfoAsync();
-    /// <summary>Connects to (or creates) the TestStand engine, optionally using the specified engine path.</summary>
-    Task<bool> ConnectAsync(string? enginePath = null);
+    /// <summary>Connects to (or creates) the TestStand engine, optionally using the specified engine path.
+    /// <paramref name="tsenvPath"/> selects an alternate TestStand ENVIRONMENT (a <c>.tsenv</c> file, the
+    /// in-process equivalent of the Sequence Editor's <c>/env</c> switch) — or the literal <c>auto</c>,
+    /// which searches upwards from <paramref name="tsenvSearchFrom"/>. The environment can only be chosen
+    /// at the FIRST connect of the process; see the implementation for why.</summary>
+    Task<bool> ConnectAsync(string? enginePath = null, string? tsenvPath = null, string? tsenvSearchFrom = null);
     /// <summary>Disconnects from and shuts down the TestStand engine.</summary>
     Task DisconnectAsync();
     /// <summary>Gets a value indicating whether the service is currently connected to a TestStand engine.</summary>
     bool IsConnected { get; }
+    /// <summary>
+    /// Applies the station-level defaults read from configuration (appsettings.json, environment
+    /// variables, command line) once at startup. Kept as an explicit call rather than an
+    /// <c>IConfiguration</c> constructor dependency so the service stays framework-agnostic and
+    /// constructible from the tests with nothing but a logger.
+    /// </summary>
+    /// <param name="environmentPath">Default <c>.tsenv</c> to activate when no caller passes one.</param>
+    /// <param name="environmentAutoDetect">Search for a <c>.tsenv</c> above an opened sequence file.</param>
+    /// <param name="connectTimeoutSeconds">Bound for a single connect attempt; 0 keeps the default.</param>
+    void ApplyStationDefaults(string? environmentPath, bool environmentAutoDetect, int connectTimeoutSeconds);
+    /// <summary>The <c>.tsenv</c> the connected engine actually runs in, or null for the global
+    /// environment. Latched at connect and immutable for the life of the process.</summary>
+    string? ActiveEnvironmentPath { get; }
 
     // Sequence Files
     /// <summary>Opens the sequence file at the given path and returns its metadata.</summary>
@@ -1085,6 +1108,33 @@ public sealed class TestStandService : ITestStandService
     // engine threads (a second live engine hangs teardown — see teststand-testhost-teardown-hang).
     private readonly object _connectLock = new();
 
+    // ── TestStand environment (.tsenv) ─────────────────────────────────────────
+    // The environment redirects the engine's CommonAppData/Public/LocalAppData roots. It is applied
+    // through EngineInitializationSettings.SetEnvironmentPath, which is only legal BEFORE the engine
+    // is constructed — so it is handed to the engine thread through _requestedEnvPath and applied
+    // there, immediately before the activation. That placement makes the ordering structural rather
+    // than a convention someone can refactor away.
+    private string? _requestedEnvPath;      // pending; read on the engine thread
+    private string? _activeEnvPath;         // latched after a verified connect; null = global environment
+    private string? _envDetectedFrom;       // directory an auto-detected .tsenv was found in
+    private string _envReadBackPath = "";   // Engine.GetEnvironmentPath() — the engine's own answer
+    private bool _envActive;                // proven active: read back and/or paths differ from Global*
+    // Station-level defaults from configuration; ApplyStationDefaults fills them once at startup.
+    private string? _defaultEnvPath;
+    private bool _envAutoDetect;
+    private int _connectTimeoutSeconds = DefaultConnectTimeoutSeconds;
+    // A connect that timed out leaves its engine thread parked (typically on a modal dialog nobody
+    // can answer). Starting a second engine next to it would hang teardown, so the service latches
+    // into "restart required" instead of retrying — including for EnsureConnected's lazy reconnect.
+    private string? _connectFatalReason;
+
+    /// <summary>Bound for a single connect attempt. Generous, because a cold engine plus licensing
+    /// genuinely takes a while — but finite, unlike the unbounded wait this replaced.</summary>
+    private const int DefaultConnectTimeoutSeconds = 120;
+
+    /// <inheritdoc/>
+    public string? ActiveEnvironmentPath => _activeEnvPath;
+
     // Wait efficiently (no busy-spin) until a window message arrives or the timeout elapses; the
     // PeekMessage/TranslateMessage/DispatchMessage P/Invokes + the PumpMessages() helper already
     // exist further down in this file and are reused by the engine-thread pump loop.
@@ -1134,7 +1184,103 @@ public sealed class TestStandService : ITestStandService
     // ── Engine ───────────────────────────────────────────────────────────────
 
     /// <inheritdoc/>
-    public async Task<bool> ConnectAsync(string? enginePath = null)
+    public void ApplyStationDefaults(string? environmentPath, bool environmentAutoDetect, int connectTimeoutSeconds)
+    {
+        _defaultEnvPath = string.IsNullOrWhiteSpace(environmentPath) ? null : environmentPath!.Trim();
+        _envAutoDetect  = environmentAutoDetect;
+        if (connectTimeoutSeconds > 0) _connectTimeoutSeconds = connectTimeoutSeconds;
+
+        if (_defaultEnvPath is not null)
+            _logger.LogInformation("Station default TestStand environment: '{Env}'.", _defaultEnvPath);
+        if (_envAutoDetect)
+            _logger.LogInformation("TestStand environment auto-detection is ENABLED — the first sequence " +
+                                   "file opened pins the environment for this process.");
+    }
+
+    /// <summary>
+    /// Decides which environment this connect should use, in precedence order: an explicit
+    /// <paramref name="tsenvPath"/> (literal path, or <c>auto</c> to search) → the station default from
+    /// configuration → auto-detection above <paramref name="tsenvSearchFrom"/> when it is switched on.
+    /// Returns null for "stay in the global environment", which is the untouched legacy behaviour.
+    /// </summary>
+    private string? ResolveRequestedEnvironment(string? tsenvPath, string? tsenvSearchFrom)
+    {
+        // 1. Explicit argument.
+        if (!string.IsNullOrWhiteSpace(tsenvPath))
+        {
+            if (!TestStandEnvironmentLocator.IsAutoSentinel(tsenvPath))
+                return TestStandEnvironmentLocator.NormalizeTsenvPath(tsenvPath)
+                    ?? throw new ArgumentException(
+                        $"tsenv_path '{tsenvPath}' is not a usable file path.", nameof(tsenvPath));
+
+            if (string.IsNullOrWhiteSpace(tsenvSearchFrom))
+                throw new ArgumentException(
+                    "tsenv_path='auto' needs a starting point — pass tsenv_search_from (a .seq file or " +
+                    "a directory) so the search knows where to walk up from.", nameof(tsenvSearchFrom));
+
+            return DetectEnvironmentOrThrow(tsenvSearchFrom!, explicitlyRequested: true);
+        }
+
+        // 2. A RECONNECT stays where it was. EnsureConnected's one-shot lazy reconnect passes no
+        // environment, so without this the engine would come back up in the GLOBAL environment after
+        // the MCP host restarted the server mid-session — and every subsequent read and write would
+        // quietly target the wrong CommonAppData. The most dangerous line in this file.
+        //
+        // _requestedEnvPath covers the second shape of the same hazard: an environment that was
+        // accepted here but rejected LATER on the engine thread (CanInitializeEngine said no, or the
+        // redirect did not take) leaves no active environment behind — without this, the next tool
+        // call's lazy reconnect would quietly succeed against the global one. Retrying the same
+        // environment fails the same way, loudly, which is the honest outcome. Pre-engine validation
+        // failures never reach this: they throw before _requestedEnvPath is assigned, so fixing a
+        // typo and calling connect_engine again just works.
+        if ((_activeEnvPath ?? _requestedEnvPath) is { } previous) return previous;
+
+        // 3. Station default from configuration.
+        if (_defaultEnvPath is not null)
+            return TestStandEnvironmentLocator.NormalizeTsenvPath(_defaultEnvPath)
+                ?? throw new ArgumentException(
+                    $"The configured TestStand:EnvironmentPath '{_defaultEnvPath}' is not a usable file path.");
+
+        // 4. Auto-detection — opt-in, and only ever from a caller that supplied a context path.
+        if (_envAutoDetect && !string.IsNullOrWhiteSpace(tsenvSearchFrom))
+            return DetectEnvironmentOrThrow(tsenvSearchFrom!, explicitlyRequested: false);
+
+        return null;
+    }
+
+    /// <summary>
+    /// Runs the walk-up search and reports what it did. An AMBIGUOUS directory always throws — picking
+    /// one of several environments would silently redirect every write to the wrong product's
+    /// CommonAppData. A plain miss throws only when the caller asked for <c>auto</c> explicitly;
+    /// under the opt-in station setting it just means "no environment here", i.e. global.
+    /// </summary>
+    private string? DetectEnvironmentOrThrow(string searchFrom, bool explicitlyRequested)
+    {
+        var detection = TestStandEnvironmentLocator.Detect(searchFrom);
+
+        if (detection.Ambiguity is not null)
+            throw new InvalidOperationException(
+                $"Cannot auto-detect a TestStand environment: {detection.Ambiguity}");
+
+        if (!detection.Found)
+        {
+            if (explicitlyRequested)
+                throw new FileNotFoundException(
+                    $"No .tsenv found above '{searchFrom}'. Probed: {detection.Probed}");
+            _logger.LogDebug("No .tsenv found above '{From}' — using the global environment. Probed: {Probed}",
+                searchFrom, detection.Probed);
+            return null;
+        }
+
+        _envDetectedFrom = detection.FoundInDirectory;
+        _logger.LogInformation("Auto-detected TestStand environment '{Env}' in '{Dir}' (from '{From}').",
+            detection.TsenvPath, detection.FoundInDirectory, searchFrom);
+        return detection.TsenvPath;
+    }
+
+    /// <inheritdoc/>
+    public async Task<bool> ConnectAsync(string? enginePath = null, string? tsenvPath = null,
+                                         string? tsenvSearchFrom = null)
     {
         // An explicit engine_path pins the TestStand INSTALL whose NI tools (FileDiffer.exe,
         // AnalyzerApp.exe) get launched — the manual escape hatch for a station where the automatic
@@ -1155,7 +1301,47 @@ public sealed class TestStandService : ITestStandService
             _logger.LogInformation("engine_path override: NI tools will be resolved from '{Bin}'.", binDir);
         }
 
-        if (_engine != null) return true;
+        // Which environment does this connect want? Resolved BEFORE the "already connected" check so a
+        // second call naming a different .tsenv is rejected instead of silently ignored — the same
+        // fail-loudly rule engine_path above already follows.
+        var requestedEnv = ResolveRequestedEnvironment(tsenvPath, tsenvSearchFrom);
+
+        if (_engine != null)
+        {
+            // The environment is fixed for the life of the PROCESS, not just the connection:
+            // SetEnvironmentPath throws once an engine exists, only one engine may live per process
+            // (a second one hangs teardown), and the last ShutDown(final:true) also tears down NI
+            // licensing. So there is no supported way to switch — say so instead of pretending.
+            if (requestedEnv is not null &&
+                !string.Equals(requestedEnv, _activeEnvPath, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    $"The engine already runs in the {(_activeEnvPath is null ? "GLOBAL environment" : $"environment '{_activeEnvPath}'")}, " +
+                    $"and '{requestedEnv}' was requested. A TestStand environment can only be chosen " +
+                    "before the engine is created, so restart the MCP server to switch.");
+            }
+            return true;
+        }
+
+        if (_connectFatalReason is not null)
+            throw new InvalidOperationException(
+                $"Cannot connect: {_connectFatalReason} Restart the MCP server.");
+
+        // Everything checkable without an engine is checked here, so a bad environment fails with a
+        // named defect instead of parking the engine on an unanswerable "Engine cannot be initialized"
+        // dialog. TestStand's own CanInitializeEngine runs later, on the engine thread.
+        if (requestedEnv is not null)
+        {
+            var env = TestStandEnvironmentLocator.ReadAndValidate(requestedEnv);
+            if (!env.IsUsable)
+                throw new InvalidOperationException(
+                    $"The TestStand environment '{requestedEnv}' cannot be used:{Environment.NewLine}" +
+                    string.Join(Environment.NewLine, env.Issues.Select(i => "  - " + i)));
+
+            _logger.LogInformation("Using TestStand environment '{Env}' (CommonAppData: {Cad}).",
+                env.TsenvPath, env.CommonAppData);
+        }
+        _requestedEnvPath = requestedEnv;
 
         _logger.LogInformation("Connecting to TestStand engine...");
 
@@ -1179,16 +1365,42 @@ public sealed class TestStandService : ITestStandService
         _engineThread.SetApartmentState(ApartmentState.MTA);
         _engineThread.Start();
 
-        await Task.Run(() => _engineReady.Wait());
+        // BOUNDED wait. This used to be an unbounded _engineReady.Wait(): if anything on the engine
+        // thread parks — most plausibly a modal dialog no headless caller can answer, which a
+        // misconfigured environment is the classic trigger for — the tool call hung forever and took
+        // the whole session with it. A timeout turns that into a diagnosable error.
+        var ready = await Task.Run(() => _engineReady.Wait(TimeSpan.FromSeconds(_connectTimeoutSeconds)));
+
+        if (!ready)
+        {
+            // The engine thread is still parked, so do NOT clear _engineThread or start another one:
+            // a second live engine hangs teardown. Latch instead, and say what to do about it.
+            _connectFatalReason =
+                $"the engine did not initialize within {_connectTimeoutSeconds}s" +
+                (_requestedEnvPath is null
+                    ? " (it is most likely waiting on a modal dialog that cannot be answered headlessly)."
+                    : $" while activating the environment '{_requestedEnvPath}' — TestStand is most likely " +
+                      "waiting on an 'Engine cannot be initialized' dialog that cannot be answered headlessly.");
+            _logger.LogError("Connect timed out after {Timeout}s. {Reason}", _connectTimeoutSeconds, _connectFatalReason);
+            throw new TimeoutException($"Cannot connect: {_connectFatalReason} Restart the MCP server.");
+        }
 
         if (!_engineConnected)
         {
             _logger.LogError(_engineConnectError, "Failed to connect to TestStand engine");
             _enginePumpRunning = false;
             _engineThread = null;
+            // An environment that was rejected (bad path, CanInitializeEngine said no, the redirect
+            // did not take) is a caller error, not "engine unavailable" — surface its own message
+            // rather than the generic "Failed to connect" the boolean would produce.
+            if (_requestedEnvPath is not null && _engineConnectError is not null)
+                throw new InvalidOperationException(_engineConnectError.Message, _engineConnectError);
             return false;
         }
-        _logger.LogInformation("Successfully connected to TestStand engine.");
+
+        _activeEnvPath = _requestedEnvPath;
+        _logger.LogInformation("Successfully connected to TestStand engine{Env}.",
+            _activeEnvPath is null ? "" : $" in environment '{_activeEnvPath}'");
         return true;
     }
 
@@ -1209,6 +1421,11 @@ public sealed class TestStandService : ITestStandService
     {
         try
         {
+            // An alternate environment has to be applied HERE — before the activation below, on the
+            // thread that will own the engine. SetEnvironmentPath throws once an engine exists, so
+            // this placement is what makes the ordering structural instead of a convention.
+            ApplyEnvironmentBeforeActivation();
+
             var engineType = Type.GetTypeFromProgID("TestStand.Engine")
                 ?? throw new InvalidOperationException(
                     "TestStand Engine COM server not found. Ensure NI TestStand is installed.");
@@ -1216,6 +1433,11 @@ public sealed class TestStandService : ITestStandService
             _engine = (NiEngine)(Activator.CreateInstance(engineType)
                 ?? throw new InvalidOperationException("Failed to create TestStand Engine instance."));
             System.Threading.Interlocked.Increment(ref _liveEngineCount);
+
+            // The setter reported nothing; the engine's own answer is the evidence. A requested
+            // environment that did not take is a hard failure — silently working against the global
+            // CommonAppData is exactly the outcome this feature exists to prevent.
+            VerifyEnvironmentTookEffect();
 
             // Load type palette files so step types (Label, Action, etc.) are available
             try { _engine.LoadTypePaletteFiles(); }
@@ -1227,6 +1449,14 @@ public sealed class TestStandService : ITestStandService
         {
             _engineConnectError = ex;
             _engineConnected = false;
+            // The environment verification runs AFTER the activation, so this path can be reached with
+            // a live engine. Tear it down here, on its own thread — leaving it behind would keep
+            // _liveEngineCount above zero and hang the teardown of the next one.
+            if (_engine != null)
+            {
+                try { ShutDownEngineCore(); }
+                catch (Exception cleanupEx) { _logger.LogDebug(cleanupEx, "Failed to release the engine after a failed connect."); }
+            }
             _engineReady.Set();
             return;
         }
@@ -1243,6 +1473,100 @@ public sealed class TestStandService : ITestStandService
 
         ShutDownEngineCore();
     }
+
+    /// <summary>
+    /// Points the engine at an alternate TestStand environment — the in-process equivalent of the
+    /// Sequence Editor's <c>/env &lt;path.tsenv&gt;</c> switch. Runs on the engine thread immediately
+    /// before the activation, because <c>SetEnvironmentPath</c> throws once an engine exists.
+    /// <para>
+    /// No environment requested means NOT ONE new COM call happens: the whole method returns
+    /// immediately, so stations that never used an environment see byte-identical behaviour.
+    /// </para>
+    /// <para>
+    /// The decisive part is <c>CanInitializeEngine()</c> — TestStand's own answer to "would an engine
+    /// come up with these settings". Without it, an environment whose <c>CommonAppData</c> was never
+    /// initialized makes the engine raise an interactive "Engine cannot be initialized" dialog that no
+    /// headless caller can answer, and the connect parks forever. Asking first turns that into a
+    /// clean exception before any engine exists.
+    /// </para>
+    /// </summary>
+    private void ApplyEnvironmentBeforeActivation()
+    {
+        var envPath = _requestedEnvPath;
+        if (envPath is null) return;
+
+        NiEngineInitSettings settings;
+        try
+        {
+            // Unlike the engine, this coclass has no registered ProgID — it is constructed directly
+            // against the CLSID carried by the interop assembly.
+            settings = new NiEngineInitSettings();
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException(
+                "This TestStand installation does not expose EngineInitializationSettings, so alternate " +
+                $"environments cannot be selected in-process ({ex.Message}). Omit tsenv_path to use the " +
+                "global environment, or start the Sequence Editor with /env instead.", ex);
+        }
+
+        settings.SetEnvironmentPath(envPath);
+
+        if (!settings.CanInitializeEngine())
+            throw new InvalidOperationException(
+                $"TestStand cannot initialize an engine for the environment '{envPath}'. The usual cause " +
+                $"is a CommonAppData tree TestStand has never initialized (no {TestStandEnvironmentLocator.EngineCfgRelativePath}); " +
+                "open the environment once in the Sequence Editor so its engine configuration is created.");
+
+        _logger.LogDebug("Environment '{Env}' applied; CanInitializeEngine() confirmed it.", envPath);
+    }
+
+    /// <summary>
+    /// Reads back what the engine actually did, because a setter that returned without throwing is not
+    /// evidence (the same lesson <c>configure_dotnet_module</c> learned from <c>LoadMemberInfo</c>
+    /// reporting success for a non-existent assembly).
+    /// <para>
+    /// Two independent signals: <c>GetEnvironmentPath()</c>, the engine naming its own environment, and
+    /// the effective roots differing from their <c>Global*</c> counterparts — the redirect is the whole
+    /// point, so if all three still equal the global ones, nothing happened no matter what was
+    /// reported. A requested environment that fails both throws.
+    /// </para>
+    /// </summary>
+    private void VerifyEnvironmentTookEffect()
+    {
+        _envReadBackPath = TryGetString(() => _engine!.GetEnvironmentPath());
+
+        var (common, pub, local) = ReadEffectivePaths();
+        bool anyRedirected =
+            !PathsEqual(common, TryGetString(() => _engine!.GetTestStandPath(NiTestStandPaths.TestStandPath_GlobalCommonAppData))) ||
+            !PathsEqual(pub,    TryGetString(() => _engine!.GetTestStandPath(NiTestStandPaths.TestStandPath_GlobalPublic))) ||
+            !PathsEqual(local,  TryGetString(() => _engine!.GetTestStandPath(NiTestStandPaths.TestStandPath_GlobalLocalAppData)));
+
+        _envActive = _envReadBackPath.Length > 0 || anyRedirected;
+
+        if (_requestedEnvPath is null) return;
+
+        if (!_envActive)
+            throw new InvalidOperationException(
+                $"The environment '{_requestedEnvPath}' was applied without error, but the engine still " +
+                "reports the global paths — it did not take effect. Refusing to continue, because every " +
+                "subsequent read and write would silently target the wrong CommonAppData.");
+
+        _logger.LogInformation("Environment verified: '{Env}' | CommonAppData={Cad} | Public={Pub} | LocalAppData={Lad}",
+            _envReadBackPath.Length > 0 ? _envReadBackPath : _requestedEnvPath, common, pub, local);
+    }
+
+    /// <summary>The engine's three effective (possibly redirected) application-data roots.</summary>
+    private (string CommonAppData, string PublicDir, string LocalAppData) ReadEffectivePaths() =>
+    (
+        TryGetString(() => _engine!.GetTestStandPath(NiTestStandPaths.TestStandPath_CommonAppData)),
+        TryGetString(() => _engine!.GetTestStandPath(NiTestStandPaths.TestStandPath_Public)),
+        TryGetString(() => _engine!.GetTestStandPath(NiTestStandPaths.TestStandPath_LocalAppData))
+    );
+
+    /// <summary>Compares two engine-reported directories: case-insensitive, trailing separator ignored.</summary>
+    private static bool PathsEqual(string a, string b) =>
+        string.Equals(a.TrimEnd('\\', '/'), b.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Tears the engine down ON the engine thread (the thread that created it).</summary>
     private void ShutDownEngineCore()
@@ -1339,10 +1663,52 @@ public sealed class TestStandService : ITestStandService
 
     // ── Sequence Files ────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Warns when a file belongs to a DIFFERENT environment than the one the engine runs in.
+    /// <para>
+    /// This is what keeps auto-detection honest. The environment is pinned by whichever sequence file
+    /// is opened first and cannot change afterwards, so every later file from another product's tree
+    /// is being edited against the wrong <c>CommonAppData</c> — process models, type palettes and
+    /// station globals all resolve from there. It stays a WARNING, not an error: the file does open,
+    /// and the caller is the one who can judge whether that matters.
+    /// </para>
+    /// <para>
+    /// Only runs when this process is environment-aware at all (an environment is active, or
+    /// auto-detection is switched on), so stations that never touch environments pay nothing and see
+    /// no new output.
+    /// </para>
+    /// </summary>
+    private string? EnvironmentMismatchWarning(string filePath)
+    {
+        if (_activeEnvPath is null && !_envAutoDetect) return null;
+
+        var detection = TestStandEnvironmentLocator.Detect(filePath);
+
+        if (detection.Ambiguity is not null)
+            return $"Cannot tell which environment '{filePath}' belongs to: {detection.Ambiguity}";
+
+        // No .tsenv above the file is not a conflict — shared libraries legitimately live outside a
+        // product tree, and claiming a mismatch there would make the warning noise.
+        if (!detection.Found) return null;
+
+        if (PathsEqual(detection.TsenvPath!, _activeEnvPath ?? "")) return null;
+
+        return _activeEnvPath is null
+            ? $"'{filePath}' belongs to the TestStand environment '{detection.TsenvPath}', but the engine " +
+              "runs in the GLOBAL environment. Restart the MCP server with that environment to work in it."
+            : $"'{filePath}' belongs to the TestStand environment '{detection.TsenvPath}', but the engine " +
+              $"runs in '{_activeEnvPath}'. The environment cannot be switched once the engine exists — " +
+              "restart the MCP server to work in the file's own environment.";
+    }
+
     /// <inheritdoc/>
     public async Task<SequenceFileInfo> OpenSequenceFileAsync(string filePath)
     {
-        EnsureConnected();
+        // The only tool that seeds environment auto-detection: it is realistically the first one to
+        // touch a file, so the .tsenv that belongs to that file can still be chosen here. Every other
+        // EnsureConnected() stays argument-less — by the time they run, the engine is already up and
+        // its environment is fixed anyway.
+        EnsureConnected(filePath);
         return await Task.Run(() =>
         {
             try
@@ -1351,7 +1717,11 @@ public sealed class TestStandService : ITestStandService
                 // GetSequenceFileEx(path, getSeqFileFlags=0, conflictHandler=UseGlobalType=4)
                 var sf = _engine!.GetSequenceFileEx(filePath, 0, (NiConflictHandler)4);
                 _loadedSequenceFiles[filePath] = sf;
-                return MapSequenceFileInfo(sf, filePath);
+                var info = MapSequenceFileInfo(sf, filePath);
+                info.EnvironmentWarning = EnvironmentMismatchWarning(filePath);
+                if (info.EnvironmentWarning is not null)
+                    _logger.LogWarning("{Warning}", info.EnvironmentWarning);
+                return info;
             }
             catch (Exception ex)
             {
@@ -5232,9 +5602,18 @@ public sealed class TestStandService : ITestStandService
 
     // ── Private Helpers ───────────────────────────────────────────────────────
 
-    private void EnsureConnected()
+    /// <param name="contextPath">
+    /// The file this call is about, when there is one. Only consulted for environment auto-detection
+    /// on the very first connect (opt-in, off by default); a reconnect keeps the environment it
+    /// already had, so passing it can never move a connected engine.
+    /// </param>
+    private void EnsureConnected(string? contextPath = null)
     {
         if (_engine != null) return;
+
+        if (_connectFatalReason is not null)
+            throw new InvalidOperationException(
+                $"Not connected to TestStand engine: {_connectFatalReason} Restart the MCP server.");
 
         // The MCP host can restart this server process mid-session (or the engine can be torn
         // down), leaving _engine null and every tool failing with "Not connected". Attempt a
@@ -5246,7 +5625,7 @@ public sealed class TestStandService : ITestStandService
             try
             {
                 _logger.LogWarning("Engine not connected — attempting one-shot lazy reconnect.");
-                if (ConnectAsync().GetAwaiter().GetResult() && _engine != null)
+                if (ConnectAsync(null, null, contextPath).GetAwaiter().GetResult() && _engine != null)
                 {
                     _logger.LogInformation("Lazy reconnect succeeded.");
                     return;
@@ -6674,8 +7053,15 @@ public sealed class TestStandService : ITestStandService
         EnsureConnected();
         return await Task.Run(() =>
         {
+            var (commonAppData, publicDir, localAppData) = ReadEffectivePaths();
             return new EnginePaths
             {
+                EnvironmentPath        = _envReadBackPath.Length > 0 ? _envReadBackPath : (_activeEnvPath ?? ""),
+                EnvironmentActive      = _envActive,
+                EnvironmentDetectedFrom= _envDetectedFrom ?? "",
+                CommonAppDataDirectory = commonAppData,
+                PublicDirectory        = publicDir,
+                LocalAppDataDirectory  = localAppData,
                 BinDirectory      = GetEngineProperty<string>("BinDirectory") ?? "",
                 ConfigDirectory   = GetEngineProperty<string>("ConfigDirectory") ?? "",
                 TestStandDirectory= GetEngineProperty<string>("TestStandDirectory") ?? "",

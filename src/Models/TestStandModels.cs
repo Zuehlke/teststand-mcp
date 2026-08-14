@@ -178,6 +178,13 @@ public class SequenceFileInfo
     public string? Description { get; set; }
     /// <summary>File version string, if any.</summary>
     public string? Version { get; set; }
+    /// <summary>
+    /// Set when this file belongs to a different TestStand environment (<c>.tsenv</c>) than the one
+    /// the engine runs in — the file still opened, but its process models, type palettes and station
+    /// globals resolve from another <c>CommonAppData</c>. Null in the normal case, and always null on
+    /// a station that uses no environments.
+    /// </summary>
+    public string? EnvironmentWarning { get; set; }
 }
 
 /// <summary>
@@ -990,6 +997,26 @@ public class EnginePaths
     /// next to the exe. Agents use this absolute path instead of a working-directory-relative
     /// "&lt;repo&gt;\scripts" guess, so they work from any project. Empty if the folder is missing.</summary>
     public string ScriptsDirectory { get; set; } = "";
+
+    // ── TestStand environment (.tsenv) ────────────────────────────────────────
+    // Without these there is no way to tell WHICH environment the engine is working in — and every
+    // path below silently changes meaning with it.
+
+    /// <summary>The <c>.tsenv</c> the engine runs in, as the engine itself reports it. Empty means
+    /// the global environment.</summary>
+    public string EnvironmentPath { get; set; } = "";
+    /// <summary>True when the application-data roots really are redirected — verified by comparing
+    /// them against their <c>Global*</c> counterparts, not by trusting the setter.</summary>
+    public bool EnvironmentActive { get; set; }
+    /// <summary>Directory an auto-detected <c>.tsenv</c> was found in, so an implicit pick stays
+    /// visible. Empty when the environment was named explicitly or none is active.</summary>
+    public string EnvironmentDetectedFrom { get; set; } = "";
+    /// <summary>Effective CommonAppData root — redirected when an environment is active.</summary>
+    public string CommonAppDataDirectory { get; set; } = "";
+    /// <summary>Effective Public root — redirected when an environment is active.</summary>
+    public string PublicDirectory { get; set; } = "";
+    /// <summary>Effective LocalAppData root — redirected when an environment is active.</summary>
+    public string LocalAppDataDirectory { get; set; } = "";
 }
 
 /// <summary>Selected engine/station option flags.</summary>
