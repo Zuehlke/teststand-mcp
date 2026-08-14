@@ -188,8 +188,19 @@ connect_engine(tsenv_path: "C:\\ProgramData\\MyProduct\\MyProduct.tsenv")
 connect_engine(tsenv_path: "auto", tsenv_search_from: "C:\\Tests\\MyProduct\\Main.seq")
 ```
 
-`auto` walks up from the given `.seq` (or directory) to the nearest ancestor holding exactly one
-`.tsenv`. Several `.tsenv` files in one directory are reported as **ambiguous** rather than guessed.
+`auto` walks up from the given `.seq` (or directory) and checks every ancestor **both in itself and
+in its immediate subdirectories** — so the common layout
+
+```
+C:\Product\Config\Product.tsenv            <- the environment
+C:\Product\Components\Sequences\Main.seq   <- the sequence files
+```
+
+resolves at `C:\Product`, even though `Config` is a *sibling* of the walked path and never an
+ancestor of it. The scan is one level deep, the directory itself wins over its subdirectories, and
+several `.tsenv` files at the same ancestor are reported as **ambiguous** rather than guessed. For a
+layout this does not cover, name the file with `tsenv_path` instead.
+
 Setting `EnvironmentAutoDetect: true` applies the same search to the first sequence file opened, so
 callers need not pass anything — it is off by default because it pins the environment implicitly,
 from a file path.

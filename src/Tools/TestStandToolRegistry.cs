@@ -74,8 +74,8 @@ public class TestStandToolRegistry
                 "Optional alternate TestStand ENVIRONMENT: the path to a .tsenv file, the in-process " +
                 @"equivalent of the Sequence Editor's /env switch. It redirects the engine's " +
                 "CommonAppData/Public/LocalAppData roots, which is how a station isolates several " +
-                "products from each other. Pass 'auto' to search upwards from tsenv_search_from for " +
-                "the nearest directory holding exactly one .tsenv. IMPORTANT: the environment can only " +
+                "products from each other. Pass 'auto' to search upwards from tsenv_search_from. " +
+                "IMPORTANT: the environment can only " +
                 "be chosen BEFORE the engine is created, so it is fixed for the life of the server " +
                 "process — calling this again with a different path is an error, restart the server to " +
                 "switch. Omit it to use the global environment (the previous behaviour). The result " +
@@ -83,8 +83,12 @@ public class TestStandToolRegistry
                 "and get_engine_paths shows the redirected roots.")
              .AddOptional("tsenv_search_from", "string",
                 "Starting point for tsenv_path='auto': a .seq file or a directory. The search walks up " +
-                "to the nearest ancestor directory containing exactly one .tsenv; several .tsenv files " +
-                "in one directory are reported as ambiguous rather than guessed."),
+                "the ancestors and checks each one BOTH in itself AND in its immediate subdirectories, " +
+                @"so the common layout <root>\Config\Product.tsenv next to " +
+                @"<root>\Components\Sequences\Main.seq resolves (Config is a sibling of the walked path, " +
+                "never an ancestor). One level deep only; the directory itself wins over its " +
+                "subdirectories, and several .tsenv files at the same ancestor are reported as " +
+                "ambiguous rather than guessed."),
             ConnectEngineAsync);
 
         Register("disconnect_engine",

@@ -491,8 +491,11 @@ the activation (`ApplyEnvironmentBeforeActivation`), because the call throws onc
 - **Sources, in precedence order:** `connect_engine(tsenv_path=…)` → the **already-active** environment
   (so a lazy reconnect never drops back to global) → `TestStand:EnvironmentPath` from config/env/CLI →
   auto-detect when `TestStand:EnvironmentAutoDetect` is on. `tsenv_path='auto'` + `tsenv_search_from`
-  walks up to the nearest directory with exactly ONE `.tsenv`; two are **ambiguous → error, never
-  guessed**.
+  walks up and checks each ancestor **in itself AND one level down** — the real layouts put the
+  `.tsenv` in a SIBLING folder (`<root>\Config\X.tsenv` next to `<root>\Components\Sequences\*.seq`),
+  which a parents-only walk never reaches. Directory itself wins over its subdirectories; two
+  candidates at one ancestor are **ambiguous → error, never guessed**; deeper than one level is not
+  searched (name `tsenv_path` instead).
 - **It cannot be switched.** One engine per process, `SetEnvironmentPath` throws afterwards, and the
   last `ShutDown(final:true)` tears down NI licensing. A second `connect_engine` naming a different
   `.tsenv` is an ERROR telling you to restart the server. Do not try `Engine.LoadEnvironment` — it

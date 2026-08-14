@@ -252,6 +252,90 @@ public class T37_EnvironmentTests
     }
 
     [Test]
+    public void Detect_FindsAnEnvironmentInASiblingConfigFolder()
+    {
+        // The real-world layout that a parents-only walk misses entirely: the .tsenv lives in a
+        // Config folder NEXT TO the components tree, so it is never an ancestor of the sequence file.
+        //   <root>\Config\zSpine_Environment.tsenv
+        //   <root>\Components\Sequences\Main.seq
+        var configDir = Dir("Plant", "Config");
+        var tsenv = Path.Combine(configDir, "zSpine_Environment.tsenv");
+        File.WriteAllText(tsenv, "[TestStandPaths]");
+
+        var seq = Path.Combine(Dir("Plant", "Components", "Sequences"), "Main.seq");
+        File.WriteAllText(seq, "");
+
+        var result = TestStandEnvironmentLocator.Detect(seq);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(result.Found, Is.True, "probed: " + result.Probed);
+            Assert.That(result.TsenvPath, Is.EqualTo(tsenv));
+            Assert.That(result.FoundInDirectory, Is.EqualTo(configDir),
+                "the reported directory is where the file actually is, not the ancestor that led to it");
+        });
+    }
+
+    [Test]
+    public void Detect_FindsTheSiblingEnvironment_FromEveryComponentSubtree()
+    {
+        // Sequences and Models sit in different subtrees of the same product root; both must resolve
+        // to the one environment above them.
+        var tsenv = Path.Combine(Dir("Plant2", "Config"), "Env.tsenv");
+        File.WriteAllText(tsenv, "[TestStandPaths]");
+        var sequences = Dir("Plant2", "Components", "Sequences");
+        var models    = Dir("Plant2", "Components", "Models");
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(TestStandEnvironmentLocator.Detect(sequences).TsenvPath, Is.EqualTo(tsenv));
+            Assert.That(TestStandEnvironmentLocator.Detect(models).TsenvPath,    Is.EqualTo(tsenv));
+        });
+    }
+
+    [Test]
+    public void Detect_ADirectoryOfItsOwnBeatsItsSubdirectories()
+    {
+        // An environment sitting right in the walked directory is unambiguously the one meant — it
+        // must not be weighed against whatever the subdirectories happen to hold.
+        var root = Dir("Precedence");
+        var own = Path.Combine(root, "Own.tsenv");
+        File.WriteAllText(own, "[TestStandPaths]");
+        File.WriteAllText(Path.Combine(Dir("Precedence", "Config"), "Sub.tsenv"), "[TestStandPaths]");
+
+        Assert.That(TestStandEnvironmentLocator.Detect(root).TsenvPath, Is.EqualTo(own));
+    }
+
+    [Test]
+    public void Detect_TwoSiblingFoldersWithAnEnvironment_IsAmbiguous()
+    {
+        // One level up, two candidate environments in different subdirectories: still a guess, so
+        // still refused.
+        var root = Dir("TwoConfigs");
+        File.WriteAllText(Path.Combine(Dir("TwoConfigs", "ConfigA"), "A.tsenv"), "[TestStandPaths]");
+        File.WriteAllText(Path.Combine(Dir("TwoConfigs", "ConfigB"), "B.tsenv"), "[TestStandPaths]");
+
+        var result = TestStandEnvironmentLocator.Detect(root);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(result.Found, Is.False);
+            Assert.That(result.Ambiguity, Does.Contain("A.tsenv").And.Contain("B.tsenv"));
+        });
+    }
+
+    [Test]
+    public void Detect_DoesNotDescendTwoLevels()
+    {
+        // The scan is deliberately one level deep. Deeper multiplies the cost and the chance of
+        // adopting an unrelated product's environment; such a layout must name tsenv_path instead.
+        var root = Dir("TooDeep");
+        File.WriteAllText(Path.Combine(Dir("TooDeep", "Config", "Nested"), "Deep.tsenv"), "[TestStandPaths]");
+
+        Assert.That(TestStandEnvironmentLocator.Detect(root).Found, Is.False);
+    }
+
+    [Test]
     public void Detect_SeveralEnvironmentsInOneDirectory_IsAmbiguousAndNeverGuesses()
     {
         var dir = Dir("Ambiguous");

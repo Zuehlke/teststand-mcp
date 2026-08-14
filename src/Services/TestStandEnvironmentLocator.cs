@@ -171,9 +171,31 @@ internal static class TestStandEnvironmentLocator
 
     /// <summary>
     /// Walks up from <paramref name="startPath"/> (a sequence file or a directory) looking for the
-    /// nearest ancestor directory that holds EXACTLY ONE <c>.tsenv</c>.
+    /// nearest ancestor that identifies EXACTLY ONE <c>.tsenv</c>.
+    ///
+    /// <para><b>Each ancestor is checked two ways</b>, because real layouts rarely put the
+    /// environment directly above the sequences. First the directory itself, then its IMMEDIATE
+    /// subdirectories — so a tree like</para>
+    /// <code>
+    /// C:\Product\Config\Product.tsenv          &lt;- the environment
+    /// C:\Product\Components\Sequences\Main.seq &lt;- the sequence files
+    /// </code>
     /// <para>
-    /// Several <c>.tsenv</c> files in one directory abort the search with an
+    /// resolves at <c>C:\Product</c> (whose <c>Config</c> subdirectory holds it), which a
+    /// parents-only walk never reaches: <c>Config</c> is a SIBLING of the path being walked, not an
+    /// ancestor of it. The directory itself always wins over its subdirectories, and the search stops
+    /// at the first ancestor that yields anything — so a nearer environment is never shadowed by a
+    /// more distant one.
+    /// </para>
+    ///
+    /// <para>
+    /// The scan goes exactly ONE level deep. Deeper would multiply both the cost and the chance of
+    /// adopting some unrelated product's environment; for a layout this does not cover, name the file
+    /// with <c>tsenv_path</c> instead of widening the guess.
+    /// </para>
+    ///
+    /// <para>
+    /// Several <c>.tsenv</c> files at the same ancestor abort the search with an
     /// <see cref="DetectionResult.Ambiguity"/> instead of picking one: guessing which environment a
     /// station meant would silently redirect every subsequent write to the wrong product's
     /// <c>CommonAppData</c>.
@@ -191,29 +213,31 @@ internal static class TestStandEnvironmentLocator
         {
             probed.Add(current);
 
-            string[] hits;
-            try { hits = Directory.GetFiles(current, "*.tsenv"); }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            // The directory itself wins: an environment sitting right there is unambiguously the one
+            // meant, and must not be weighed against whatever the subdirectories hold.
+            var hits = TsenvFilesIn(current);
+            if (hits.Count == 0)
             {
-                continue;   // an unreadable directory on the way up never aborts the walk
+                hits = TsenvFilesInSubdirectoriesOf(current);
+                if (hits.Count > 0) probed.Add(current + @"\*");
             }
 
-            if (hits.Length == 1)
+            if (hits.Count == 1)
                 return new DetectionResult
                 {
                     TsenvPath        = hits[0],
-                    FoundInDirectory = current,
+                    FoundInDirectory = Path.GetDirectoryName(hits[0]),
                     Probed           = string.Join(" | ", probed),
                 };
 
-            if (hits.Length > 1)
+            if (hits.Count > 1)
             {
-                Array.Sort(hits, StringComparer.OrdinalIgnoreCase);
+                hits.Sort(StringComparer.OrdinalIgnoreCase);
                 return new DetectionResult
                 {
                     FoundInDirectory = current,
-                    Ambiguity        = $"{hits.Length} .tsenv files in {current} " +
-                                       $"({string.Join(", ", hits.Select(Path.GetFileName))}) — " +
+                    Ambiguity        = $"{hits.Count} .tsenv files at or below {current} " +
+                                       $"({string.Join(", ", hits)}) — " +
                                        "pass tsenv_path explicitly to choose one.",
                     Probed           = string.Join(" | ", probed),
                 };
@@ -221,6 +245,57 @@ internal static class TestStandEnvironmentLocator
         }
 
         return new DetectionResult { Probed = string.Join(" | ", probed) };
+    }
+
+    /// <summary>The <c>.tsenv</c> files directly in <paramref name="directory"/>. An unreadable
+    /// directory yields nothing rather than throwing, so one bad folder never aborts the walk.</summary>
+    private static List<string> TsenvFilesIn(string directory)
+    {
+        try { return Directory.GetFiles(directory, "*.tsenv").ToList(); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return new List<string>();
+        }
+    }
+
+    /// <summary>
+    /// The <c>.tsenv</c> files in the IMMEDIATE subdirectories of <paramref name="directory"/> — the
+    /// "environment lives in a sibling <c>Config</c> folder" case.
+    /// <para>
+    /// Skipped entirely at a drive root, where the subdirectories are unrelated top-level folders and
+    /// a hit would say nothing about the file the caller started from. Hidden directories and reparse
+    /// points (junctions, symlinks) are skipped too: the former are not where a station keeps its
+    /// configuration, and the latter can point anywhere, including back into the tree.
+    /// </para>
+    /// </summary>
+    private static List<string> TsenvFilesInSubdirectoriesOf(string directory)
+    {
+        var found = new List<string>();
+        if (Path.GetDirectoryName(directory) is null) return found;   // drive root
+
+        string[] subdirectories;
+        try { subdirectories = Directory.GetDirectories(directory); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return found;
+        }
+
+        foreach (var sub in subdirectories)
+        {
+            try
+            {
+                var attributes = new DirectoryInfo(sub).Attributes;
+                if ((attributes & (FileAttributes.Hidden | FileAttributes.ReparsePoint)) != 0) continue;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                continue;
+            }
+
+            found.AddRange(TsenvFilesIn(sub));
+        }
+
+        return found;
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
