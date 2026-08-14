@@ -481,6 +481,44 @@ Three further memory-only facts are now behaviour or catalog text rather than pr
 
 Needs a **FRESH MCP session**: the `file_format` params.
 
+## TestStand ENVIRONMENTS (`.tsenv`) — chosen once per PROCESS (2026-08-14, issue #35)
+
+A station hosting several products isolates each one's `CommonAppData`/`Public`/`LocalAppData` in an
+**environment** — the Sequence Editor's `/env <path.tsenv>` switch. The server now does this in-process
+via `EngineInitializationSettings.SetEnvironmentPath`, applied on the engine thread immediately before
+the activation (`ApplyEnvironmentBeforeActivation`), because the call throws once an engine exists.
+
+- **Sources, in precedence order:** `connect_engine(tsenv_path=…)` → the **already-active** environment
+  (so a lazy reconnect never drops back to global) → `TestStand:EnvironmentPath` from config/env/CLI →
+  auto-detect when `TestStand:EnvironmentAutoDetect` is on. `tsenv_path='auto'` + `tsenv_search_from`
+  walks up to the nearest directory with exactly ONE `.tsenv`; two are **ambiguous → error, never
+  guessed**.
+- **It cannot be switched.** One engine per process, `SetEnvironmentPath` throws afterwards, and the
+  last `ShutDown(final:true)` tears down NI licensing. A second `connect_engine` naming a different
+  `.tsenv` is an ERROR telling you to restart the server. Do not try `Engine.LoadEnvironment` — it
+  works by relaunching the application, useless for an in-process headless server.
+- **Never trust the setter — the server reads back and so should you.** `CanInitializeEngine()` is
+  asked BEFORE the engine is created (TestStand's own check, which the `Cfg\GeneralEngine.cfg` file
+  probe only approximates), and afterwards `GetEnvironmentPath()` plus `TestStandPath_CommonAppData`
+  vs `TestStandPath_GlobalCommonAppData` prove the redirect took. **Measured on the global
+  environment: `GetEnvironmentPath()` returns EMPTY and the three roots equal their `Global*`
+  counterparts** — so an empty read-back is the honest "no environment", not a failed read. A
+  requested environment that fails both signals makes the connect FAIL rather than silently work
+  against the wrong `CommonAppData`.
+- **`get_engine_paths` now reports** `environmentPath`, `environmentActive`, `environmentDetectedFrom`
+  and the three effective roots. There used to be no way to tell which environment you were in.
+- **`open_sequence_file` warns on a MISMATCH** (file belongs to environment B, engine runs A/global).
+  It is a warning, not an error — the file opens, but its process models, type palettes and station
+  globals resolve from another `CommonAppData`. Only computed when the process is environment-aware,
+  so a station without environments sees nothing new.
+- **`ConnectAsync` is now BOUNDED** (`TestStand:ConnectTimeoutSeconds`, default 120). It used to wait
+  forever; a modal dialog on the engine thread — the classic symptom of an uninitialized
+  `CommonAppData` — hung the tool call and the whole session. On expiry the service latches
+  "restart required" instead of starting a second engine next to the parked one.
+- Without a `.tsenv` **not one new COM call happens** — the global path is byte-identical to before.
+
+Needs a **FRESH MCP session**: the `tsenv_path` / `tsenv_search_from` params.
+
 ## General Conventions
 
 - **Sequence file for tests:** Always use `DemoTestsequenz.seq`

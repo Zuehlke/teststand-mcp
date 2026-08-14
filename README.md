@@ -60,6 +60,7 @@ This MCP Server can be used with any AI tool that supports MCPs. The instruction
 - Connect / disconnect from the TestStand engine
 - Read station info, globals, options, and process model
 - Validate expressions and expand path macros
+- Connect against an alternate **TestStand environment** (`.tsenv`) — see below
 
 ### Sequence File Management
 - Open, create, save, and close `.seq` files
@@ -154,6 +155,64 @@ This MCP Server can be used with any AI tool that supports MCPs. The instruction
 - Read and write CSV files via the TestStand **CSV record streams**
 - Create result-log helpers, batch-sync objects, and set up interactive step execution
   (model/execution-bound features; availability depends on engine context)
+
+---
+
+## TestStand Environments (`.tsenv`)
+
+A station that hosts several products usually isolates each one's TestStand `CommonAppData`,
+`Public` and `LocalAppData` directories in a separate **environment**. The Sequence Editor selects
+one with its `/env <path.tsenv>` command-line switch; this server does the same thing in-process.
+
+By default nothing changes: without an environment the server connects to the **global** one exactly
+as before.
+
+**Pick one for the whole server** (the usual case — put it in your MCP host's config):
+
+```jsonc
+// appsettings.json next to the executable …
+"TestStand": {
+  "EnvironmentPath": "C:\\ProgramData\\MyProduct\\MyProduct.tsenv",
+  "EnvironmentAutoDetect": false,
+  "ConnectTimeoutSeconds": 120
+}
+```
+
+The same values work as `--TestStand:EnvironmentPath=…` on the command line or as the environment
+variable `TESTSTAND_MCP_TestStand__EnvironmentPath`.
+
+**Or per call:**
+
+```
+connect_engine(tsenv_path: "C:\\ProgramData\\MyProduct\\MyProduct.tsenv")
+connect_engine(tsenv_path: "auto", tsenv_search_from: "C:\\Tests\\MyProduct\\Main.seq")
+```
+
+`auto` walks up from the given `.seq` (or directory) to the nearest ancestor holding exactly one
+`.tsenv`. Several `.tsenv` files in one directory are reported as **ambiguous** rather than guessed.
+Setting `EnvironmentAutoDetect: true` applies the same search to the first sequence file opened, so
+callers need not pass anything — it is off by default because it pins the environment implicitly,
+from a file path.
+
+**Three things worth knowing:**
+
+- **The environment is fixed for the life of the server process.** TestStand only accepts it before
+  the engine is created, so `connect_engine` with a *different* `tsenv_path` is an error — restart
+  the server to switch. A lazy reconnect after a server restart keeps the environment it had.
+- **It is verified, not assumed.** After connecting, the engine is asked what it actually did
+  (`GetEnvironmentPath`, plus the effective roots compared against their global counterparts). If the
+  redirect did not take, the connect fails instead of silently working against the wrong
+  `CommonAppData`. `get_engine_paths` reports `environmentPath`, `environmentActive` and the three
+  effective directories.
+- **A bad environment fails loudly and early.** A `.tsenv` whose `CommonAppData` TestStand has never
+  initialized (no `Cfg\GeneralEngine.cfg`) makes the engine raise an interactive dialog no headless
+  caller can answer. The file is validated up front, TestStand's own `CanInitializeEngine()` is asked
+  before the engine is constructed, and the connect itself is bounded by `ConnectTimeoutSeconds` — so
+  a misconfiguration returns an error naming the defect instead of hanging the session.
+
+`open_sequence_file` additionally warns when a file belongs to a *different* environment than the one
+the engine runs in. The file still opens; the warning exists because its process models, type
+palettes and station globals resolve from another `CommonAppData`.
 
 ---
 
