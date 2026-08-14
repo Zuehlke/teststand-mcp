@@ -167,26 +167,66 @@ one with its `/env <path.tsenv>` command-line switch; this server does the same 
 By default nothing changes: without an environment the server connects to the **global** one exactly
 as before.
 
-**Pick one for the whole server** (the usual case — put it in your MCP host's config):
+### Configuring it
+
+The environment is applied when the engine is created and is then **fixed for the life of the server
+process**, so it is a property of the server, not of a call. Configure it where the server is
+defined and restart the server to change it.
+
+**The recommended way — pin it in your MCP host's config** (`claude_desktop_config.json`,
+`.mcp.json`, …), so it holds no matter which tool runs first:
+
+```json
+{
+  "mcpServers": {
+    "teststand": {
+      "command": "C:\\path\\to\\TestStandMCP.exe",
+      "args": ["--TestStand:EnvironmentPath=C:\\MyProduct\\Config\\MyProduct.tsenv"]
+    }
+  }
+}
+```
+
+An environment variable does the same job if you prefer `env` over `args` — note the double
+underscore, which is how .NET maps a nested key:
+
+```json
+"env": { "TESTSTAND_MCP_TestStand__EnvironmentPath": "C:\\MyProduct\\Config\\MyProduct.tsenv" }
+```
+
+**Or in `appsettings.json`** — the one **next to the executable**, which is the only one that is
+read. The copy in the repository root is just the source; the build deploys it to the output
+directory, so edit the source and rebuild rather than the deployed copy:
 
 ```jsonc
-// appsettings.json next to the executable …
 "TestStand": {
-  "EnvironmentPath": "C:\\ProgramData\\MyProduct\\MyProduct.tsenv",
+  "EnvironmentPath": "C:\\MyProduct\\Config\\MyProduct.tsenv",
   "EnvironmentAutoDetect": false,
   "ConnectTimeoutSeconds": 120
 }
 ```
 
-The same values work as `--TestStand:EnvironmentPath=…` on the command line or as the environment
-variable `TESTSTAND_MCP_TestStand__EnvironmentPath`.
-
-**Or per call:**
+**Or per call** — useful for a one-off, but see the warning below:
 
 ```
-connect_engine(tsenv_path: "C:\\ProgramData\\MyProduct\\MyProduct.tsenv")
-connect_engine(tsenv_path: "auto", tsenv_search_from: "C:\\Tests\\MyProduct\\Main.seq")
+connect_engine(tsenv_path: "C:\\MyProduct\\Config\\MyProduct.tsenv")
+connect_engine(tsenv_path: "auto", tsenv_search_from: "C:\\MyProduct\\Components\\Sequences\\Main.seq")
 ```
+
+> **`connect_engine(tsenv_path: …)` has to be the first engine call of the session.** Any other tool
+> before it connects the engine implicitly — to the *global* environment — and the environment can no
+> longer be changed afterwards; you then get an error telling you to restart the server. The config
+> routes above have no such ordering requirement, which is why they are the recommended ones.
+
+**Precedence**, highest first: the `connect_engine` argument → `--TestStand:EnvironmentPath=…` on the
+command line → the `TESTSTAND_MCP_…` environment variable → `appsettings.json`. `EnvironmentAutoDetect`
+and `ConnectTimeoutSeconds` have no tool parameter; they come from the three configuration channels
+only, in the same order.
+
+New parameters need a **fresh MCP session**: clients cache the tool catalog when the session starts,
+so `tsenv_path` and `tsenv_search_from` only appear after reconnecting the server.
+
+### How `auto` finds the file
 
 `auto` walks up from the given `.seq` (or directory) and checks every ancestor **both in itself and
 in its immediate subdirectories** — so the common layout
@@ -205,7 +245,7 @@ Setting `EnvironmentAutoDetect: true` applies the same search to the first seque
 callers need not pass anything — it is off by default because it pins the environment implicitly,
 from a file path.
 
-**Three things worth knowing:**
+### Three things worth knowing
 
 - **The environment is fixed for the life of the server process.** TestStand only accepts it before
   the engine is created, so `connect_engine` with a *different* `tsenv_path` is an error — restart
