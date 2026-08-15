@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Fixture assembly for the .NET adapter tests (T13). It exists because the adapter tests used to
+    point at C:\Dummy\MyAssembly.dll only: every member resolution failed for a trivial reason, so
+    the tests could not tell a working resolver from a broken one — which is how issue #37 (nothing
+    but a 0-argument/void member ever resolved) survived. The members below are the signature matrix
+    the resolver has to cope with.
+
+    AnyCPU on purpose: pure IL loads into the x86 test host as well as a 64-bit one.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <!-- Referenced only to be LOADED by TestStand at run time, never called from C#. -->
+    <IsTestProject>false</IsTestProject>
+  </PropertyGroup>
+
+</Project>

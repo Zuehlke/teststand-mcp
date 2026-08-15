@@ -1,3 +1,5 @@
+using System;
+using System.Linq;
 using System.Threading.Tasks;
 using NUnit.Framework;
 
@@ -180,6 +182,264 @@ public class T13_AdapterConfigTests : TestBase
                 "the caller has to learn WHY the step will not call anything");
         });
         TestContext.WriteLine($"note: {result.Note}");
+    }
+
+    // ── .NET member resolution against a REAL assembly (issue #37) ──────────────
+    // Everything above only proves that a nonexistent path fails. These use a fixture assembly
+    // built next to the tests, so a resolver that handles nothing but 0-argument/void members —
+    // which is what the module-level route actually did — cannot pass.
+
+    /// <summary>The fixture assembly, resolved through the type system so a rename cannot rot the path.</summary>
+    private static string FixtureAssembly =>
+        typeof(DotNetTestAssembly.MathOps).Assembly.Location;
+
+    private const string MathOps     = "TestStandMCP.DotNetTestAssembly.MathOps";
+    private const string InstanceOps = "TestStandMCP.DotNetTestAssembly.InstanceOps";
+
+    private static string NewProbeName() =>
+        "MCP_DotNetProbe_" + Guid.NewGuid().ToString("N").Substring(0, 8);
+
+    /// <summary>
+    /// THE regression test for issue #37: a member with parameters AND a return value. The
+    /// module-level LoadMemberInfo route rejects it with "Prototype does not match that found for
+    /// member 'Add'" even though the member exists; only the call-level
+    /// DotNetCall.LoadPrototypeFromSignature resolves it — and it must also POPULATE the interface,
+    /// which is what makes the step callable at all.
+    /// </summary>
+    [Test]
+    public async Task ConfigureDotNetModule_TwoArgumentNonVoidMethod_Resolves()
+    {
+        await PrepareStepAsync("AddStep");
+
+        var result = await Ts.ConfigureDotNetModuleAsync(TempSeqFile, Seq, Grp, "AddStep",
+            FixtureAssembly, MathOps, "Add", save: true);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(result.AppliedSettings, Does.ContainKey("memberResolved"),
+                $"a 2-argument non-void member must resolve. note: {result.Note}");
+            Assert.That(result.AppliedSettings["resolvedVia"], Is.EqualTo("signature"),
+                "it can only come from the call-level prototype load");
+            Assert.That(result.AppliedSettings, Does.ContainKey("signature"),
+                "the caller has to learn WHICH member was bound");
+        });
+        Assert.That(result.AppliedSettings["signature"].ToString(), Does.StartWith("Add("));
+
+        // The interface has to be on the step, not just in the report: return value + both arguments.
+        Assert.That(await ReadSDataLeafAsync("AddStep", "TS.SData.Calls[0].Params[0]", "Name"),
+            Is.EqualTo("Return Value"));
+        Assert.That(await ReadSDataLeafAsync("AddStep", "TS.SData.Calls[0].Params[1]", "Name"),
+            Is.EqualTo("a"));
+        Assert.That(await ReadSDataLeafAsync("AddStep", "TS.SData.Calls[0].Params[2]", "Name"),
+            Is.EqualTo("b"));
+        TestContext.WriteLine($"resolvedVia={result.AppliedSettings["resolvedVia"]} " +
+                              $"signature={result.AppliedSettings["signature"]}");
+    }
+
+    /// <summary>The one shape that already worked must keep its old route — the new tier is a
+    /// fallback, not a replacement.</summary>
+    [Test]
+    public async Task ConfigureDotNetModule_ZeroArgVoidMethod_StillResolvesViaMemberInfo()
+    {
+        await PrepareStepAsync("VoidStep");
+
+        var result = await Ts.ConfigureDotNetModuleAsync(TempSeqFile, Seq, Grp, "VoidStep",
+            FixtureAssembly, MathOps, "NoArgsVoid", save: true);
+
+        Assert.That(result.AppliedSettings, Does.ContainKey("memberResolved"), result.Note);
+        Assert.That(result.AppliedSettings["resolvedVia"].ToString(), Does.StartWith("member-info"),
+            "a bare 0-argument/void member resolves at module level and must not need the fallback");
+    }
+
+    /// <summary>
+    /// Bug 2 of issue #37: a .NET step keeps its interface in TS.SData.Calls[i].Params, never in the
+    /// flat Module.Parameters container the reader used to look at — so get_module_parameters
+    /// returned [] for every .NET step, however well configured.
+    /// </summary>
+    [Test]
+    public async Task GetModuleParameters_DotNetStep_ReturnsTheCallParameters()
+    {
+        await PrepareStepAsync("AddStep");
+        await Ts.ConfigureDotNetModuleAsync(TempSeqFile, Seq, Grp, "AddStep",
+            FixtureAssembly, MathOps, "Add", save: true);
+
+        var parms = await Ts.GetModuleParametersAsync(TempSeqFile, Seq, Grp, "AddStep");
+
+        Assert.That(parms, Has.Count.EqualTo(3), "return value + two arguments");
+        Assert.Multiple(() =>
+        {
+            Assert.That(parms[0].Name, Is.EqualTo("Return Value"));
+            Assert.That(parms[0].Direction, Is.EqualTo("Return"),
+                "direction comes from the Flags bits, there is no Direction leaf");
+            Assert.That(parms[0].DataType, Is.EqualTo("Double"));
+            Assert.That(parms[1].Name, Is.EqualTo("a"));
+            Assert.That(parms[1].Direction, Is.EqualTo("Input"));
+            Assert.That(parms[2].Name, Is.EqualTo("b"));
+            Assert.That(parms.All(p => p.Type == "DotNetParameter"), Is.True);
+        });
+    }
+
+    /// <summary>An out parameter has to read back as an OUTPUT, not as another input.</summary>
+    [Test]
+    public async Task GetModuleParameters_DotNetOutParameter_ReportsOutputDirection()
+    {
+        await PrepareStepAsync("SplitStep");
+        await Ts.ConfigureDotNetModuleAsync(TempSeqFile, Seq, Grp, "SplitStep",
+            FixtureAssembly, MathOps, "Split", save: true);
+
+        var parms = await Ts.GetModuleParametersAsync(TempSeqFile, Seq, Grp, "SplitStep");
+
+        Assert.That(parms, Has.Count.EqualTo(2), "void return → only the two parameters");
+        Assert.That(parms.Single(p => p.Name == "half").Direction, Is.EqualTo("Output"));
+        Assert.That(parms.Single(p => p.Name == "value").Direction, Is.EqualTo("Input"));
+    }
+
+    /// <summary>
+    /// A bare name matches ONE overload silently, so the resolved signature is the only honest
+    /// report; passing the full signature selects a specific overload.
+    /// </summary>
+    [Test]
+    public async Task ConfigureDotNetModule_FullSignature_SelectsThatOverload()
+    {
+        await PrepareStepAsync("OverloadStep");
+
+        var byName = await Ts.ConfigureDotNetModuleAsync(TempSeqFile, Seq, Grp, "OverloadStep",
+            FixtureAssembly, MathOps, "Overloaded", save: true);
+        Assert.That(byName.AppliedSettings, Does.ContainKey("signature"),
+            "with several overloads present the caller must be told which one it got");
+        TestContext.WriteLine($"bare name → {byName.AppliedSettings["signature"]}");
+
+        var bySignature = await Ts.ConfigureDotNetModuleAsync(TempSeqFile, Seq, Grp, "OverloadStep",
+            FixtureAssembly, MathOps, "Overloaded(Double, Double)", save: true);
+
+        Assert.That(bySignature.AppliedSettings, Does.ContainKey("memberResolved"), bySignature.Note);
+        Assert.That(bySignature.AppliedSettings["signature"].ToString(),
+            Is.EqualTo("Overloaded(Double, Double)"));
+        var parms = await Ts.GetModuleParametersAsync(TempSeqFile, Seq, Grp, "OverloadStep");
+        Assert.That(parms, Has.Count.EqualTo(3), "the 2-argument overload, not the 1-argument one");
+    }
+
+    /// <summary>
+    /// An instance member cannot be a step's first call — the adapter needs an object. That is a
+    /// real limitation, so it must reach the caller as the adapter's own reason instead of a step
+    /// that silently calls nothing.
+    /// </summary>
+    [Test]
+    public async Task ConfigureDotNetModule_InstanceMember_ReportsThatItNeedsAnObject()
+    {
+        await PrepareStepAsync("InstanceStep");
+
+        var result = await Ts.ConfigureDotNetModuleAsync(TempSeqFile, Seq, Grp, "InstanceStep",
+            FixtureAssembly, InstanceOps, "Triple", save: true);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(result.AppliedSettings, Does.Not.ContainKey("memberResolved"));
+            Assert.That(result.Note, Is.Not.Null.And.Contains("requires an object"),
+                "the specific reason from the call-level load must survive into the note");
+        });
+        TestContext.WriteLine($"note: {result.Note}");
+    }
+
+    /// <summary>
+    /// load_module_prototype's documented flow for .NET: configure while the assembly is out of reach,
+    /// then load once it is there. It could never work — the generic Module.LoadPrototype every other
+    /// adapter uses does not resolve a .NET member, so the tool reported prototypeLoaded=false and an
+    /// empty interface however reachable the assembly was (issue #37 names this tool in its title).
+    /// </summary>
+    [Test]
+    public async Task LoadModulePrototype_DotNetStep_ResolvesOnceTheAssemblyIsReachable()
+    {
+        string lateAssembly = System.IO.Path.Combine(System.IO.Path.GetTempPath(),
+            $"TS_LateArrival_{Guid.NewGuid():N}.dll");
+        await PrepareStepAsync("LateStep");
+        try
+        {
+            var cfg = await Ts.ConfigureDotNetModuleAsync(TempSeqFile, Seq, Grp, "LateStep",
+                lateAssembly, MathOps, "Add", save: true);
+            Assert.That(cfg.AppliedSettings, Does.Not.ContainKey("memberResolved"),
+                "the assembly does not exist yet — nothing may claim to be resolved");
+
+            System.IO.File.Copy(FixtureAssembly, lateAssembly);
+
+            var load = await Ts.LoadModulePrototypeAsync(TempSeqFile, Seq, Grp, "LateStep");
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(load.PrototypeLoaded, Is.True, $"note: {load.Note}");
+                Assert.That(load.Parameters, Has.Count.EqualTo(3),
+                    "the interface has to materialise: return value + two arguments");
+            });
+            TestContext.WriteLine($"note: {load.Note}");
+        }
+        finally
+        {
+            // The adapter may still hold the file — cleanup is best-effort by design.
+            try { System.IO.File.Delete(lateAssembly); } catch { }
+        }
+    }
+
+    /// <summary>
+    /// The other half: re-loading the prototype of an ALREADY valid step must leave it valid. The
+    /// first two tiers fail for a member with parameters, and a failed attempt must not strip the
+    /// interface the step already had.
+    /// </summary>
+    [Test]
+    public async Task LoadModulePrototype_DotNetStep_KeepsAnAlreadyValidInterface()
+    {
+        await PrepareStepAsync("AddStep");
+        await Ts.ConfigureDotNetModuleAsync(TempSeqFile, Seq, Grp, "AddStep",
+            FixtureAssembly, MathOps, "Add", save: true);
+
+        var load = await Ts.LoadModulePrototypeAsync(TempSeqFile, Seq, Grp, "AddStep");
+
+        Assert.That(load.PrototypeLoaded, Is.True, $"note: {load.Note}");
+        Assert.That(load.Parameters, Has.Count.EqualTo(3), "re-loading must not degrade a working step");
+        var parms = await Ts.GetModuleParametersAsync(TempSeqFile, Seq, Grp, "AddStep");
+        Assert.That(parms, Has.Count.EqualTo(3), "and it must stay that way on the saved step");
+    }
+
+    /// <summary>
+    /// The only test that proves the step CALLS something: a resolved member with bound arguments,
+    /// its return value written to a StationGlobal, executed for real. An unresolved .NET step runs
+    /// as a silent no-op that still reports Passed — which is exactly what made issue #37 invisible
+    /// — so nothing short of an observable side effect is evidence.
+    /// </summary>
+    [Test]
+    public async Task DotNetStep_WithBoundArguments_ActuallyCallsTheMethod()
+    {
+        string probe = NewProbeName();
+        await Ts.SetStationGlobalAsync(probe, 0);
+        try
+        {
+            await Ts.CreateSequenceFileAsync(TempSeqFile);
+            await Ts.InsertStepAsync(TempSeqFile, "MainSequence", Grp, "Action", "AddStep");
+            var cfg = await Ts.ConfigureDotNetModuleAsync(TempSeqFile, "MainSequence", Grp, "AddStep",
+                FixtureAssembly, MathOps, "Add", save: true);
+            Assert.That(cfg.AppliedSettings, Does.ContainKey("memberResolved"), cfg.Note);
+
+            // Bind both arguments and send the result to the probe. ArgVal is the parameter's
+            // expression slot: an input reads from it, the return value is written TO it.
+            const string p = "TS.SData.Calls[0].Params";
+            await Ts.SetStepPropertyAsync(TempSeqFile, "MainSequence", Grp, "AddStep",
+                $"{p}[1].ArgVal", "2", "string", save: false);
+            await Ts.SetStepPropertyAsync(TempSeqFile, "MainSequence", Grp, "AddStep",
+                $"{p}[2].ArgVal", "3", "string", save: false);
+            await Ts.SetStepPropertyAsync(TempSeqFile, "MainSequence", Grp, "AddStep",
+                $"{p}[0].ArgVal", $"StationGlobals.{probe}", "string", save: true);
+
+            var run = await Ts.RunSequenceAsync(TempSeqFile, "MainSequence", null, 60);
+            TestContext.WriteLine($"status={run.Status} result={run.Result}");
+
+            var globals = await Ts.GetStationGlobalsAsync();
+            double value = Convert.ToDouble(globals.First(g => g.Name == probe).Value);
+            Assert.That(value, Is.EqualTo(5.0).Within(1e-9),
+                "Add(2,3) must have run and written its result — 0 means the step called nothing");
+        }
+        finally
+        {
+            await Ts.DeleteStationGlobalAsync(probe);
+        }
     }
 
     [Test]

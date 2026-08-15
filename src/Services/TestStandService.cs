@@ -9211,30 +9211,33 @@ public sealed class TestStandService : ITestStandService
                 //    flag is not what makes a static call work. It stays available as a fallback for
                 //    members the untouched lookup misses, and the original value is restored when
                 //    neither attempt succeeds so a re-configure cannot degrade a working step.
-                int originalMemberFlags = 0;
-                try { originalMemberFlags = dn.MemberFlags; } catch { /* not readable — treat as 0 */ }
-
-                string? invalidReason = TryLoadDotNetMember(dn, stepName);
-                if (invalidReason == null)
+                //
+                //    THREE TIERS, in this order (issue #37): LoadMemberInfo untouched → LoadMemberInfo
+                //    with the Static bit → DotNetCall.LoadPrototypeFromSignature. The first two are
+                //    module-level and, measured against a purpose-built assembly, resolve only a bare
+                //    0-argument/void member; anything with a parameter or a return value needs the
+                //    call-level load. The order is deliberate — the tiers that already worked run
+                //    first, so nothing that resolves today changes route.
+                var resolution = ResolveDotNetMemberTiered(dn, methodName, stepName);
+                if (resolution.Resolved)
                 {
                     applied["memberResolved"] = true;
+                    applied["resolvedVia"]    = resolution.Via;
+                    if (resolution.Via == "member-info-static") applied["staticFallbackUsed"] = true;
+
+                    // WHICH member was resolved is not implied by methodName. A bare name matches ONE of
+                    // the overloads and the adapter picks it silently (measured: 'Overloaded' with three
+                    // overloads present resolves to 'Overloaded(Double)'), so the caller only learns what
+                    // it really got by reading the resolved signature back. Pass the full signature as
+                    // methodName — the exact string GetMemberNames/the editor's dropdown shows, e.g.
+                    // "Overloaded(Double, Double)" — to select a specific overload.
+                    if (!string.IsNullOrWhiteSpace(resolution.Signature))
+                        applied["signature"] = resolution.Signature;
                 }
                 else
                 {
-                    // Second chance with the Static bit, for a member the untouched lookup misses.
-                    try { dn.MemberFlags = StaticMemberFlag; } catch { /* keep the first reason */ }
-                    string? staticReason = TryLoadDotNetMember(dn, stepName);
-                    if (staticReason == null)
-                    {
-                        applied["memberResolved"]    = true;
-                        applied["staticFallbackUsed"] = true;
-                    }
-                    else
-                    {
-                        try { dn.MemberFlags = originalMemberFlags; } catch { /* resolution already failed */ }
-                        problems.Add($"the member could not be resolved against the assembly ({invalidReason}) "
-                                   + "— the step is configured but will not call anything");
-                    }
+                    problems.Add($"the member could not be resolved against the assembly ({resolution.Reason})"
+                               + " — the step is configured but will not call anything");
                 }
 
                 return applied;
@@ -9614,6 +9617,12 @@ public sealed class TestStandService : ITestStandService
     /// is why the first version of this fix still reported a phantom success. <c>IsCallValid</c> is the
     /// real check — and its <c>out</c> parameter is another reason the typed interface is mandatory,
     /// since out params do not marshal through the dynamic binder.</para>
+    /// <para>This module-level route resolves far LESS than it looks like it does. Measured against a
+    /// purpose-built assembly (7-point signature matrix, 2026-08-15): with the flags untouched it
+    /// resolved NOTHING, with the Static bit only the bare <c>NoArgsVoid()</c>; every member with a
+    /// parameter or a non-void return failed with "Prototype does not match that found for member
+    /// '&lt;name&gt;'" although the member exists.
+    /// <see cref="TryLoadDotNetPrototypeFromSignature"/> is what covers those.</para>
     /// </summary>
     private string? TryLoadDotNetMember(NiDotNetModule dn, string stepName)
     {
@@ -9643,6 +9652,155 @@ public sealed class TestStandService : ITestStandService
         {
             _logger.LogDebug(ex, "IsCallValid check failed for step '{Step}'.", stepName);
             return $"validity could not be checked ({ex.Message.Trim()})";
+        }
+    }
+
+    /// <summary>Outcome of <see cref="ResolveDotNetMemberTiered"/>: whether the member resolved, by
+    /// which route, the signature the adapter actually bound, and — when it did not — the reason.</summary>
+    private sealed class DotNetMemberResolution
+    {
+        public bool    Resolved;
+        public string  Via       = "";   // member-info | member-info-static | signature
+        public string  Signature = "";
+        public string? Reason;           // set only when Resolved is false
+    }
+
+    /// <summary>
+    /// Resolves a .NET step's member in three tiers — untouched <c>LoadMemberInfo</c>, the same with the
+    /// Static bit, then the call-level <c>LoadPrototypeFromSignature</c> — and reports which one bound
+    /// it. Shared by <c>configure_dotnet_module</c> and <c>load_module_prototype</c> so the two agree:
+    /// the generic <c>Module.LoadPrototype</c> that every other adapter uses does NOT resolve a .NET
+    /// member (it throws), which is why a step configured while its assembly was unreachable could
+    /// never be completed later (issue #37).
+    /// <para>The tier order is deliberate: the routes that already worked run first, so nothing that
+    /// resolves today changes route. <c>MemberFlags</c> is restored before the last tier and left at its
+    /// original value when all three fail, so a failed attempt cannot degrade a working step.</para>
+    /// </summary>
+    private DotNetMemberResolution ResolveDotNetMemberTiered(NiDotNetModule dn,
+        string memberOrSignature, string stepName)
+    {
+        var outcome = new DotNetMemberResolution();
+
+        int originalMemberFlags = 0;
+        try { originalMemberFlags = dn.MemberFlags; } catch { /* not readable — treat as 0 */ }
+
+        string? firstReason = TryLoadDotNetMember(dn, stepName);
+        if (firstReason == null)
+        {
+            outcome.Resolved = true;
+            outcome.Via      = "member-info";
+        }
+        else
+        {
+            // Second chance with the Static bit, for a member the untouched lookup misses.
+            try { dn.MemberFlags = StaticMemberFlag; } catch { /* keep the first reason */ }
+            string? staticReason = TryLoadDotNetMember(dn, stepName);
+            if (staticReason == null)
+            {
+                outcome.Resolved = true;
+                outcome.Via      = "member-info-static";
+            }
+            else
+            {
+                // Third tier: the CALL-level prototype load. The module-level LoadMemberInfo above
+                // resolves only members whose prototype is already an exact match, which in practice
+                // means zero parameters and a void return — everything else comes back "Prototype does
+                // not match that found for member '<name>'". The flags are restored first: this load
+                // works from the member name/signature, and the speculative Static bit is only
+                // meaningful to LoadMemberInfo.
+                try { dn.MemberFlags = originalMemberFlags; } catch { /* about to retry anyway */ }
+                string? signatureReason =
+                    TryLoadDotNetPrototypeFromSignature(dn, memberOrSignature, stepName);
+                if (signatureReason == null)
+                {
+                    outcome.Resolved = true;
+                    outcome.Via      = "signature";
+                }
+                else
+                {
+                    // Both reasons travel: the first names the prototype mismatch, the second is the
+                    // specific one (e.g. "instance member that requires an object").
+                    outcome.Reason = firstReason
+                        + (string.Equals(signatureReason, firstReason, StringComparison.Ordinal)
+                            ? ""
+                            : $"; loading it by signature reported: {signatureReason}");
+                }
+            }
+        }
+
+        if (outcome.Resolved) outcome.Signature = ReadResolvedCallSignature(dn);
+        return outcome;
+    }
+
+    /// <summary>The member a .NET step is configured to call, for a re-resolution that was not given one
+    /// (<c>load_module_prototype</c>). The module-level name is authoritative; the call entry is the
+    /// fallback for a step whose module property was not written. Empty = nothing configured.</summary>
+    private string ReadConfiguredDotNetMember(NiDotNetModule dn)
+    {
+        try
+        {
+            string m = dn.MemberName;
+            if (!string.IsNullOrWhiteSpace(m)) return m;
+        }
+        catch (Exception ex) { _logger.LogDebug(ex, "DotNetModule.MemberName not readable."); }
+
+        try { if (dn.Calls.Count > 0) return dn.Calls[0].MemberName ?? ""; }
+        catch (Exception ex) { _logger.LogDebug(ex, "Calls[0].MemberName not readable."); }
+
+        return "";
+    }
+
+    /// <summary>
+    /// Resolves the member at the CALL level — <c>DotNetCall.LoadPrototypeFromSignature</c>, the API
+    /// behind the Edit .NET Call dialog's member dropdown — and reports whether the resulting call is
+    /// executable. Returns <c>null</c> on success, otherwise the reason.
+    /// <para>This is the tier that actually works for real signatures. Measured 2026-08-15 on a
+    /// purpose-built assembly: every member the module-level <see cref="TryLoadDotNetMember"/> rejects
+    /// with "Prototype does not match" — 1 and 2 parameters, non-void returns, <c>out</c> parameters —
+    /// resolves here, with <c>Calls[0].Params</c> populated (the return value included, as the
+    /// entry named "Return Value").</para>
+    /// <para><paramref name="memberOrSignature"/> may be a bare member name or the full signature
+    /// string (<c>"Overloaded(Double, Double)"</c>); <c>allowMemberNameMatching:true</c> is what
+    /// permits the former. A bare name that matches several overloads picks ONE of them silently —
+    /// hence the caller reports the resolved signature back. A member that does not exist returns
+    /// false, so an honest failure survives.</para>
+    /// </summary>
+    private string? TryLoadDotNetPrototypeFromSignature(NiDotNetModule dn, string memberOrSignature,
+        string stepName)
+    {
+        try
+        {
+            if (dn.Calls.Count < 1) return "the adapter created no call entry";
+
+            if (!dn.Calls[0].LoadPrototypeFromSignature(memberOrSignature, true, 0))
+                return $"no member matching '{memberOrSignature}' was found in the class";
+
+            if (dn.Calls[0].IsCallValid(out string error)) return null;
+
+            if (string.IsNullOrWhiteSpace(error))
+            {
+                try { error = dn.AssemblyWarnings; } catch { /* leave it empty */ }
+            }
+            return string.IsNullOrWhiteSpace(error)
+                ? "the adapter reports the call as invalid without a reason"
+                : error.Trim();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "LoadPrototypeFromSignature failed for step '{Step}'.", stepName);
+            return ex.Message.Trim();
+        }
+    }
+
+    /// <summary>Reads the signature the adapter actually bound, so a caller that passed a bare member
+    /// name can see WHICH overload it got. Empty when it cannot be read — never a guess.</summary>
+    private string ReadResolvedCallSignature(NiDotNetModule dn)
+    {
+        try { return dn.Calls.Count > 0 ? dn.Calls[0].Signature ?? "" : ""; }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Could not read the resolved .NET call signature.");
+            return "";
         }
     }
 
@@ -12756,9 +12914,10 @@ public sealed class TestStandService : ITestStandService
     /// same precedence order as get_module_parameters: LabVIEW connector-pane bindings
     /// (TS.SData.ViCall.Parms — cluster members flattened as 'parent.child'), the step-root VIModule
     /// of utility steps (NI_LV_RunVIAsynchronously), SequenceCall actual arguments
-    /// (TS.SData.ActualArgs) and finally the legacy flat Module.Parameters container
-    /// (DLL / .NET / Python / ActiveX). Returns the first non-empty source. Shared by
-    /// get_module_parameters and the "Load Prototype" paths so they report an identical interface.
+    /// (TS.SData.ActualArgs), the Python argument list (TS.SData.PythonCall.Parameters), the .NET
+    /// call chain (TS.SData.Calls[i].Params) and finally the legacy flat Module.Parameters container.
+    /// Returns the first non-empty source. Shared by get_module_parameters and the "Load Prototype"
+    /// paths so they report an identical interface.
     /// </summary>
     private List<ModuleParameterInfo> ReadModuleParameters(NiPropertyObject stepPo, string stepName)
     {
@@ -12844,7 +13003,46 @@ public sealed class TestStandService : ITestStandService
         }
         catch (Exception ex) { _logger.LogDebug(ex, "No PythonCall parameters on step '{Step}'.", stepName); }
 
-        // 5) Legacy adapters that expose a flat Module.Parameters container.
+        // 5) .NET adapter: TS.SData.Calls[] — an ARRAY of call entries, each with its own Params array
+        //    of DotNetParameter containers. A .NET step never populates the flat Module.Parameters
+        //    container below, which is why get_module_parameters returned [] for every .NET step even
+        //    when the step had a fully resolved member with bound arguments (issue #37).
+        //    Calls[] is an array because one step can chain several invocations (construct an object,
+        //    call a method on it, dispose it), so the entries are prefixed with their member name when
+        //    there is more than one — otherwise the names would collide across entries.
+        try
+        {
+            NiPropertyObject calls =
+                (NiPropertyObject)(object)stepPo.GetPropertyObject("TS.SData.Calls", 0);
+            int numCalls = calls.GetNumElements();
+            for (int c = 0; c < numCalls; c++)
+            {
+                try
+                {
+                    NiPropertyObject call = (NiPropertyObject)(object)calls.GetPropertyObjectByOffset(c, 0);
+                    string member = "";
+                    try { member = call.GetValString("MemberName", 0); } catch { /* unnamed entry */ }
+
+                    NiPropertyObject parms;
+                    try { parms = (NiPropertyObject)(object)call.GetPropertyObject("Params", 0); }
+                    catch (Exception ex)
+                    {
+                        _logger.LogDebug(ex, "Call entry {Index} of step '{Step}' has no Params.", c, stepName);
+                        continue;
+                    }
+
+                    int numParms = parms.GetNumElements();
+                    for (int i = 0; i < numParms; i++)
+                        AddDotNetParameter(parms, i, numCalls > 1 ? member : "", result, stepName);
+                }
+                catch (Exception ex)
+                { _logger.LogDebug(ex, "Failed to read .NET call entry {Index} of step '{Step}'.", c, stepName); }
+            }
+            if (result.Count > 0) return result;
+        }
+        catch (Exception ex) { _logger.LogDebug(ex, "No .NET Calls on step '{Step}'.", stepName); }
+
+        // 6) Legacy adapters that expose a flat Module.Parameters container.
         try
         {
             NiPropertyObject moduleParams;
@@ -12877,6 +13075,73 @@ public sealed class TestStandService : ITestStandService
 
         return result;
     }
+
+    /// <summary>
+    /// Emits one <see cref="ModuleParameterInfo"/> for a <c>DotNetParameter</c> entry of a
+    /// <c>TS.SData.Calls[c].Params</c> array. The leaf names are the ones the entry really carries
+    /// (verified on a resolved step): <c>Name</c>, <c>ArgVal</c> (the binding expression — the
+    /// destination for a return value / output), <c>Type</c> (a numeric
+    /// <c>DotNetParameterTypes</c> code), <c>TypeName</c> (set for class/struct/enum types only) and
+    /// <c>Flags</c>. There is no Direction leaf: the direction lives in the Flags bits — measured
+    /// <c>0</c> for a plain input, <c>6</c> for the "Return Value" entry and <c>10</c> for an
+    /// <c>out</c> parameter, i.e. bit 4 = return, bit 2 = output.
+    /// </summary>
+    private void AddDotNetParameter(NiPropertyObject parms, int index, string memberPrefix,
+        List<ModuleParameterInfo> result, string stepName)
+    {
+        try
+        {
+            NiPropertyObject p = (NiPropertyObject)(object)parms.GetPropertyObjectByOffset(index, 0);
+
+            string name = "";
+            try { name = p.GetValString("Name", 0); } catch { /* fall back below */ }
+            if (string.IsNullOrEmpty(name)) name = string.IsNullOrEmpty(p.Name) ? $"[{index}]" : p.Name;
+
+            var pi = new ModuleParameterInfo
+            {
+                Name = string.IsNullOrEmpty(memberPrefix) ? name : $"{memberPrefix}.{name}",
+                Type = "DotNetParameter",
+            };
+
+            try { pi.Value = p.GetValString("ArgVal", 0); } catch { /* unbound */ }
+
+            // TypeName is only filled for class/struct/enum parameters; for the built-ins the numeric
+            // Type code is the only type information the entry carries.
+            string typeName = "";
+            try { typeName = p.GetValString("TypeName", 0); } catch { /* built-in */ }
+            if (string.IsNullOrWhiteSpace(typeName))
+            {
+                try { typeName = DotNetParameterTypeName((int)p.GetValNumber("Type", 0)); } catch { }
+            }
+            pi.DataType = typeName ?? "";
+
+            try
+            {
+                int flags = (int)p.GetValNumber("Flags", 0);
+                pi.Direction = (flags & 4) != 0 ? "Return"
+                             : (flags & 2) != 0 ? "Output"
+                             : "Input";
+            }
+            catch { pi.Direction = "Input"; }
+
+            result.Add(pi);
+        }
+        catch (Exception ex)
+        { _logger.LogDebug(ex, "Failed to read .NET parameter {Index} of step '{Step}'.", index, stepName); }
+    }
+
+    /// <summary>Maps a <c>DotNetParameterTypes</c> code to its name, so a parameter's data type is
+    /// readable instead of a bare number. Unknown codes are reported as-is rather than guessed.</summary>
+    private static string DotNetParameterTypeName(int code) => code switch
+    {
+        0  => "Class",   1  => "String",  2  => "Boolean", 3  => "Byte",
+        4  => "SByte",   5  => "Int16",   6  => "Int32",   7  => "Int64",
+        8  => "UInt16",  9  => "UInt32",  10 => "UInt64",  11 => "Single",
+        12 => "Double",  13 => "Decimal", 14 => "Char",    15 => "IntPtr",
+        16 => "Enum",    17 => "Object",  18 => "Struct",  19 => "Void",
+        20 => "UIntPtr",
+        _  => code.ToString(System.Globalization.CultureInfo.InvariantCulture),
+    };
 
     /// <summary>
     /// Flattens a ViCall.Parms array (VIParameter entries) into ModuleParameterInfo rows.
@@ -13312,6 +13577,43 @@ public sealed class TestStandService : ITestStandService
             try { loaded = TryLoadModulePrototype(mod, stepName); }
             finally { RestoreLabVIEWAdapter(lvRestore); }
 
+            // .NET needs its own route: Module.LoadPrototype does not resolve a .NET member (it throws,
+            // so the generic attempt above always reports false), which left load_module_prototype
+            // unable to complete a step that was configured while its assembly was unreachable — the
+            // tool's documented "configure now, load once the target is reachable" flow (issue #37).
+            // Same three tiers as configure_dotnet_module, so both agree on what resolves and how.
+            string? dotNetNote = null;
+            if (IsDotNetAdapter(adapterKey))
+            {
+                NiDotNetModule? dn = null;
+                try { dn = (NiDotNetModule)(object)mod; }
+                catch (Exception ex)
+                { _logger.LogDebug(ex, "Step '{Step}' reports the .NET adapter but is not a DotNetModule.", stepName); }
+
+                string member = dn == null ? "" : ReadConfiguredDotNetMember(dn);
+                if (dn == null) { /* nothing to re-resolve — the generic note applies */ }
+                else if (string.IsNullOrWhiteSpace(member))
+                {
+                    dotNetNote = "The step has no .NET member configured yet — set one with "
+                               + "configure_dotnet_module first; there is nothing to reload.";
+                }
+                else
+                {
+                    var resolution = ResolveDotNetMemberTiered(dn, member, stepName);
+                    if (resolution.Resolved)
+                    {
+                        loaded = true;
+                        dotNetNote = $"Resolved the .NET member via {resolution.Via}"
+                                   + (string.IsNullOrWhiteSpace(resolution.Signature)
+                                        ? "." : $" ({resolution.Signature}).");
+                    }
+                    else
+                    {
+                        dotNetNote = $"The .NET member '{member}' could not be resolved: {resolution.Reason}";
+                    }
+                }
+            }
+
             NiPropertyObject stepPo = ((NiStep)(object)step).AsPropertyObject();
             var parameters = ReadModuleParameters(stepPo, stepName);
 
@@ -13325,6 +13627,9 @@ public sealed class TestStandService : ITestStandService
             else if (parameters.Count == 0)
                 note = "Prototype loaded, but the interface has no parameters — either the target " +
                        "genuinely has none, or its interface could not be read headless.";
+
+            // The .NET outcome is the specific one — it leads, the generic hint (if any) follows.
+            if (dotNetNote != null) note = note == null ? dotNetNote : $"{dotNetNote} {note}";
 
             // Surface the LabVIEW-adapter routing diagnostic (cast/server/init outcome) in the note so
             // it comes back via stdout regardless of log capture — the key signal for why a headless
@@ -13356,6 +13661,12 @@ public sealed class TestStandService : ITestStandService
         => !string.IsNullOrEmpty(adapterKey)
            && (adapterKey.StartsWith("G ", StringComparison.OrdinalIgnoreCase)
                || adapterKey.IndexOf("LabVIEW", StringComparison.OrdinalIgnoreCase) >= 0);
+
+    // The .NET adapter's key name is "DotNet Adapter". Its prototype load is the one that needs the
+    // adapter-specific tiers rather than the generic Module.LoadPrototype.
+    private static bool IsDotNetAdapter(string? adapterKey)
+        => !string.IsNullOrEmpty(adapterKey)
+           && adapterKey.IndexOf("DotNet", StringComparison.OrdinalIgnoreCase) >= 0;
 
     // Best-effort read of a step's VI path (to detect a packed library .lvlibp). Tries the common
     // homes for the VI reference; returns "" if none present. Never calls LoadPrototype.
