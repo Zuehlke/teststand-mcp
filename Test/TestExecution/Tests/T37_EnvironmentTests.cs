@@ -42,6 +42,62 @@ public class T37_EnvironmentTests
         try { if (Directory.Exists(_tmp)) Directory.Delete(_tmp, recursive: true); } catch (IOException) { }
     }
 
+    // ── Passing the environment to child processes (issue #35 follow-up) ─────
+    //
+    // AnalyzerApp.exe, FileDiffer.exe and SeqEdit.exe each start an engine of their OWN, so an
+    // environment that is only applied in-process leaves all three on the global station
+    // configuration — silently. All three accept the same /env <path> switch (verified live against
+    // AnalyzerApp.exe's and FileDiffer.exe's own command-line help).
+
+    [Test]
+    public void PrependEnvSwitch_PutsEnvFirstAndQuotesThePath()
+    {
+        var result = TestStandEnvironmentLocator.PrependEnvSwitch(
+            "\"C:\\proj.tsaproj\" /analyze /quit", @"C:\Product\Config\Product.tsenv");
+
+        Assert.That(result, Is.EqualTo(
+            "/env \"C:\\Product\\Config\\Product.tsenv\" \"C:\\proj.tsaproj\" /analyze /quit"),
+            "both NI tools document /env as the LEADING flag, space-separated from its path");
+    }
+
+    [Test]
+    public void PrependEnvSwitch_QuotesAPathWithSpaces()
+    {
+        var result = TestStandEnvironmentLocator.PrependEnvSwitch(
+            "/GenerateReport \"r.xml\" \"a.seq\" \"b.seq\"", @"C:\My Products\Line 1\Env.tsenv");
+
+        Assert.That(result, Does.StartWith("/env \"C:\\My Products\\Line 1\\Env.tsenv\" "));
+    }
+
+    [TestCase(null)]
+    [TestCase("")]
+    [TestCase("   ")]
+    public void PrependEnvSwitch_WithoutAnEnvironment_LeavesTheCommandLineByteIdentical(string? env)
+    {
+        // The regression guard for every station that never used an environment: the NI tools must be
+        // launched with exactly the command line they were launched with before this feature existed.
+        const string original = "\"C:\\proj.tsaproj\" /analyze /report \"C:\\r.xml\" /save /quit";
+
+        Assert.That(TestStandEnvironmentLocator.PrependEnvSwitch(original, env),
+            Is.EqualTo(original).And.SameAs(original));
+    }
+
+    [Test]
+    public void PrependEnvSwitch_OnAnEmptyCommandLine_EmitsNoStrayeSeparator()
+    {
+        // launch_sequence_editor starts SeqEdit.exe with no arguments at all.
+        Assert.That(TestStandEnvironmentLocator.PrependEnvSwitch("", @"C:\P\E.tsenv"),
+            Is.EqualTo("/env \"C:\\P\\E.tsenv\""));
+    }
+
+    [Test]
+    public void PrependEnvSwitch_DoesNotDoubleQuoteAnAlreadyQuotedPath()
+    {
+        // A path that arrived quoted (e.g. copied out of a config file) must not become ""…"".
+        Assert.That(TestStandEnvironmentLocator.PrependEnvSwitch("x", "\"C:\\P\\E.tsenv\""),
+            Is.EqualTo("/env \"C:\\P\\E.tsenv\" x"));
+    }
+
     // ── Fixtures ─────────────────────────────────────────────────────────────
 
     /// <summary>Creates a directory below the scratch root (nested path segments allowed).</summary>

@@ -4804,7 +4804,7 @@ public sealed class TestStandService : ITestStandService
             // Resolve Bin/Public dirs + version for the *connected* engine — no hard-coded release.
             var (binDir, publicDir, productVersion, probed) = ResolveAnalyzerLocations();
             return RunAnalysisViaApp(filePath, binDir, publicDir, productVersion, probed, Log, Flush,
-                timeoutSeconds);
+                timeoutSeconds, _activeEnvPath);
         });
     }
 
@@ -4816,7 +4816,9 @@ public sealed class TestStandService : ITestStandService
         string probed,
         Action<string> Log,
         Action Flush,
-        int timeoutSeconds)
+        int timeoutSeconds,
+        // The environment the connected engine runs in; passed on to AnalyzerApp.exe's own engine.
+        string? environmentPath)
     {
         // AnalyzerApp.exe ships in the connected engine's Bin directory — never hard-code a release.
         string analyzerExe = !string.IsNullOrEmpty(binDir)
@@ -4898,7 +4900,11 @@ public sealed class TestStandService : ITestStandService
         var psi = new System.Diagnostics.ProcessStartInfo
         {
             FileName               = analyzerExe,
-            Arguments              = $"\"{tempProject}\" /analyze /report \"{reportPath}\" /save /quit",
+            // AnalyzerApp.exe starts an engine of its own, so without /env it would analyze against
+            // the GLOBAL search directories, type palettes and adapter configuration while the rest
+            // of this server runs in the caller's environment — wrong results, reported as clean.
+            Arguments              = TestStandEnvironmentLocator.PrependEnvSwitch(
+                $"\"{tempProject}\" /analyze /report \"{reportPath}\" /save /quit", environmentPath),
             UseShellExecute        = false,
             RedirectStandardOutput = true,
             RedirectStandardError  = true,
@@ -10766,7 +10772,13 @@ public sealed class TestStandService : ITestStandService
             var psi = new System.Diagnostics.ProcessStartInfo
             {
                 FileName               = differExe,
-                Arguments              = $"/GenerateReport \"{reportPath}\" \"{filePath1}\" \"{filePath2}\"",
+                // FileDiffer.exe loads type palettes and process models (see its own
+                // /TypePaletteLoading and /ProcessModelLoading switches), all of which come from the
+                // environment's CommonAppData — so a diff of files using environment-specific types
+                // can resolve them differently without /env. That would undermine the one tool used
+                // to verify a rebuild.
+                Arguments              = TestStandEnvironmentLocator.PrependEnvSwitch(
+                    $"/GenerateReport \"{reportPath}\" \"{filePath1}\" \"{filePath2}\"", _activeEnvPath),
                 UseShellExecute        = false,
                 RedirectStandardOutput = true,
                 RedirectStandardError  = true,
@@ -13502,6 +13514,17 @@ public sealed class TestStandService : ITestStandService
             "--step",     stepName,
             "--lv-server", labviewServer ?? "deferred" })
             psi.ArgumentList.Add(a);
+
+        // The worker is a fresh PROCESS with a fresh engine, and Program.cs handles its argument
+        // before the configuration is ever built — so appsettings.json, the TESTSTAND_MCP_ variables
+        // (which it does inherit) and the parent's own command line are all invisible to it. Passing
+        // the ALREADY VERIFIED environment explicitly is the only channel that reaches it.
+        if (_activeEnvPath != null)
+        {
+            psi.ArgumentList.Add("--tsenv");
+            psi.ArgumentList.Add(_activeEnvPath);
+        }
+
         if (searchDirsFile != null)
         {
             psi.ArgumentList.Add("--search-dirs");

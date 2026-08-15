@@ -518,6 +518,26 @@ the activation (`ApplyEnvironmentBeforeActivation`), because the call throws onc
   forever; a modal dialog on the engine thread — the classic symptom of an uninitialized
   `CommonAppData` — hung the tool call and the whole session. On expiry the service latches
   "restart required" instead of starting a second engine next to the parked one.
+- **The CHILD PROCESSES need it too — each starts its OWN engine** (issue #35 follow-up). An
+  environment applied only in-process leaves them on the global station configuration, silently:
+  `AnalyzerApp.exe` (`analyze_sequence_file` / `run_sequence_analyzer`), `FileDiffer.exe`
+  (`diff_sequence_files` / `compare_sequence_files`) and `SeqEdit.exe` (`launch_sequence_editor` /
+  `open_file_in_editor` / `run_in_editor`) all take the same **`/env <path>`** switch — leading flag,
+  space-separated, path quoted (`TestStandEnvironmentLocator.PrependEnvSwitch`). The isolated
+  prototype worker takes **`--tsenv`**. Only the VERIFIED `ActiveEnvironmentPath` is forwarded.
+  - **The worker's only channel is that argument.** `Program.cs` dispatches `--load-prototype-worker`
+    BEFORE the `ConfigurationBuilder` runs, so `appsettings.json`, the inherited `TESTSTAND_MCP_`
+    variables and the parent's command line are all invisible to it.
+  - **Measured (2026-08-15):** a bogus `/env` hangs `AnalyzerApp.exe` on a modal "Sequence Analyzer"
+    dialog (so the switch IS consumed; a valid one exits 0) — which is harmless here only because the
+    forwarded path was already verified at connect. The environment demonstrably changes the engine's
+    **SearchDirectories** (`C:\Users\Public\Documents\NI\TestStand …` globally vs. the product root
+    under the environment), which is the mechanism by which the analyzer resolves modules differently.
+    Note the analysis of one real file produced IDENTICAL messages either way — the effect is
+    file-dependent, so do not expect every analysis to change.
+  - **`SeqEdit.exe` is single-instance:** a running editor keeps the environment it was started with
+    and `/env` cannot retarget it. The server warns rather than implying a match. Which environment a
+    running editor uses cannot be read back — its UI is CEF (see `teststand-seqedit-cef-no-automation`).
 - Without a `.tsenv` **not one new COM call happens** — the global path is byte-identical to before.
 
 Needs a **FRESH MCP session**: the `tsenv_path` / `tsenv_search_from` params.

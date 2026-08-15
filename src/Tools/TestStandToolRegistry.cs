@@ -4418,7 +4418,9 @@ public class TestStandToolRegistry
     private async Task<CallToolResult> LaunchSequenceEditorAsync(JsonElement? args)
     {
         var path = args?.GetStringOrNull("seqedit_path");
-        var result = await _seqEditor.LaunchAsync(path);
+        // Hand the editor the environment this server verified itself into, so the human does not end
+        // up looking at the global station configuration while the agent works in a product one.
+        var result = await _seqEditor.LaunchAsync(path, _ts.ActiveEnvironmentPath);
         if (result)
         {
             var status = await _seqEditor.GetStatusAsync();
@@ -4436,7 +4438,7 @@ public class TestStandToolRegistry
     private async Task<CallToolResult> OpenFileInEditorAsync(JsonElement? args)
     {
         var path = args!.Value.GetRequiredString("file_path");
-        await _seqEditor.OpenFileAsync(path);
+        await _seqEditor.OpenFileAsync(path, _ts.ActiveEnvironmentPath);
         return Ok($"Opened sequence file in Sequence Editor: {path}");
     }
 
@@ -4444,7 +4446,7 @@ public class TestStandToolRegistry
     {
         var path  = args!.Value.GetRequiredString("sequence_file_path");
         var entry = args!.Value.GetRequiredString("entry_point");
-        var result = await _seqEditor.RunSequenceAsync(path, entry);
+        var result = await _seqEditor.RunSequenceAsync(path, entry, _ts.ActiveEnvironmentPath);
         return Ok(result);
     }
 

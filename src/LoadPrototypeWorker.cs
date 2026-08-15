@@ -86,6 +86,11 @@ internal static class LoadPrototypeWorker
         // only filled when the CALLEE file is loaded in the same engine, and this worker owns a fresh
         // engine that knows nothing about what the parent had open.
         string? openFilesFile  = GetArg(args, "--open-files");
+        // The TestStand environment the PARENT verified itself into. Program.cs dispatches this worker
+        // before it builds any configuration, so nothing else reaches this process: not appsettings.json,
+        // not the inherited TESTSTAND_MCP_ variables, not the parent's command line. Without it the
+        // worker's fresh engine silently loads the prototype against the global adapter configuration.
+        string? tsenv = GetArg(args, "--tsenv");
 
         // Logger → STDERR only (keeps STDOUT clean for the single result line).
         using var loggerFactory = LoggerFactory.Create(b =>
@@ -105,7 +110,7 @@ internal static class LoadPrototypeWorker
         var svc = new TestStandService(loggerFactory.CreateLogger<TestStandService>());
         try
         {
-            if (!await svc.ConnectAsync())
+            if (!await svc.ConnectAsync(tsenvPath: tsenv))
             {
                 WriteResult(false, "", "Worker could not connect to the TestStand engine.", 0);
                 HardExit(0);
