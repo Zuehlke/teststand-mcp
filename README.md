@@ -261,6 +261,29 @@ from a file path.
   before the engine is constructed, and the connect itself is bounded by `ConnectTimeoutSeconds` — so
   a misconfiguration returns an error naming the defect instead of hanging the session.
 
+### It reaches the child processes too
+
+Several tools do their work in a separate process that starts an engine **of its own**, so an
+environment applied only in-process would leave them on the global station configuration — silently,
+with no error to notice. All of them now receive it:
+
+| Tool | Child process | How |
+|---|---|---|
+| `analyze_sequence_file`, `run_sequence_analyzer` | `AnalyzerApp.exe` | `/env` |
+| `diff_sequence_files`, `compare_sequence_files` | `FileDiffer.exe` | `/env` |
+| `launch_sequence_editor`, `open_file_in_editor`, `run_in_editor` | `SeqEdit.exe` | `/env` |
+| `load_module_prototype` (isolated worker) | this server, re-launched | `--tsenv` |
+
+Only the environment the engine **verified itself into** is forwarded, so a child can never be sent a
+path the parent did not prove. Without an environment the command lines are byte-identical to what
+they were before.
+
+Two limits worth knowing. The prototype worker is dispatched before any configuration is built, so
+the explicit argument is the *only* channel that reaches it — `appsettings.json` and the inherited
+`TESTSTAND_MCP_…` variables do not. And `SeqEdit.exe` is single-instance: if an editor is already
+running, your file opens in *that* instance and keeps the environment it was started with, which
+`/env` cannot change — the server logs a warning instead of implying a match.
+
 `open_sequence_file` additionally warns when a file belongs to a *different* environment than the one
 the engine runs in. The file still opens; the warning exists because its process models, type
 palettes and station globals resolve from another `CommonAppData`.

@@ -99,6 +99,38 @@ internal static class TestStandEnvironmentLocator
     internal static bool IsAutoSentinel(string? value) =>
         value is not null && value.Trim().Equals(AutoSentinel, StringComparison.OrdinalIgnoreCase);
 
+    // ── Passing the environment to child processes ───────────────────────────
+
+    /// <summary>
+    /// Prepends <c>/env "&lt;path&gt;"</c> to a child process's command line.
+    ///
+    /// <para><b>Why every NI tool the server launches needs this.</b> The environment redirects an
+    /// engine's <c>CommonAppData</c>, and each of these tools starts an engine <i>of its own</i>:
+    /// <c>AnalyzerApp.exe</c> resolves search directories, type palettes and adapter configuration
+    /// from it, <c>FileDiffer.exe</c> loads type palettes and process models from it (its own
+    /// <c>/TypePaletteLoading</c> and <c>/ProcessModelLoading</c> switches say so), and
+    /// <c>SeqEdit.exe</c> runs sequences against it. Without the switch a tsenv-scoped session gets
+    /// results computed against the GLOBAL station configuration — silently, with no error to notice.</para>
+    ///
+    /// <para>
+    /// Both NI tools document <c>/env</c> as the leading flag and take the path space-separated (not
+    /// <c>/env=</c>), which is what this produces. The path is always quoted: it costs nothing when
+    /// there are no spaces and is required when there are.
+    /// </para>
+    ///
+    /// <para>
+    /// With no environment the arguments come back BYTE-IDENTICAL, so a station that never used one
+    /// launches exactly the command line it always did.
+    /// </para>
+    /// </summary>
+    internal static string PrependEnvSwitch(string arguments, string? environmentPath)
+    {
+        if (string.IsNullOrWhiteSpace(environmentPath)) return arguments;
+
+        var prefix = $"/env \"{environmentPath!.Trim().Trim('"')}\"";
+        return string.IsNullOrEmpty(arguments) ? prefix : $"{prefix} {arguments}";
+    }
+
     // ── Reading + validating ─────────────────────────────────────────────────
 
     /// <summary>

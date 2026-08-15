@@ -14,14 +14,17 @@ public interface ISequenceEditorService : IDisposable
 {
     /// <summary>True when a Sequence Editor process is running.</summary>
     bool IsRunning { get; }
-    /// <summary>Launches the Sequence Editor (or attaches to a running instance).</summary>
-    Task<bool> LaunchAsync(string? seqEditPath = null);
+    /// <summary>Launches the Sequence Editor (or attaches to a running instance).
+    /// <paramref name="environmentPath"/> is the TestStand environment the server itself runs in; it
+    /// is passed on as SeqEdit's <c>/env</c> switch so the editor does not come up in the global
+    /// station configuration while the server works in a product environment.</summary>
+    Task<bool> LaunchAsync(string? seqEditPath = null, string? environmentPath = null);
     /// <summary>Returns the current Sequence Editor status.</summary>
     Task<SequenceEditorInfo> GetStatusAsync();
-    /// <summary>Opens a sequence file in the editor.</summary>
-    Task OpenFileAsync(string filePath);
-    /// <summary>Runs a sequence's entry point in the editor.</summary>
-    Task<string> RunSequenceAsync(string sequenceFilePath, string entryPoint);
+    /// <summary>Opens a sequence file in the editor, in the given TestStand environment.</summary>
+    Task OpenFileAsync(string filePath, string? environmentPath = null);
+    /// <summary>Runs a sequence's entry point in the editor, in the given TestStand environment.</summary>
+    Task<string> RunSequenceAsync(string sequenceFilePath, string entryPoint, string? environmentPath = null);
     /// <summary>Closes the editor, optionally forcing termination.</summary>
     Task CloseEditorAsync(bool force = false);
 }
@@ -67,7 +70,7 @@ public class SequenceEditorService : ISequenceEditorService
     // ── Launch / Connect ──────────────────────────────────────────────────────
 
     /// <inheritdoc/>
-    public async Task<bool> LaunchAsync(string? seqEditPath = null)
+    public async Task<bool> LaunchAsync(string? seqEditPath = null, string? environmentPath = null)
     {
         return await Task.Run(() =>
         {
@@ -88,6 +91,14 @@ public class SequenceEditorService : ISequenceEditorService
                     for (int i = 1; i < existing.Length; i++) existing[i].Dispose();
                     _logger.LogInformation(
                         "Sequence Editor already running (PID: {Pid})", _editorProcess.Id);
+                    // SeqEdit is single-instance, so an already-running editor keeps whatever
+                    // environment IT was started with — /env cannot retarget it, and this process has
+                    // no way to read which one that is. Say so rather than implying a match.
+                    if (!string.IsNullOrWhiteSpace(environmentPath))
+                        _logger.LogWarning(
+                            "Attached to an already-running Sequence Editor; it keeps the environment " +
+                            "it was started with, which may differ from this server's '{Env}'.",
+                            environmentPath);
                     return true;
                 }
 
@@ -95,6 +106,7 @@ public class SequenceEditorService : ISequenceEditorService
                 _editorProcess = Process.Start(new ProcessStartInfo
                 {
                     FileName = _resolvedPath,
+                    Arguments = TestStandEnvironmentLocator.PrependEnvSwitch("", environmentPath),
                     UseShellExecute = true
                 });
 
@@ -154,7 +166,7 @@ public class SequenceEditorService : ISequenceEditorService
     // ── Open File ─────────────────────────────────────────────────────────────
 
     /// <inheritdoc/>
-    public async Task OpenFileAsync(string filePath)
+    public async Task OpenFileAsync(string filePath, string? environmentPath = null)
     {
         if (!File.Exists(filePath))
             throw new FileNotFoundException($"Sequence file not found: {filePath}");
@@ -167,12 +179,20 @@ public class SequenceEditorService : ISequenceEditorService
 
             _logger.LogInformation("Opening file in Sequence Editor: {Path}", filePath);
 
-            // Launching seqedit.exe with a file argument opens it in the existing instance
-            // if the editor is already running (single-instance behavior)
+            // Launching seqedit.exe with a file argument opens it in the existing instance if the
+            // editor is already running (single-instance behavior) — in which case /env is moot,
+            // because that instance keeps the environment it was started with. The switch therefore
+            // only decides the environment when THIS call is what starts the editor.
+            if (!string.IsNullOrWhiteSpace(environmentPath) && IsRunning)
+                _logger.LogWarning(
+                    "The Sequence Editor is already running, so the file opens in that instance and " +
+                    "keeps its environment — which may differ from this server's '{Env}'.",
+                    environmentPath);
+
             Process.Start(new ProcessStartInfo
             {
                 FileName  = editorPath,
-                Arguments = $"\"{filePath}\"",
+                Arguments = TestStandEnvironmentLocator.PrependEnvSwitch($"\"{filePath}\"", environmentPath),
                 UseShellExecute = true
             })?.Dispose();
         });
@@ -181,7 +201,8 @@ public class SequenceEditorService : ISequenceEditorService
     // ── Run Sequence ──────────────────────────────────────────────────────────
 
     /// <inheritdoc/>
-    public async Task<string> RunSequenceAsync(string sequenceFilePath, string entryPoint)
+    public async Task<string> RunSequenceAsync(string sequenceFilePath, string entryPoint,
+                                               string? environmentPath = null)
     {
         if (!File.Exists(sequenceFilePath))
             throw new FileNotFoundException(
@@ -197,7 +218,11 @@ public class SequenceEditorService : ISequenceEditorService
                 "Running sequence in editor: {File} / {Entry}",
                 sequenceFilePath, entryPoint);
 
-            var args = $"\"{sequenceFilePath}\" /run /runEntryPoint \"{entryPoint}\"";
+            // This one EXECUTES test code. Running it in the global station configuration while the
+            // server works in a product environment means the wrong process models, type palettes and
+            // station globals — the most consequential of the environment mismatches.
+            var args = TestStandEnvironmentLocator.PrependEnvSwitch(
+                $"\"{sequenceFilePath}\" /run /runEntryPoint \"{entryPoint}\"", environmentPath);
             using var process = Process.Start(new ProcessStartInfo
             {
                 FileName  = editorPath,
