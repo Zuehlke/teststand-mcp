@@ -78,13 +78,22 @@ public class McpServer
 
             _logger.LogDebug(">> {Line}", line);
 
-            JsonRpcResponse response;
+            JsonRpcResponse? response;
             try
             {
                 var request = JsonSerializer.Deserialize<JsonRpcRequest>(line, _jsonOpts);
                 if (request == null)
                 {
                     response = ErrorResponse(null, -32700, "Parse error");
+                }
+                else if (request.Id == null)
+                {
+                    // A JSON-RPC NOTIFICATION (no id) must never be answered — not with a
+                    // result, not with an error. Answering one is a protocol violation that
+                    // strict clients reject at handshake time (every connection sends
+                    // notifications/initialized).
+                    HandleNotification(request);
+                    continue;
                 }
                 else
                 {
@@ -102,6 +111,9 @@ public class McpServer
                 response = ErrorResponse(null, -32603, $"Internal error: {ex.Message}");
             }
 
+            // Belt and braces: never write a bare "null" line onto the wire.
+            if (response == null) continue;
+
             var responseJson = JsonSerializer.Serialize(response, _jsonOpts);
             _logger.LogDebug("<< {Json}", responseJson);
             await stdout.WriteLineAsync(responseJson);
@@ -112,6 +124,27 @@ public class McpServer
 
     // ── Dispatcher ────────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Consumes a JSON-RPC notification (no id). Notifications are acknowledged by silence:
+    /// this method may act on one, but the caller writes nothing back.
+    /// </summary>
+    private void HandleNotification(JsonRpcRequest req)
+    {
+        switch (req.Method)
+        {
+            case "notifications/initialized":
+            case "initialized":                 // pre-2025 spelling, still seen in the wild
+                _logger.LogInformation("Client completed initialization.");
+                break;
+            case "notifications/cancelled":
+                _logger.LogDebug("Client cancelled a request.");
+                break;
+            default:
+                _logger.LogDebug("Ignoring notification {Method}", req.Method);
+                break;
+        }
+    }
+
     private async Task<JsonRpcResponse> DispatchAsync(JsonRpcRequest req)
     {
         try
@@ -119,7 +152,6 @@ public class McpServer
             object? result = req.Method switch
             {
                 "initialize"         => HandleInitialize(req),
-                "initialized"        => (object?)null,       // notification, no response needed
                 "ping"               => new { },
                 "tools/list"         => HandleToolsList(),
                 "tools/call"         => await HandleToolCallAsync(req),
@@ -130,9 +162,6 @@ public class McpServer
                 "logging/setLevel"   => new { },
                 _                    => throw new McpException(-32601, $"Method not found: {req.Method}")
             };
-
-            // notifications don't need a response
-            if (req.Id == null) return null!;
 
             return new JsonRpcResponse { Id = req.Id, Result = result };
         }
@@ -152,11 +181,21 @@ public class McpServer
 
     private InitializeResult HandleInitialize(JsonRpcRequest req)
     {
-        _logger.LogInformation("Client initialized. Protocol: {Method}", req.Method);
+        var requested = req.Params is { } p &&
+                        p.ValueKind == JsonValueKind.Object &&
+                        p.TryGetProperty("protocolVersion", out var pv) &&
+                        pv.ValueKind == JsonValueKind.String
+            ? pv.GetString()
+            : null;
+
+        var negotiated = McpProtocol.Negotiate(requested);
+
+        _logger.LogInformation("Client initialized. Protocol requested: {Requested}, negotiated: {Negotiated}",
+            requested ?? "(none)", negotiated);
         DrawCommandPanel();
         return new InitializeResult
         {
-            ProtocolVersion = "2024-11-05",
+            ProtocolVersion = negotiated,
             ServerInfo      = new McpServerInfo
             {
                 Name    = "TestStand MCP Server",

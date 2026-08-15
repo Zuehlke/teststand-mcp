@@ -168,6 +168,125 @@ public class T23_ChangeRiskUnitTests
         Assert.That(steps.GetProperty("items").GetProperty("type").GetString(), Is.EqualTo("object"));
     }
 
+    // ── MCP wire conformance (2026-08-15) ────────────────────────────────────────
+    // The server fell out of the client's tool catalog while its process was healthy and
+    // tools/list answered with all 252 tools. Three handshake-level defects were the
+    // discriminator against the other local servers; these pin the fixes.
+
+    [Test]
+    public void SchemaBuilder_NoArgumentTool_StillEmitsAnEmptyPropertiesObject()
+    {
+        // A missing "properties" key makes the whole tool malformed for a strict validator.
+        var schema = SchemaBuilder.Build(_ => { });
+
+        Assert.That(schema.GetProperty("type").GetString(), Is.EqualTo("object"));
+        Assert.That(schema.TryGetProperty("properties", out var props), Is.True,
+            "an object schema must always carry a 'properties' key");
+        Assert.That(props.ValueKind, Is.EqualTo(JsonValueKind.Object));
+        Assert.That(props.EnumerateObject().Count(), Is.Zero);
+    }
+
+    [Test]
+    public void SchemaBuilder_ScalarArrayProperty_GetsAnItemSchema()
+    {
+        var schema = SchemaBuilder.Build(s => s
+            .AddOptional("type_names", "array", "Names to copy")
+            .AddRequired("ids", "array", "Ids", itemType: "number"));
+
+        var props = schema.GetProperty("properties");
+        Assert.That(props.GetProperty("type_names").GetProperty("items").GetProperty("type").GetString(),
+            Is.EqualTo("string"), "an array without 'items' is an incomplete schema");
+        Assert.That(props.GetProperty("ids").GetProperty("items").GetProperty("type").GetString(),
+            Is.EqualTo("number"));
+    }
+
+    [Test]
+    public void SchemaBuilder_RefusesAJavaScriptPrototypeKeyAsAParameterName()
+    {
+        // The client validates inputSchema.properties as a RECORD; an own "constructor" key
+        // fails that check and the ENTIRE tools/list is discarded — every tool of the server
+        // vanishes. Fail loudly at registration instead.
+        foreach (var reserved in new[] { "constructor", "__proto__", "toString" })
+        {
+            Assert.That(() => SchemaBuilder.Build(s => s.AddOptional(reserved, "string", "x")),
+                Throws.ArgumentException, $"'{reserved}' must be refused as a parameter name");
+            Assert.That(() => SchemaBuilder.Build(s => s.AddRequired(reserved, "string", "x")),
+                Throws.ArgumentException);
+        }
+
+        // A normal name still works.
+        Assert.That(() => SchemaBuilder.Build(s => s.AddOptional("constructor_signature", "string", "x")),
+            Throws.Nothing);
+    }
+
+    [Test]
+    public void NoRegisteredTool_DeclaresAReservedParameterName()
+    {
+        using var editor = new SequenceEditorService(NullLogger<SequenceEditorService>.Instance);
+        var registry = new TestStandToolRegistry(
+            new TestStandService(NullLogger<TestStandService>.Instance), editor,
+            NullLogger<TestStandToolRegistry>.Instance);
+
+        var offenders = registry.GetTools()
+            .SelectMany(t => t.InputSchema.GetProperty("properties").EnumerateObject()
+                .Where(p => SchemaBuilder.ReservedPropertyNames.Contains(p.Name))
+                .Select(p => $"{t.Name}.{p.Name}"))
+            .ToList();
+
+        Assert.That(offenders, Is.Empty, string.Join(", ", offenders));
+    }
+
+    [Test]
+    public void EveryRegisteredTool_HasAWellFormedInputSchema()
+    {
+        using var editor = new SequenceEditorService(NullLogger<SequenceEditorService>.Instance);
+        var registry = new TestStandToolRegistry(
+            new TestStandService(NullLogger<TestStandService>.Instance), editor,
+            NullLogger<TestStandToolRegistry>.Instance);
+
+        var problems = new List<string>();
+        foreach (var tool in registry.GetTools())
+        {
+            var schema = tool.InputSchema;
+            if (schema.GetProperty("type").GetString() != "object")
+                problems.Add($"{tool.Name}: schema type is not 'object'");
+            if (!schema.TryGetProperty("properties", out var props))
+            {
+                problems.Add($"{tool.Name}: no 'properties' key");
+                continue;
+            }
+            foreach (var p in props.EnumerateObject())
+            {
+                if (!p.Value.TryGetProperty("type", out var t))
+                {
+                    problems.Add($"{tool.Name}.{p.Name}: no 'type'");
+                    continue;
+                }
+                if (t.GetString() == "array" && !p.Value.TryGetProperty("items", out _))
+                    problems.Add($"{tool.Name}.{p.Name}: array without 'items'");
+            }
+            if (schema.TryGetProperty("required", out var req))
+                foreach (var r in req.EnumerateArray())
+                    if (!props.TryGetProperty(r.GetString() ?? "", out _))
+                        problems.Add($"{tool.Name}: required '{r.GetString()}' is not a property");
+        }
+
+        Assert.That(problems, Is.Empty, string.Join("; ", problems.Take(20)));
+    }
+
+    [Test]
+    public void ProtocolVersion_EchoesTheClientsRevision_AndNeverPinsTheOldestOne()
+    {
+        Assert.That(McpProtocol.Negotiate("2025-06-18"),
+            Is.EqualTo("2025-06-18"), "a supported revision must be echoed back");
+        Assert.That(McpProtocol.Negotiate("2024-11-05"), Is.EqualTo("2024-11-05"));
+
+        // Unknown or absent -> our newest, never a hard-coded old one.
+        Assert.That(McpProtocol.Negotiate("2099-01-01"), Is.EqualTo(McpProtocol.Newest));
+        Assert.That(McpProtocol.Negotiate(null),         Is.EqualTo(McpProtocol.Newest));
+        Assert.That(McpProtocol.Newest, Is.Not.EqualTo("2024-11-05"));
+    }
+
     // ── Models: { get; init; } collections must serialize AND round-trip ─────────
 
     [Test]

@@ -3109,9 +3109,11 @@ public class TestStandToolRegistry
                 .AddOptional("create_object", "boolean",
                     "Construct an instance and call the member on it (required for an INSTANCE " +
                     "member; default false).", false)
-                .AddOptional("constructor", "string",
+                .AddOptional("constructor_signature", "string",
                     "Constructor signature to use with create_object, as the member list spells it " +
-                    "(e.g. 'MyClass(Int32)'). Default: the parameterless constructor.")
+                    "(e.g. 'MyClass(Int32)'). Default: the parameterless constructor. " +
+                    "NOTE: not named 'constructor' — a schema property with that name makes the " +
+                    "client reject the WHOLE tool list (see SchemaBuilder.ReservedPropertyNames).")
                 .AddOptional("dispose_object", "boolean",
                     "Dispose the constructed object after the call (default false). Only applied " +
                     "when the adapter keeps it — otherwise it is named in 'note'.", false)
@@ -5635,7 +5637,7 @@ public class TestStandToolRegistry
             args!.Value.GetBoolOrDefault("save", true),
             args!.Value.GetBoolOrDefault("load_prototype", true),
             args!.Value.GetBoolOrDefault("create_object", false),
-            args!.Value.GetStringOrDefault("constructor", ""),
+            args!.Value.GetStringOrDefault("constructor_signature", ""),
             args!.Value.GetBoolOrDefault("dispose_object", false));
         return OkJson(result);
     }
