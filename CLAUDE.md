@@ -648,19 +648,27 @@ unreachable and the step ran as the silent `Passed` no-op above.
 - `GetMemberNames(location, asm, class, options, out names, out sigs)` is the member list: **`options=0`
   = static members + constructors, `options=1` = instance members** — a static member does NOT appear
   at `1`, so a wrong flag looks like a missing member.
-- **Instance methods are still not configurable**: the prototype loads, but `IsCallValid` refuses with
-  *"is not valid as the first call in the invocation because it is an instance member that requires an
-  object"*. They need the `Calls[]` CHAIN (constructor or `<Use Existing Object>` as `Calls[0]`, the
-  method as `Calls[1]`), which no tool writes yet. The reason reaches the caller in `note`.
-  The route EXISTS if you ever build it, measured: `Calls` is EMPTY on a fresh step (indexing it throws
-  "Cannot index an empty array"), so `Calls.New(0)` → `Calls[0].LoadPrototypeFromSignature(
-  "InstanceOps()"/"<Use Existing Object>", true, 0)` → `Calls.New(1)` → `Calls[1]…("Method(Args)")`
-  gives **both entries `IsCallValid == true`**.
+- **An INSTANCE member needs `create_object=true`** — alone it is refused (*"is not valid as the first
+  call in the invocation because it is an instance member that requires an object"*), and the note now
+  names the fix. With it, the step is built as the CALL CHAIN the adapter requires: `Calls[0]` the
+  constructor, `Calls[1]` the member invoked on that object. `constructor` picks a non-default one by
+  signature, `dispose_object` releases the object afterwards (lands as `CallDispose` on the
+  constructor's returned object). `T13` runs one for real: `Triple(4)` on a constructed instance
+  writes 12.
+  - `Calls` is EMPTY on a fresh step (indexing it throws "Cannot index an empty array"), so the chain
+    is built with `Calls.New(i)` + `LoadPrototypeFromSignature` per entry and REBUILT rather than
+    patched on a re-configure. The object is handed between entries **implicitly** — there is no
+    expression to plumb, and `CreateObject` flips to true by itself.
+  - **Calling into an object that already EXISTS elsewhere is not reachable.** Measured both ways:
+    `<Use Existing Object>` cannot be loaded by signature (returns false) and
+    `DotNetModule.ClassReference` does not persist (reads back empty), leaving the member refused.
+    Do not re-investigate without a new idea.
 
 #### A .NET step's parameters live in `Calls[i].Params` (2026-08-15, issue #37)
 Never in the flat `Module.Parameters` container — `get_module_parameters` therefore returned `[]` for
 every .NET step, however well configured. `Calls` is an ARRAY because one step can chain invocations
-(construct → call → dispose), so entries are prefixed `<member>.` when there is more than one.
+(construct → call), so entries are prefixed `<member>.` when there is more than one — which is exactly
+what an instance-method step looks like (`InstanceOps.Return Value`, `Triple.a`, …).
 - Leaves per entry: `Name`, **`ArgVal`** (the binding expression — for the entry named **`Return Value`**
   it is the DESTINATION the result is written to), `Type` (numeric `DotNetParameterTypes`, e.g. 12 =
   Double), `TypeName` (class/struct/enum only), `Flags`, `IsOptional`, `CallDispose`, …

@@ -27,6 +27,13 @@ namespace TestStandMCP.DotNetTestAssembly
     /// no-op.</summary>
     public class InstanceOps
     {
-        public double Triple(double a) { return a * 3.0; }
+        private readonly double _factor;
+
+        public InstanceOps() { _factor = 3.0; }
+
+        /// <summary>A second constructor, so selecting one by signature is testable.</summary>
+        public InstanceOps(double factor) { _factor = factor; }
+
+        public double Triple(double a) { return a * _factor; }
     }
 }

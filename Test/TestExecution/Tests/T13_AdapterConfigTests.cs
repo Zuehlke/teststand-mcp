@@ -356,12 +356,12 @@ public class T13_AdapterConfigTests : TestBase
     }
 
     /// <summary>
-    /// An instance member cannot be a step's first call — the adapter needs an object. That is a
-    /// real limitation, so it must reach the caller as the adapter's own reason instead of a step
-    /// that silently calls nothing.
+    /// An instance member cannot be a step's first call — the adapter needs an object. Without
+    /// create_object that has to reach the caller as the adapter's own reason PLUS the way out,
+    /// instead of a step that silently calls nothing.
     /// </summary>
     [Test]
-    public async Task ConfigureDotNetModule_InstanceMember_ReportsThatItNeedsAnObject()
+    public async Task ConfigureDotNetModule_InstanceMemberWithoutAnObject_SaysHowToFixIt()
     {
         await PrepareStepAsync("InstanceStep");
 
@@ -373,6 +373,138 @@ public class T13_AdapterConfigTests : TestBase
             Assert.That(result.AppliedSettings, Does.Not.ContainKey("memberResolved"));
             Assert.That(result.Note, Is.Not.Null.And.Contains("requires an object"),
                 "the specific reason from the call-level load must survive into the note");
+            Assert.That(result.Note, Does.Contain("create_object"),
+                "a dead end is not a report — the note has to name the way out");
+        });
+        TestContext.WriteLine($"note: {result.Note}");
+    }
+
+    /// <summary>
+    /// create_object builds the constructor→member call chain the adapter requires: Calls[0]
+    /// constructs, Calls[1] invokes on that object. Measured as the ONLY working route — an instance
+    /// member as the first call is refused, and the editor's "use existing object" entry is not
+    /// reachable through this API.
+    /// </summary>
+    [Test]
+    public async Task ConfigureDotNetModule_CreateObject_BuildsTheConstructorChain()
+    {
+        await PrepareStepAsync("InstanceStep");
+
+        var result = await Ts.ConfigureDotNetModuleAsync(TempSeqFile, Seq, Grp, "InstanceStep",
+            FixtureAssembly, InstanceOps, "Triple", save: true, createObject: true);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(result.AppliedSettings, Does.ContainKey("memberResolved"), $"note: {result.Note}");
+            Assert.That(result.AppliedSettings["resolvedVia"], Is.EqualTo("call-chain"));
+            Assert.That(result.AppliedSettings["constructorSignature"], Is.EqualTo("InstanceOps()"),
+                "the parameterless constructor is derived from the SHORT class name");
+            Assert.That(result.AppliedSettings["signature"], Is.EqualTo("Triple(Double)"));
+        });
+
+        // Both entries have to be on the step, in order.
+        Assert.That(await ReadSDataLeafAsync("InstanceStep", "TS.SData.Calls[0]", "MemberName"),
+            Is.EqualTo("InstanceOps"), "Calls[0] constructs");
+        Assert.That(await ReadSDataLeafAsync("InstanceStep", "TS.SData.Calls[1]", "MemberName"),
+            Is.EqualTo("Triple"), "Calls[1] calls the member on it");
+
+        // And the chain's parameters read back prefixed, which is how they are addressed.
+        var parms = await Ts.GetModuleParametersAsync(TempSeqFile, Seq, Grp, "InstanceStep");
+        Assert.That(parms.Select(p => p.Name), Is.EqualTo(new[]
+        {
+            "InstanceOps.Return Value", "Triple.Return Value", "Triple.a"
+        }));
+    }
+
+    /// <summary>The proof that a constructed object really gets called: Triple(4) must write 12.</summary>
+    [Test]
+    public async Task ConfigureDotNetModule_CreateObject_InstanceMethodReallyExecutes()
+    {
+        string probe = NewProbeName();
+        await Ts.SetStationGlobalAsync(probe, 0);
+        try
+        {
+            await Ts.CreateSequenceFileAsync(TempSeqFile);
+            await Ts.InsertStepAsync(TempSeqFile, "MainSequence", Grp, "Action", "InstanceStep");
+            var cfg = await Ts.ConfigureDotNetModuleAsync(TempSeqFile, "MainSequence", Grp,
+                "InstanceStep", FixtureAssembly, InstanceOps, "Triple", save: true, createObject: true);
+            Assert.That(cfg.AppliedSettings, Does.ContainKey("memberResolved"), cfg.Note);
+
+            await Ts.SetModuleParameterAsync(TempSeqFile, "MainSequence", Grp, "InstanceStep",
+                "Triple.a", "4");
+            await Ts.SetModuleParameterAsync(TempSeqFile, "MainSequence", Grp, "InstanceStep",
+                "Triple.Return Value", $"StationGlobals.{probe}");
+
+            var run = await Ts.RunSequenceAsync(TempSeqFile, "MainSequence", null, 60);
+            TestContext.WriteLine($"status={run.Status} result={run.Result}");
+
+            var globals = await Ts.GetStationGlobalsAsync();
+            Assert.That(Convert.ToDouble(globals.First(g => g.Name == probe).Value),
+                Is.EqualTo(12.0).Within(1e-9),
+                "the constructed object's Triple(4) must have run — 0 means the chain called nothing");
+        }
+        finally { await Ts.DeleteStationGlobalAsync(probe); }
+    }
+
+    /// <summary>A non-default constructor is selected by signature, like an overloaded member.</summary>
+    [Test]
+    public async Task ConfigureDotNetModule_CreateObject_ExplicitConstructorSignature()
+    {
+        await PrepareStepAsync("InstanceStep");
+
+        var result = await Ts.ConfigureDotNetModuleAsync(TempSeqFile, Seq, Grp, "InstanceStep",
+            FixtureAssembly, InstanceOps, "Triple", save: true,
+            createObject: true, constructor: "InstanceOps(Double)");
+
+        Assert.That(result.AppliedSettings, Does.ContainKey("memberResolved"), $"note: {result.Note}");
+        Assert.That(result.AppliedSettings["constructorSignature"], Is.EqualTo("InstanceOps(Double)"));
+        var parms = await Ts.GetModuleParametersAsync(TempSeqFile, Seq, Grp, "InstanceStep");
+        Assert.That(parms.Any(p => p.Name == "InstanceOps.factor"), Is.True,
+            "the chosen constructor's own argument has to be bindable too");
+    }
+
+    /// <summary>dispose_object must either land on the step or be named as not applied — the house
+    /// rule that a report only ever states what a read-back confirmed.</summary>
+    [Test]
+    public async Task ConfigureDotNetModule_CreateObject_DisposeObject_IsAppliedOrReported()
+    {
+        await PrepareStepAsync("InstanceStep");
+
+        var result = await Ts.ConfigureDotNetModuleAsync(TempSeqFile, Seq, Grp, "InstanceStep",
+            FixtureAssembly, InstanceOps, "Triple", save: true,
+            createObject: true, disposeObject: true);
+
+        Assert.That(result.AppliedSettings, Does.ContainKey("memberResolved"), $"note: {result.Note}");
+        if (result.AppliedSettings.ContainsKey("disposeObject"))
+        {
+            Assert.That(await ReadSDataLeafAsync("InstanceStep", "TS.SData.Calls[0].Params[0]", "CallDispose"),
+                Is.EqualTo("True"),
+                "reported as applied → the step must really carry it (CallDispose on the created object)");
+        }
+        else
+        {
+            Assert.That(result.Note, Is.Not.Null.And.Contains("disposeObject"),
+                "not applied → it must be named, never silently dropped");
+        }
+        TestContext.WriteLine($"disposeObject applied: {result.AppliedSettings.ContainsKey("disposeObject")}; " +
+                              $"note: {result.Note}");
+    }
+
+    /// <summary>A constructor that does not exist must fail loudly, not leave a half-built chain
+    /// reported as success.</summary>
+    [Test]
+    public async Task ConfigureDotNetModule_CreateObject_UnknownConstructor_IsReported()
+    {
+        await PrepareStepAsync("InstanceStep");
+
+        var result = await Ts.ConfigureDotNetModuleAsync(TempSeqFile, Seq, Grp, "InstanceStep",
+            FixtureAssembly, InstanceOps, "Triple", save: true,
+            createObject: true, constructor: "InstanceOps(System.DateTime)");
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(result.AppliedSettings, Does.Not.ContainKey("memberResolved"));
+            Assert.That(result.Note, Is.Not.Null.And.Contains("constructor"));
         });
         TestContext.WriteLine($"note: {result.Note}");
     }

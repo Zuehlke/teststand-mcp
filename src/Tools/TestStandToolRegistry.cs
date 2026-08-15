@@ -3090,8 +3090,12 @@ public class TestStandToolRegistry
             "bound is reported back in appliedSettings['signature'] — check it, or pass the full " +
             "signature to pick a specific overload. appliedSettings['resolvedVia'] names the route " +
             "('member-info' | 'member-info-static' | 'signature'). " +
-            "INSTANCE METHODS are not supported yet: they cannot be the first call of a step (the " +
-            "adapter needs an object first), and the note says so.",
+            "INSTANCE METHODS need an object: pass create_object=true and the step is built as the " +
+            "constructor→member CALL CHAIN the adapter requires (Calls[0] constructs, Calls[1] calls " +
+            "the member on it; 'constructor' selects a non-default one by signature, dispose_object " +
+            "releases the object afterwards). Their parameters then read back prefixed with the member " +
+            "name ('Triple.a'), which is also how set_module_parameter addresses them. Calling into an " +
+            "object that already EXISTS elsewhere is not reachable through this API.",
             s => s
                 .AddRequired("file_path", "string", "Path to the sequence file")
                 .AddRequired("sequence_name", "string", "Name of the sequence")
@@ -3102,6 +3106,15 @@ public class TestStandToolRegistry
                 .AddRequired("method_name", "string",
                     "Member to call: the bare name, or the full signature to select one overload " +
                     "(e.g. 'Overloaded(Double, Double)')")
+                .AddOptional("create_object", "boolean",
+                    "Construct an instance and call the member on it (required for an INSTANCE " +
+                    "member; default false).", false)
+                .AddOptional("constructor", "string",
+                    "Constructor signature to use with create_object, as the member list spells it " +
+                    "(e.g. 'MyClass(Int32)'). Default: the parameterless constructor.")
+                .AddOptional("dispose_object", "boolean",
+                    "Dispose the constructed object after the call (default false). Only applied " +
+                    "when the adapter keeps it — otherwise it is named in 'note'.", false)
                 .AddOptional("save", "boolean", "Save the file (default true)", true)
                 .AddOptional("load_prototype", "boolean",
                     "Load the method prototype afterwards to populate the parameter interface " +
@@ -5620,7 +5633,10 @@ public class TestStandToolRegistry
             args!.Value.GetRequiredString("class_name"),
             args!.Value.GetRequiredString("method_name"),
             args!.Value.GetBoolOrDefault("save", true),
-            args!.Value.GetBoolOrDefault("load_prototype", true));
+            args!.Value.GetBoolOrDefault("load_prototype", true),
+            args!.Value.GetBoolOrDefault("create_object", false),
+            args!.Value.GetStringOrDefault("constructor", ""),
+            args!.Value.GetBoolOrDefault("dispose_object", false));
         return OkJson(result);
     }
 

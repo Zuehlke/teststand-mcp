@@ -888,10 +888,14 @@ public interface ITestStandService : IDisposable
     // ── Typed Adapter / Code-Module Configuration ───────────────────────────
     /// <summary>Configures a step to call a .NET method by specifying the assembly, class, and method.
     /// When <paramref name="loadPrototype"/> is true (default) the method prototype is loaded afterwards
-    /// so the step's parameter interface is populated (editor "Load Prototype").</summary>
+    /// so the step's parameter interface is populated (editor "Load Prototype").
+    /// <para>An INSTANCE member needs an object: pass <paramref name="createObject"/> (optionally with
+    /// an explicit <paramref name="constructor"/> signature) to build the constructor→member call
+    /// chain. Without it an instance member is refused by the adapter, and the note says so.</para></summary>
     Task<ModuleConfigResult> ConfigureDotNetModuleAsync(string filePath,
         string sequenceName, string stepGroup, string stepName, string assemblyPath,
-        string className, string methodName, bool save = true, bool loadPrototype = true);
+        string className, string methodName, bool save = true, bool loadPrototype = true,
+        bool createObject = false, string? constructor = null, bool disposeObject = false);
     /// <summary>Configures a step to call a native DLL function. When <paramref name="loadPrototype"/>
     /// is true (default) the function prototype is loaded afterwards to populate the parameters.</summary>
     Task<ModuleConfigResult> ConfigureDllModuleAsync(string filePath,
@@ -9130,7 +9134,8 @@ public sealed class TestStandService : ITestStandService
     /// </remarks>
     public Task<ModuleConfigResult> ConfigureDotNetModuleAsync(string filePath,
         string sequenceName, string stepGroup, string stepName, string assemblyPath,
-        string className, string methodName, bool save = true, bool loadPrototype = true)
+        string className, string methodName, bool save = true, bool loadPrototype = true,
+        bool createObject = false, string? constructor = null, bool disposeObject = false)
     {
         var problems = new List<string>();
         return ConfigureModuleAsync(filePath, sequenceName, stepGroup, stepName, "DotNet", save,
@@ -9218,6 +9223,38 @@ public sealed class TestStandService : ITestStandService
                 //    0-argument/void member; anything with a parameter or a return value needs the
                 //    call-level load. The order is deliberate — the tiers that already worked run
                 //    first, so nothing that resolves today changes route.
+                // An INSTANCE member cannot be a step's first call — it needs an object. Asked for one,
+                // we build the two-entry chain (constructor at Calls[0], the member at Calls[1]) instead
+                // of running the tiers, which would only reproduce the "requires an object" refusal.
+                if (createObject || !string.IsNullOrWhiteSpace(constructor))
+                {
+                    string ctor = string.IsNullOrWhiteSpace(constructor)
+                        ? DefaultConstructorSignature(className)
+                        : constructor!.Trim();
+                    string? chainReason = BuildDotNetCallChain(dn, ctor, methodName, stepName);
+                    if (chainReason == null)
+                    {
+                        applied["memberResolved"]        = true;
+                        applied["resolvedVia"]           = "call-chain";
+                        applied["createObject"]          = true;
+                        applied["constructorSignature"]  = ReadResolvedCallSignature(dn, 0);
+                        string memberSignature = ReadResolvedCallSignature(dn, 1);
+                        if (!string.IsNullOrWhiteSpace(memberSignature))
+                            applied["signature"] = memberSignature;
+
+                        if (disposeObject && TrySetDotNetDisposeObject(dn, stepName))
+                            applied["disposeObject"] = true;
+                        else if (disposeObject)
+                            problems.Add("disposeObject could not be set (the adapter did not keep it)");
+                    }
+                    else
+                    {
+                        problems.Add($"the object-creating call chain could not be built ({chainReason})"
+                                   + " — the step is configured but will not call anything");
+                    }
+                    return applied;
+                }
+
                 var resolution = ResolveDotNetMemberTiered(dn, methodName, stepName);
                 if (resolution.Resolved)
                 {
@@ -9236,8 +9273,15 @@ public sealed class TestStandService : ITestStandService
                 }
                 else
                 {
+                    // An instance member fails here BY DESIGN — say what to pass instead of leaving the
+                    // caller with the adapter's phrasing and no way forward.
+                    bool needsObject = resolution.Reason != null
+                        && resolution.Reason.IndexOf("requires an object", StringComparison.OrdinalIgnoreCase) >= 0;
                     problems.Add($"the member could not be resolved against the assembly ({resolution.Reason})"
-                               + " — the step is configured but will not call anything");
+                               + (needsObject
+                                    ? " — pass create_object=true (optionally constructor='Class(Args)') to"
+                                    + " construct one and call the member on it"
+                                    : " — the step is configured but will not call anything"));
                 }
 
                 return applied;
@@ -9644,12 +9688,12 @@ public sealed class TestStandService : ITestStandService
     /// warnings are the fallback — those name a load failure (missing file, wrong bitness) explicitly.
     /// A reason is never invented: "invalid without a reason" is itself the report.</para>
     /// </summary>
-    private string? CheckDotNetCallValid(NiDotNetModule dn, string stepName)
+    private string? CheckDotNetCallValid(NiDotNetModule dn, string stepName, int callIndex = 0)
     {
         try
         {
-            if (dn.Calls.Count < 1) return "the adapter created no call entry";
-            if (dn.Calls[0].IsCallValid(out string error)) return null;
+            if (dn.Calls.Count <= callIndex) return "the adapter created no call entry";
+            if (dn.Calls[callIndex].IsCallValid(out string error)) return null;
 
             if (string.IsNullOrWhiteSpace(error))
             {
@@ -9777,16 +9821,16 @@ public sealed class TestStandService : ITestStandService
     /// false, so an honest failure survives.</para>
     /// </summary>
     private string? TryLoadDotNetPrototypeFromSignature(NiDotNetModule dn, string memberOrSignature,
-        string stepName)
+        string stepName, int callIndex = 0)
     {
         try
         {
-            if (dn.Calls.Count < 1) return "the adapter created no call entry";
+            if (dn.Calls.Count <= callIndex) return "the adapter created no call entry";
 
-            if (!dn.Calls[0].LoadPrototypeFromSignature(memberOrSignature, true, 0))
+            if (!dn.Calls[callIndex].LoadPrototypeFromSignature(memberOrSignature, true, 0))
                 return $"no member matching '{memberOrSignature}' was found in the class";
 
-            return CheckDotNetCallValid(dn, stepName);
+            return CheckDotNetCallValid(dn, stepName, callIndex);
         }
         catch (Exception ex)
         {
@@ -9795,11 +9839,90 @@ public sealed class TestStandService : ITestStandService
         }
     }
 
+    /// <summary>
+    /// Builds the two-entry call CHAIN an instance member needs: a constructor at <c>Calls[0]</c> whose
+    /// object the method at <c>Calls[1]</c> is then invoked on. Returns <c>null</c> on success.
+    /// <para>Measured 2026-08-15, and this is the ONLY route that works. An instance member as the
+    /// first call is refused ("is not valid as the first call in the invocation because it is an
+    /// instance member that requires an object"); the editor's <c>&lt;Use Existing Object&gt;</c> entry
+    /// cannot be loaded by signature (returns false) and <c>DotNetModule.ClassReference</c> does not
+    /// persist, so calling into an object that already exists somewhere is NOT reachable through this
+    /// API. With the chain in place the adapter derives the rest itself — <c>CreateObject</c> flips to
+    /// true on its own, and the object is handed from entry to entry implicitly, with no expression to
+    /// plumb.</para>
+    /// <para><c>Calls</c> is rebuilt rather than patched: it is EMPTY on a fresh step (indexing it
+    /// throws "Cannot index an empty array") and may hold a stale single entry from an earlier
+    /// configure, so clearing is what makes a re-configure deterministic.</para>
+    /// </summary>
+    private string? BuildDotNetCallChain(NiDotNetModule dn, string constructorSignature,
+        string memberOrSignature, string stepName)
+    {
+        try
+        {
+            while (dn.Calls.Count > 0) dn.Calls.Delete(dn.Calls.Count - 1);
+
+            dn.Calls.New(0);
+            string? ctorReason = TryLoadDotNetPrototypeFromSignature(dn, constructorSignature, stepName, 0);
+            if (ctorReason != null)
+                return $"the constructor '{constructorSignature}' could not be loaded ({ctorReason})";
+
+            dn.Calls.New(1);
+            string? memberReason = TryLoadDotNetPrototypeFromSignature(dn, memberOrSignature, stepName, 1);
+            if (memberReason != null)
+                return $"the member could not be loaded onto the constructed object ({memberReason})";
+
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Building the .NET call chain failed for step '{Step}'.", stepName);
+            return ex.Message.Trim();
+        }
+    }
+
+    /// <summary>
+    /// Marks the constructed object for disposal after the call and CONFIRMS it stuck. The module-level
+    /// <c>DisposeObject</c> is the documented switch, but neighbouring properties of that family have
+    /// been measured NOT to persist (<c>ClassReference</c>), so the per-parameter <c>CallDispose</c> on
+    /// the constructor's returned object is tried as well and the read-back decides. Returns false when
+    /// neither took, so the caller can report the truth rather than the intent.
+    /// </summary>
+    private bool TrySetDotNetDisposeObject(NiDotNetModule dn, string stepName)
+    {
+        try
+        {
+            dn.DisposeObject = true;
+            if (dn.DisposeObject) return true;
+        }
+        catch (Exception ex) { _logger.LogDebug(ex, "DisposeObject not settable on step '{Step}'.", stepName); }
+
+        try
+        {
+            var ctorReturn = dn.Calls[0].Parameters[0];
+            ctorReturn.DisposeObject = true;
+            if (ctorReturn.DisposeObject) return true;
+        }
+        catch (Exception ex)
+        { _logger.LogDebug(ex, "CallDispose not settable on the constructor result of '{Step}'.", stepName); }
+
+        return false;
+    }
+
+    /// <summary>The parameterless constructor's signature as <c>GetMemberNames</c> spells it: the SHORT
+    /// class name plus "()" — <c>DotNetProbe.InstanceOps</c> → <c>InstanceOps()</c>.</summary>
+    private static string DefaultConstructorSignature(string className)
+    {
+        string shortName = className;
+        int dot = shortName.LastIndexOf('.');
+        if (dot >= 0 && dot < shortName.Length - 1) shortName = shortName.Substring(dot + 1);
+        return shortName + "()";
+    }
+
     /// <summary>Reads the signature the adapter actually bound, so a caller that passed a bare member
     /// name can see WHICH overload it got. Empty when it cannot be read — never a guess.</summary>
-    private string ReadResolvedCallSignature(NiDotNetModule dn)
+    private string ReadResolvedCallSignature(NiDotNetModule dn, int callIndex = 0)
     {
-        try { return dn.Calls.Count > 0 ? dn.Calls[0].Signature ?? "" : ""; }
+        try { return dn.Calls.Count > callIndex ? dn.Calls[callIndex].Signature ?? "" : ""; }
         catch (Exception ex)
         {
             _logger.LogDebug(ex, "Could not read the resolved .NET call signature.");
