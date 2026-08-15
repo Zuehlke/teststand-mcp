@@ -9633,13 +9633,24 @@ public sealed class TestStandService : ITestStandService
             return ex.Message.Trim();
         }
 
+        return CheckDotNetCallValid(dn, stepName);
+    }
+
+    /// <summary>
+    /// The shared verdict on a .NET module's call entry: <c>null</c> when the adapter reports the call
+    /// as executable, otherwise the reason. Both resolution tiers end here so they cannot drift apart
+    /// on what counts as success.
+    /// <para><c>IsCallValid</c> can report false with an EMPTY description, so the assembly-level
+    /// warnings are the fallback — those name a load failure (missing file, wrong bitness) explicitly.
+    /// A reason is never invented: "invalid without a reason" is itself the report.</para>
+    /// </summary>
+    private string? CheckDotNetCallValid(NiDotNetModule dn, string stepName)
+    {
         try
         {
             if (dn.Calls.Count < 1) return "the adapter created no call entry";
             if (dn.Calls[0].IsCallValid(out string error)) return null;
 
-            // IsCallValid can report false with an empty description; fall back to the assembly-level
-            // warnings, which name a load failure (missing file, wrong bitness) explicitly.
             if (string.IsNullOrWhiteSpace(error))
             {
                 try { error = dn.AssemblyWarnings; } catch { /* leave it empty */ }
@@ -9775,15 +9786,7 @@ public sealed class TestStandService : ITestStandService
             if (!dn.Calls[0].LoadPrototypeFromSignature(memberOrSignature, true, 0))
                 return $"no member matching '{memberOrSignature}' was found in the class";
 
-            if (dn.Calls[0].IsCallValid(out string error)) return null;
-
-            if (string.IsNullOrWhiteSpace(error))
-            {
-                try { error = dn.AssemblyWarnings; } catch { /* leave it empty */ }
-            }
-            return string.IsNullOrWhiteSpace(error)
-                ? "the adapter reports the call as invalid without a reason"
-                : error.Trim();
+            return CheckDotNetCallValid(dn, stepName);
         }
         catch (Exception ex)
         {

@@ -640,7 +640,11 @@ unreachable and the step ran as the silent `Passed` no-op above.
   (pinned by `T13`), because the flags are restored and a failed attempt leaves the step as it was.
 - **A bare member name picks ONE overload silently** (`Overloaded` → `Overloaded(Double)` with three
   present). Pass the full signature as `method_name` — `"Overloaded(Double, Double)"`, the exact string
-  `DotNetAdapter.GetMemberNames` returns — to select a specific one, and read `signature` back.
+  `DotNetAdapter.GetMemberNames` returns — to select a specific one, and read `signature` back. The
+  signature form **does** work (issue #37 claims it does not; measured otherwise, `T13`): it SELECTS
+  the member, and the step still stores the plain `Calls[0].MemberName` the engine executes off. Use
+  the exact `GetMemberNames` spelling — the trailing ` (static)` of the `sigs` list is a display
+  suffix, not part of it.
 - `GetMemberNames(location, asm, class, options, out names, out sigs)` is the member list: **`options=0`
   = static members + constructors, `options=1` = instance members** — a static member does NOT appear
   at `1`, so a wrong flag looks like a missing member.
@@ -648,6 +652,10 @@ unreachable and the step ran as the silent `Passed` no-op above.
   *"is not valid as the first call in the invocation because it is an instance member that requires an
   object"*. They need the `Calls[]` CHAIN (constructor or `<Use Existing Object>` as `Calls[0]`, the
   method as `Calls[1]`), which no tool writes yet. The reason reaches the caller in `note`.
+  The route EXISTS if you ever build it, measured: `Calls` is EMPTY on a fresh step (indexing it throws
+  "Cannot index an empty array"), so `Calls.New(0)` → `Calls[0].LoadPrototypeFromSignature(
+  "InstanceOps()"/"<Use Existing Object>", true, 0)` → `Calls.New(1)` → `Calls[1]…("Method(Args)")`
+  gives **both entries `IsCallValid == true`**.
 
 #### A .NET step's parameters live in `Calls[i].Params` (2026-08-15, issue #37)
 Never in the flat `Module.Parameters` container — `get_module_parameters` therefore returned `[]` for

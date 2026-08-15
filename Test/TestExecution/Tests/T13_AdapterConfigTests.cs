@@ -279,6 +279,38 @@ public class T13_AdapterConfigTests : TestBase
         });
     }
 
+    /// <summary>
+    /// The multi-entry shape the issue calls out: one step chaining several invocations (a lifecycle
+    /// entry at Calls[0], the real method at Calls[1]). Their parameter names collide — both carry a
+    /// "Return Value" — so entries must be prefixed with their member. Verified live against a real
+    /// two-call step (constructor + instance method, both IsCallValid); built synthetically here
+    /// because no tool creates a call chain yet, and this pins the READER, which is what changed.
+    /// </summary>
+    [Test]
+    public async Task GetModuleParameters_DotNetStepWithSeveralCalls_PrefixesNamesByMember()
+    {
+        await PrepareStepAsync("ChainStep");
+        await Ts.ConfigureDotNetModuleAsync(TempSeqFile, Seq, Grp, "ChainStep",
+            FixtureAssembly, MathOps, "Add", save: true);
+
+        // Grow the resolved single call into a chain: a second entry with its own parameter.
+        await Ts.CreateStepPropertyAsync(TempSeqFile, Seq, Grp, "ChainStep",
+            "TS.SData.Calls", "array_elements", numElements: 2, save: false);
+        await Ts.SetStepPropertyAsync(TempSeqFile, Seq, Grp, "ChainStep",
+            "TS.SData.Calls[1].MemberName", "Dispose", "string", save: false);
+        await Ts.CreateStepPropertyAsync(TempSeqFile, Seq, Grp, "ChainStep",
+            "TS.SData.Calls[1].Params", "array_elements", numElements: 1, save: false);
+        await Ts.SetStepPropertyAsync(TempSeqFile, Seq, Grp, "ChainStep",
+            "TS.SData.Calls[1].Params[0].Name", "handle", "string", save: true);
+
+        var parms = await Ts.GetModuleParametersAsync(TempSeqFile, Seq, Grp, "ChainStep");
+
+        Assert.That(parms.Select(p => p.Name), Is.EqualTo(new[]
+        {
+            "Add.Return Value", "Add.a", "Add.b", "Dispose.handle"
+        }), "with several call entries every parameter has to carry its member name");
+    }
+
     /// <summary>An out parameter has to read back as an OUTPUT, not as another input.</summary>
     [Test]
     public async Task GetModuleParameters_DotNetOutParameter_ReportsOutputDirection()
@@ -317,6 +349,10 @@ public class T13_AdapterConfigTests : TestBase
             Is.EqualTo("Overloaded(Double, Double)"));
         var parms = await Ts.GetModuleParametersAsync(TempSeqFile, Seq, Grp, "OverloadStep");
         Assert.That(parms, Has.Count.EqualTo(3), "the 2-argument overload, not the 1-argument one");
+        // The step must keep the plain member name — the signature is how it is SELECTED, not what
+        // gets stored; the engine executes off Calls[0].MemberName.
+        Assert.That(await ReadSDataLeafAsync("OverloadStep", "TS.SData.Calls[0]", "MemberName"),
+            Is.EqualTo("Overloaded"));
     }
 
     /// <summary>
