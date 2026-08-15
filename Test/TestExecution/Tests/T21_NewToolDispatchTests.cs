@@ -85,6 +85,77 @@ public class T21_NewToolDispatchTests : TestBase
             "Override should include the default 'Call DoPreUUT' step");
     }
 
+    // ── .NET instance methods over the full MCP path (issue #37 follow-up) ──────────
+    // The T13 tests call the SERVICE directly, so they cannot catch a mismatch between the
+    // advertised schema name and the name the handler reads — an MCP client would send
+    // "create_object" and silently get the default. These two close that gap.
+
+    private static string FixtureAssembly => typeof(DotNetTestAssembly.MathOps).Assembly.Location;
+    private const string InstanceOpsClass = "TestStandMCP.DotNetTestAssembly.InstanceOps";
+
+    [Test]
+    public void ConfigureDotNetModule_Schema_AdvertisesTheObjectLifecycleArguments()
+    {
+        var tool = _registry.GetTools().Single(t => t.Name == "configure_dotnet_module");
+        var props = tool.InputSchema.GetProperty("properties");
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(props.TryGetProperty("create_object", out _), Is.True,
+                "a client can only pass what the schema advertises");
+            Assert.That(props.TryGetProperty("constructor", out _), Is.True);
+            Assert.That(props.TryGetProperty("dispose_object", out _), Is.True);
+        });
+    }
+
+    /// <summary>
+    /// The whole chain exactly as a client drives it: configure with create_object, bind both
+    /// arguments by their prefixed names, run — and the constructed object's Triple(4) has to write
+    /// 12. Nothing here bypasses the tool layer.
+    /// </summary>
+    [Test]
+    public async Task ConfigureDotNetModule_InstanceMethod_OverTheToolPath_Executes()
+    {
+        string probe = "MCP_DispatchProbe_" + System.Guid.NewGuid().ToString("N").Substring(0, 8);
+        await Ts.SetStationGlobalAsync(probe, 0);
+        try
+        {
+            await Ts.CreateSequenceFileAsync(TempSeqFile);
+            await Ts.InsertStepAsync(TempSeqFile, "MainSequence", "Main", "Action", "Inst");
+
+            string common = "{\"file_path\":" + J(TempSeqFile) +
+                            ",\"sequence_name\":\"MainSequence\",\"step_group\":\"Main\"," +
+                            "\"step_name\":\"Inst\"";
+
+            var cfg = await _registry.CallToolAsync("configure_dotnet_module",
+                Args(common + ",\"assembly_path\":" + J(FixtureAssembly) +
+                     ",\"class_name\":" + J(InstanceOpsClass) +
+                     ",\"method_name\":\"Triple\",\"create_object\":true}"));
+            Assert.That(cfg.IsError, Is.False, TextOf(cfg));
+
+            var applied = JsonDocument.Parse(TextOf(cfg)).RootElement.GetProperty("appliedSettings");
+            Assert.That(applied.GetProperty("resolvedVia").GetString(), Is.EqualTo("call-chain"),
+                "create_object must reach the handler — a default here means the argument name is wrong");
+            Assert.That(applied.GetProperty("constructorSignature").GetString(), Is.EqualTo("InstanceOps()"));
+
+            foreach (var (name, value) in new[] { ("Triple.a", "4"), ("Triple.Return Value", $"StationGlobals.{probe}") })
+            {
+                var bind = await _registry.CallToolAsync("set_module_parameter",
+                    Args(common + ",\"parameter_name\":" + J(name) + ",\"value\":" + J(value) + "}"));
+                Assert.That(bind.IsError, Is.False, TextOf(bind));
+            }
+
+            var run = await Ts.RunSequenceAsync(TempSeqFile, "MainSequence", null, 60);
+            TestContext.WriteLine($"status={run.Status} result={run.Result}");
+
+            var globals = await Ts.GetStationGlobalsAsync();
+            Assert.That(System.Convert.ToDouble(globals.First(g => g.Name == probe).Value),
+                Is.EqualTo(12.0).Within(1e-9),
+                "driven purely through the MCP tool layer, the constructed object's Triple(4) must write 12");
+        }
+        finally { await Ts.DeleteStationGlobalAsync(probe); }
+    }
+
     [Test]
     public async Task EvaluateExpression_Tool_ReturnsComputedValue()
     {
