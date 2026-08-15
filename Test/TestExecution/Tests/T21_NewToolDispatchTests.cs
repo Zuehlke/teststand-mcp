@@ -103,7 +103,10 @@ public class T21_NewToolDispatchTests : TestBase
         {
             Assert.That(props.TryGetProperty("create_object", out _), Is.True,
                 "a client can only pass what the schema advertises");
-            Assert.That(props.TryGetProperty("constructor", out _), Is.True);
+            // NOT "constructor": that name makes the client reject the whole tools/list.
+            Assert.That(props.TryGetProperty("constructor_signature", out _), Is.True);
+            Assert.That(props.TryGetProperty("constructor", out _), Is.False,
+                "a JavaScript prototype key as a parameter name empties the tool catalogue");
             Assert.That(props.TryGetProperty("dispose_object", out _), Is.True);
         });
     }

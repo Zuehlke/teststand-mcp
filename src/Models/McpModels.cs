@@ -93,11 +93,40 @@ public class PromptsCapability
 /// <summary>Marker capability indicating the server supports logging control.</summary>
 public class LoggingCapability { }
 
+/// <summary>MCP protocol revisions this server speaks and the handshake negotiation rule.</summary>
+public static class McpProtocol
+{
+    /// <summary>
+    /// Supported protocol revisions, newest first. The server is a plain
+    /// tools/resources/prompts provider, so every revision here is served identically —
+    /// what matters is that the handshake ECHOES the revision the client asked for
+    /// instead of forcing every client down to the oldest one.
+    /// </summary>
+    public static readonly string[] SupportedVersions =
+        { "2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05" };
+
+    /// <summary>The newest revision this server speaks.</summary>
+    public static string Newest => SupportedVersions[0];
+
+    /// <summary>
+    /// Picks the revision to answer <c>initialize</c> with: the one the client asked for when
+    /// it is supported, otherwise this server's newest.
+    /// </summary>
+    public static string Negotiate(string? requested) =>
+        requested != null && System.Array.IndexOf(SupportedVersions, requested) >= 0
+            ? requested
+            : Newest;
+}
+
 /// <summary>Result of the MCP <c>initialize</c> handshake.</summary>
 public class InitializeResult
 {
-    /// <summary>MCP protocol version the server implements.</summary>
-    [JsonPropertyName("protocolVersion")] public string ProtocolVersion { get; set; } = "2024-11-05";
+    /// <summary>
+    /// MCP protocol version the server implements. Set during the handshake to the revision
+    /// negotiated with the client (see <see cref="McpProtocol.Negotiate"/>); this default is
+    /// only the newest revision the server speaks.
+    /// </summary>
+    [JsonPropertyName("protocolVersion")] public string ProtocolVersion { get; set; } = McpProtocol.Newest;
     /// <summary>Capabilities advertised by the server.</summary>
     [JsonPropertyName("capabilities")]    public McpCapabilities Capabilities { get; set; } = new();
     /// <summary>Identity of the server.</summary>

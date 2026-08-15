@@ -651,7 +651,7 @@ unreachable and the step ran as the silent `Passed` no-op above.
 - **An INSTANCE member needs `create_object=true`** — alone it is refused (*"is not valid as the first
   call in the invocation because it is an instance member that requires an object"*), and the note now
   names the fix. With it, the step is built as the CALL CHAIN the adapter requires: `Calls[0]` the
-  constructor, `Calls[1]` the member invoked on that object. `constructor` picks a non-default one by
+  constructor, `Calls[1]` the member invoked on that object. `constructor_signature` picks a non-default one by
   signature, `dispose_object` releases the object afterwards (lands as `CallDispose` on the
   constructor's returned object). `T13` runs one for real: `Triple(4)` on a constructed instance
   writes 12.
