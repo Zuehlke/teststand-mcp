@@ -2750,10 +2750,17 @@ public class TestStandToolRegistry
             "'Load Prototype') so EVERY parameter becomes a correctly-typed SequenceArgument (right " +
             "ParamType/ParamRepresentation/Flags) with unbound args left at UseDef=True — only if the " +
             "target cannot be resolved (headless/missing file) is a bare entry created on demand. " +
+            ".NET steps: binds TS.SData.Calls[i].Params[j].ArgVal, matched by the parameter's name — " +
+            "or by the '<member>.<parameter>' form get_module_parameters reports, which is how a step " +
+            "chaining several calls is addressed unambiguously (each entry has its own 'Return Value'); " +
+            "without a prefix the first match across the chain wins. Binding 'Return Value' sets the " +
+            "DESTINATION the result is written to (e.g. 'Locals.Sum'). Nothing else is touched — a .NET " +
+            "parameter has no companion 'use default' flag, unlike a LabVIEW control. " +
             "Falls back to the legacy flat Module.Parameters container for other adapters. step_name " +
             "accepts the same selectors as set_step_* for duplicate-named steps: 'Name#N' (the Nth " +
             "1-based occurrence) or '@idx:N' (the 0-based index within the group). " +
-            "NOT SUITABLE FOR A 1:1 REBUILD — it always CLEARS the 'use default' flag " +
+            "NOT SUITABLE FOR A 1:1 REBUILD OF A LABVIEW OR SEQUENCECALL BINDING — it always CLEARS " +
+            "the 'use default' flag " +
             "(UseDefaultValues on a LabVIEW control, UseDef on a SequenceCall argument) as a side " +
             "effect, and those two are INDEPENDENT of the expression: the editor routinely keeps a " +
             "remembered expression next to 'use default'. Passing an empty value therefore does NOT " +

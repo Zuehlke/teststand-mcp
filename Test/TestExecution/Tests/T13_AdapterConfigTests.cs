@@ -435,6 +435,95 @@ public class T13_AdapterConfigTests : TestBase
         Assert.That(parms, Has.Count.EqualTo(3), "and it must stay that way on the saved step");
     }
 
+    /// <summary>set_module_parameter reaches a .NET step's arguments — it used to fall through every
+    /// stage and throw, so binding was only possible through the raw property path.</summary>
+    [Test]
+    public async Task SetModuleParameter_DotNetStep_BindsAnArgumentByName()
+    {
+        await PrepareStepAsync("AddStep");
+        await Ts.ConfigureDotNetModuleAsync(TempSeqFile, Seq, Grp, "AddStep",
+            FixtureAssembly, MathOps, "Add", save: true);
+
+        await Ts.SetModuleParameterAsync(TempSeqFile, Seq, Grp, "AddStep", "a", "Locals.X");
+        await Ts.SetModuleParameterAsync(TempSeqFile, Seq, Grp, "AddStep", "Return Value", "Locals.Sum");
+
+        var parms = await Ts.GetModuleParametersAsync(TempSeqFile, Seq, Grp, "AddStep");
+        Assert.Multiple(() =>
+        {
+            Assert.That(parms.Single(p => p.Name == "a").Value, Is.EqualTo("Locals.X"));
+            Assert.That(parms.Single(p => p.Name == "Return Value").Value, Is.EqualTo("Locals.Sum"),
+                "binding the return entry sets the destination the result is written to");
+            Assert.That(parms.Single(p => p.Name == "b").Value, Is.Empty, "untouched stays untouched");
+        });
+    }
+
+    /// <summary>With a call chain the bare names collide, so the member-prefixed form is the only way
+    /// to address the second entry — and it has to reach exactly that one.</summary>
+    [Test]
+    public async Task SetModuleParameter_DotNetChain_BindsByPrefixedName()
+    {
+        await PrepareStepAsync("ChainStep");
+        await Ts.ConfigureDotNetModuleAsync(TempSeqFile, Seq, Grp, "ChainStep",
+            FixtureAssembly, MathOps, "Add", save: true);
+        await Ts.CreateStepPropertyAsync(TempSeqFile, Seq, Grp, "ChainStep",
+            "TS.SData.Calls", "array_elements", numElements: 2, save: false);
+        await Ts.SetStepPropertyAsync(TempSeqFile, Seq, Grp, "ChainStep",
+            "TS.SData.Calls[1].MemberName", "Dispose", "string", save: false);
+        await Ts.CreateStepPropertyAsync(TempSeqFile, Seq, Grp, "ChainStep",
+            "TS.SData.Calls[1].Params", "array_elements", numElements: 1, save: false);
+        await Ts.SetStepPropertyAsync(TempSeqFile, Seq, Grp, "ChainStep",
+            "TS.SData.Calls[1].Params[0].Name", "handle", "string", save: true);
+
+        await Ts.SetModuleParameterAsync(TempSeqFile, Seq, Grp, "ChainStep", "Dispose.handle", "Locals.H");
+
+        var parms = await Ts.GetModuleParametersAsync(TempSeqFile, Seq, Grp, "ChainStep");
+        Assert.That(parms.Single(p => p.Name == "Dispose.handle").Value, Is.EqualTo("Locals.H"));
+        Assert.That(parms.Where(p => p.Name.StartsWith("Add.")).All(p => string.IsNullOrEmpty(p.Value)),
+            Is.True, "the first call's parameters must not be touched");
+    }
+
+    /// <summary>A name that matches nothing must still fail loudly — the tool's contract for every
+    /// other adapter, and the difference between a typo and a silent no-op.</summary>
+    [Test]
+    public async Task SetModuleParameter_DotNetStep_UnknownParameter_Throws()
+    {
+        await PrepareStepAsync("AddStep");
+        await Ts.ConfigureDotNetModuleAsync(TempSeqFile, Seq, Grp, "AddStep",
+            FixtureAssembly, MathOps, "Add", save: true);
+
+        Assert.ThrowsAsync<System.InvalidOperationException>(async () =>
+            await Ts.SetModuleParameterAsync(TempSeqFile, Seq, Grp, "AddStep", "nosuchparam", "1"));
+    }
+
+    /// <summary>The end-to-end proof for the binding route callers are told to use: arguments and the
+    /// result destination bound with set_module_parameter, then actually executed.</summary>
+    [Test]
+    public async Task SetModuleParameter_DotNetStep_BoundArgumentsReallyExecute()
+    {
+        string probe = NewProbeName();
+        await Ts.SetStationGlobalAsync(probe, 0);
+        try
+        {
+            await Ts.CreateSequenceFileAsync(TempSeqFile);
+            await Ts.InsertStepAsync(TempSeqFile, "MainSequence", Grp, "Action", "AddStep");
+            var cfg = await Ts.ConfigureDotNetModuleAsync(TempSeqFile, "MainSequence", Grp, "AddStep",
+                FixtureAssembly, MathOps, "Add", save: true);
+            Assert.That(cfg.AppliedSettings, Does.ContainKey("memberResolved"), cfg.Note);
+
+            await Ts.SetModuleParameterAsync(TempSeqFile, "MainSequence", Grp, "AddStep", "a", "4");
+            await Ts.SetModuleParameterAsync(TempSeqFile, "MainSequence", Grp, "AddStep", "b", "5");
+            await Ts.SetModuleParameterAsync(TempSeqFile, "MainSequence", Grp, "AddStep",
+                "Return Value", $"StationGlobals.{probe}");
+
+            await Ts.RunSequenceAsync(TempSeqFile, "MainSequence", null, 60);
+
+            var globals = await Ts.GetStationGlobalsAsync();
+            Assert.That(Convert.ToDouble(globals.First(g => g.Name == probe).Value),
+                Is.EqualTo(9.0).Within(1e-9), "Add(4,5) must have run with the bound arguments");
+        }
+        finally { await Ts.DeleteStationGlobalAsync(probe); }
+    }
+
     /// <summary>
     /// The only test that proves the step CALLS something: a resolved member with bound arguments,
     /// its return value written to a StationGlobal, executed for real. An unresolved .NET step runs

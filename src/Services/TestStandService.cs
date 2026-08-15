@@ -14031,7 +14031,13 @@ public sealed class TestStandService : ITestStandService
                 catch (Exception ex) { _logger.LogDebug(ex, "No SequenceCall ActualArgs on step '{Step}'.", stepName); }
             }
 
-            // 3) Legacy flat Module.Parameters container.
+            // 3) .NET call parameter (TS.SData.Calls[i].Params): bind the ArgVal expression. For an
+            //    argument that is what the call READS; for the "Return Value" entry it is the
+            //    DESTINATION the result is written to.
+            if (!set)
+                set = TryBindDotNetCallParameter(stepPo, parameterName, value, stepName);
+
+            // 4) Legacy flat Module.Parameters container.
             if (!set)
             {
                 string[] paramPaths = {
@@ -14070,6 +14076,68 @@ public sealed class TestStandService : ITestStandService
             SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
             _loadedSequenceFiles[filePath] = sf;
         });
+    }
+
+    /// <summary>
+    /// Binds one .NET call parameter by name and reports whether it was found. The name is matched
+    /// against the entry's <c>Name</c> leaf, and — for a step that chains several calls — also against
+    /// the <c>member.parameter</c> form <c>get_module_parameters</c> reports, which is the only way to
+    /// address the second call's parameters unambiguously (every entry has its own "Return Value").
+    /// Without a prefix the first match across the chain wins, like the by-name step selectors.
+    /// <para>ONLY <c>ArgVal</c> is written. Measured 2026-08-15: it is the same slot the typed
+    /// <c>DotNetParameter.ValueExpr</c> writes, and <c>UseDefaultValue</c> neither changes with it nor
+    /// appears in the step tree — so unlike a LabVIEW control (whose <c>UseDefaultValues</c> this tool
+    /// always clears as a side effect) there is no companion flag to keep in sync, and not touching it
+    /// is what leaves an optional parameter exactly as it was.</para>
+    /// </summary>
+    private bool TryBindDotNetCallParameter(NiPropertyObject stepPo, string parameterName,
+        string value, string stepName)
+    {
+        try
+        {
+            NiPropertyObject calls =
+                (NiPropertyObject)(object)stepPo.GetPropertyObject("TS.SData.Calls", 0);
+            int numCalls = calls.GetNumElements();
+
+            for (int c = 0; c < numCalls; c++)
+            {
+                NiPropertyObject call;
+                NiPropertyObject parms;
+                string member = "";
+                try
+                {
+                    call = (NiPropertyObject)(object)calls.GetPropertyObjectByOffset(c, 0);
+                    try { member = call.GetValString("MemberName", 0); } catch { /* unnamed entry */ }
+                    parms = (NiPropertyObject)(object)call.GetPropertyObject("Params", 0);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "Call entry {Index} of step '{Step}' has no Params.", c, stepName);
+                    continue;
+                }
+
+                int numParms = parms.GetNumElements();
+                for (int i = 0; i < numParms; i++)
+                {
+                    try
+                    {
+                        NiPropertyObject p = (NiPropertyObject)(object)parms.GetPropertyObjectByOffset(i, 0);
+                        string name = p.GetValString("Name", 0);
+                        if (!string.Equals(name, parameterName, StringComparison.OrdinalIgnoreCase)
+                            && !string.Equals($"{member}.{name}", parameterName, StringComparison.OrdinalIgnoreCase))
+                            continue;
+
+                        p.SetValString("ArgVal", 0, value);
+                        return true;
+                    }
+                    catch (Exception ex)
+                    { _logger.LogDebug(ex, "Failed to inspect .NET parameter {Index} of step '{Step}'.", i, stepName); }
+                }
+            }
+        }
+        catch (Exception ex) { _logger.LogDebug(ex, "No .NET Calls on step '{Step}'.", stepName); }
+
+        return false;
     }
 
     // ── Step Configuration ────────────────────────────────────────────────────

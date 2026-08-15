@@ -666,10 +666,18 @@ every .NET step, however well configured. `Calls` is an ARRAY because one step c
   Double), `TypeName` (class/struct/enum only), `Flags`, `IsOptional`, `CallDispose`, …
 - **There is no Direction leaf** — direction sits in the `Flags` bits: measured `0` for an input, `6`
   for `Return Value`, `10` for an `out` parameter ⇒ bit `4` = return, bit `2` = output.
-- Binding an argument headless works through `set_step_property` on
-  `TS.SData.Calls[0].Params[i].ArgVal` (`set_module_parameter` does not cover .NET yet). `T13` proves
-  the whole chain by RUNNING a step: `Add(2,3)` with its return value bound to a StationGlobal, which
-  reads back 5 — the only evidence that distinguishes a real call from the no-op.
+- **`set_module_parameter` binds a .NET argument** by its name, or by the `<member>.<parameter>` form
+  `get_module_parameters` reports — the only unambiguous address in a call chain, where every entry has
+  its own `Return Value`; unprefixed, the first match across the chain wins. Binding `Return Value`
+  sets the DESTINATION (`Locals.Sum`). The raw route (`set_step_property` on
+  `TS.SData.Calls[0].Params[i].ArgVal`) still works and is equivalent.
+- **No "use default" companion flag here** (measured 2026-08-15): the typed `DotNetParameter.ValueExpr`
+  writes the same slot as the tree's `ArgVal`, and `UseDefaultValue` neither changes with it nor appears
+  in the step tree. So the LabVIEW `UseDefaultValues` asymmetry — the reason `set_module_parameter` is
+  unsuitable for a 1:1 rebuild of a pane — does NOT apply to .NET; the writer touches `ArgVal` only.
+- `T13` proves the whole chain by RUNNING a step: `Add(2,3)` with its return value bound to a
+  StationGlobal reads back 5 (raw route) and `Add(4,5)` → 9 via `set_module_parameter` — the only
+  evidence that distinguishes a real call from the no-op.
 
 ### Engine lifecycle & file handling
 - **Single in-process engine only.** A second engine cannot be torn down cleanly
