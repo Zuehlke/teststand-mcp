@@ -619,6 +619,74 @@ descriptions; the cross-cutting rules below apply regardless of which tool you c
   (`1`) only when `IsCallValid` rejects the result; `configure_dotnet_module` does this and reports
   `staticFallbackUsed`. A static member can validate with `Calls[0].Static` still `false`.
 
+#### Member resolution has THREE tiers — the module-level one resolves almost nothing (2026-08-15, issue #37)
+`DotNetModule.LoadMemberInfo` + `IsCallValid` — the whole resolution logic until now — only accepts a
+member whose prototype it can match without help. Measured on a purpose-built assembly (7-point
+signature matrix): with the flags untouched **nothing** resolved, with the Static bit **only bare
+`NoArgsVoid()`**; every member with a parameter or a non-void return failed with *"Prototype does not
+match that found for member '&lt;name&gt;'"* although the member exists. So a normal method was
+unreachable and the step ran as the silent `Passed` no-op above.
+- The tier that works is the CALL level: **`DotNetCall.LoadPrototypeFromSignature(nameOrSignature,
+  allowMemberNameMatching:true, 0)`** on `Calls[0]` — the API behind the Edit .NET Call dialog. It
+  resolved 1- and 2-argument members, non-void returns and `out` parameters, and populates
+  `Calls[0].Params`. A member that does not exist returns `false`, so failure stays honest.
+- `configure_dotnet_module` runs all three in order (untouched → Static bit → signature) and reports
+  **`resolvedVia`** plus the **`signature`** the adapter really bound.
+- **`load_module_prototype` runs the SAME three tiers for a .NET step.** The generic
+  `Module.LoadPrototype` every other adapter uses does not resolve a .NET member — it throws — so the
+  tool used to answer `prototypeLoaded:false` with an empty interface no matter how reachable the
+  assembly was. Its documented flows work now: complete a step configured while the assembly was
+  missing, or re-sync one whose signature changed. An already-valid interface survives the re-load
+  (pinned by `T13`), because the flags are restored and a failed attempt leaves the step as it was.
+- **A bare member name picks ONE overload silently** (`Overloaded` → `Overloaded(Double)` with three
+  present). Pass the full signature as `method_name` — `"Overloaded(Double, Double)"`, the exact string
+  `DotNetAdapter.GetMemberNames` returns — to select a specific one, and read `signature` back. The
+  signature form **does** work (issue #37 claims it does not; measured otherwise, `T13`): it SELECTS
+  the member, and the step still stores the plain `Calls[0].MemberName` the engine executes off. Use
+  the exact `GetMemberNames` spelling — the trailing ` (static)` of the `sigs` list is a display
+  suffix, not part of it.
+- `GetMemberNames(location, asm, class, options, out names, out sigs)` is the member list: **`options=0`
+  = static members + constructors, `options=1` = instance members** — a static member does NOT appear
+  at `1`, so a wrong flag looks like a missing member.
+- **An INSTANCE member needs `create_object=true`** — alone it is refused (*"is not valid as the first
+  call in the invocation because it is an instance member that requires an object"*), and the note now
+  names the fix. With it, the step is built as the CALL CHAIN the adapter requires: `Calls[0]` the
+  constructor, `Calls[1]` the member invoked on that object. `constructor` picks a non-default one by
+  signature, `dispose_object` releases the object afterwards (lands as `CallDispose` on the
+  constructor's returned object). `T13` runs one for real: `Triple(4)` on a constructed instance
+  writes 12.
+  - `Calls` is EMPTY on a fresh step (indexing it throws "Cannot index an empty array"), so the chain
+    is built with `Calls.New(i)` + `LoadPrototypeFromSignature` per entry and REBUILT rather than
+    patched on a re-configure. The object is handed between entries **implicitly** — there is no
+    expression to plumb, and `CreateObject` flips to true by itself.
+  - **Calling into an object that already EXISTS elsewhere is not reachable.** Measured both ways:
+    `<Use Existing Object>` cannot be loaded by signature (returns false) and
+    `DotNetModule.ClassReference` does not persist (reads back empty), leaving the member refused.
+    Do not re-investigate without a new idea.
+
+#### A .NET step's parameters live in `Calls[i].Params` (2026-08-15, issue #37)
+Never in the flat `Module.Parameters` container — `get_module_parameters` therefore returned `[]` for
+every .NET step, however well configured. `Calls` is an ARRAY because one step can chain invocations
+(construct → call), so entries are prefixed `<member>.` when there is more than one — which is exactly
+what an instance-method step looks like (`InstanceOps.Return Value`, `Triple.a`, …).
+- Leaves per entry: `Name`, **`ArgVal`** (the binding expression — for the entry named **`Return Value`**
+  it is the DESTINATION the result is written to), `Type` (numeric `DotNetParameterTypes`, e.g. 12 =
+  Double), `TypeName` (class/struct/enum only), `Flags`, `IsOptional`, `CallDispose`, …
+- **There is no Direction leaf** — direction sits in the `Flags` bits: measured `0` for an input, `6`
+  for `Return Value`, `10` for an `out` parameter ⇒ bit `4` = return, bit `2` = output.
+- **`set_module_parameter` binds a .NET argument** by its name, or by the `<member>.<parameter>` form
+  `get_module_parameters` reports — the only unambiguous address in a call chain, where every entry has
+  its own `Return Value`; unprefixed, the first match across the chain wins. Binding `Return Value`
+  sets the DESTINATION (`Locals.Sum`). The raw route (`set_step_property` on
+  `TS.SData.Calls[0].Params[i].ArgVal`) still works and is equivalent.
+- **No "use default" companion flag here** (measured 2026-08-15): the typed `DotNetParameter.ValueExpr`
+  writes the same slot as the tree's `ArgVal`, and `UseDefaultValue` neither changes with it nor appears
+  in the step tree. So the LabVIEW `UseDefaultValues` asymmetry — the reason `set_module_parameter` is
+  unsuitable for a 1:1 rebuild of a pane — does NOT apply to .NET; the writer touches `ArgVal` only.
+- `T13` proves the whole chain by RUNNING a step: `Add(2,3)` with its return value bound to a
+  StationGlobal reads back 5 (raw route) and `Add(4,5)` → 9 via `set_module_parameter` — the only
+  evidence that distinguishes a real call from the no-op.
+
 ### Engine lifecycle & file handling
 - **Single in-process engine only.** A second engine cannot be torn down cleanly
   while the first one lives → the host hangs on exit. The MCP server uses exactly

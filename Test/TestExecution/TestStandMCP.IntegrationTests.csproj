@@ -37,6 +37,13 @@
     <Compile Include="..\..\src\Tools\TestStandToolRegistry.cs" Link="Shared\TestStandToolRegistry.cs" />
   </ItemGroup>
 
+  <!-- ── Fixture assembly for the .NET adapter tests ───────────────────── -->
+  <!-- Built alongside the tests and loaded by TestStand at run time (never called from C#), so T13
+       can resolve REAL members instead of only proving that a nonexistent path fails. -->
+  <ItemGroup>
+    <ProjectReference Include="..\TestAssets\TestStandMCP.DotNetTestAssembly\TestStandMCP.DotNetTestAssembly.csproj" />
+  </ItemGroup>
+
   <!-- ── NuGet packages ────────────────────────────────────────────────── -->
   <ItemGroup>
     <PackageReference Include="NUnit"                                       Version="3.14.0" />

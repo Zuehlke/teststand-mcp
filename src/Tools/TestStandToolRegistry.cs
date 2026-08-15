@@ -2726,9 +2726,14 @@ public class TestStandToolRegistry
             "LabVIEW connector-pane bindings (TS.SData.ViCall.Parms — cluster members flattened " +
             "as 'parent.child', value = the ArgVal binding expression), the step-root VIModule " +
             "of utility steps (NI_LV_RunVIAsynchronously), SequenceCall actual arguments " +
-            "(TS.SData.ActualArgs — value = the Expr binding; null when the default is used), " +
-            "and finally the legacy flat Module.Parameters container (DLL/.NET/Python). " +
-            "Returns a list of {name, value, type, direction, dataType}.",
+            "(TS.SData.ActualArgs — value = the Expr binding; null when the default is used), the " +
+            "Python argument list (TS.SData.PythonCall.Parameters), the .NET call chain " +
+            "(TS.SData.Calls[i].Params — value = the ArgVal binding expression, which for the entry " +
+            "named 'Return Value' is the DESTINATION the result is written to; entries are prefixed " +
+            "'<member>.' when the step chains more than one call), and finally the legacy flat " +
+            "Module.Parameters container. " +
+            "Returns a list of {name, value, type, direction, dataType}; direction is " +
+            "Input/Output/Return.",
             s => s
                 .AddRequired("file_path", "string", "Path to the sequence file")
                 .AddRequired("sequence_name", "string", "Name of the sequence")
@@ -2745,10 +2750,17 @@ public class TestStandToolRegistry
             "'Load Prototype') so EVERY parameter becomes a correctly-typed SequenceArgument (right " +
             "ParamType/ParamRepresentation/Flags) with unbound args left at UseDef=True — only if the " +
             "target cannot be resolved (headless/missing file) is a bare entry created on demand. " +
+            ".NET steps: binds TS.SData.Calls[i].Params[j].ArgVal, matched by the parameter's name — " +
+            "or by the '<member>.<parameter>' form get_module_parameters reports, which is how a step " +
+            "chaining several calls is addressed unambiguously (each entry has its own 'Return Value'); " +
+            "without a prefix the first match across the chain wins. Binding 'Return Value' sets the " +
+            "DESTINATION the result is written to (e.g. 'Locals.Sum'). Nothing else is touched — a .NET " +
+            "parameter has no companion 'use default' flag, unlike a LabVIEW control. " +
             "Falls back to the legacy flat Module.Parameters container for other adapters. step_name " +
             "accepts the same selectors as set_step_* for duplicate-named steps: 'Name#N' (the Nth " +
             "1-based occurrence) or '@idx:N' (the 0-based index within the group). " +
-            "NOT SUITABLE FOR A 1:1 REBUILD — it always CLEARS the 'use default' flag " +
+            "NOT SUITABLE FOR A 1:1 REBUILD OF A LABVIEW OR SEQUENCECALL BINDING — it always CLEARS " +
+            "the 'use default' flag " +
             "(UseDefaultValues on a LabVIEW control, UseDef on a SequenceCall argument) as a side " +
             "effect, and those two are INDEPENDENT of the expression: the editor routinely keeps a " +
             "remembered expression next to 'use default'. Passing an empty value therefore does NOT " +
@@ -3071,7 +3083,19 @@ public class TestStandToolRegistry
             "against the assembly and the adapter reports the call as valid. Anything that did not " +
             "apply is named in 'note' with the adapter's own reason (e.g. \"Could not find file\") — " +
             "read it, because a step whose member did not resolve still executes and reports Passed " +
-            "without calling anything.",
+            "without calling anything. " +
+            "OVERLOADS: method_name takes either a bare member name or the FULL signature as the " +
+            "Edit .NET Call dialog shows it ('Overloaded(Double, Double)'). A bare name that matches " +
+            "several overloads resolves to ONE of them silently, so the signature the adapter really " +
+            "bound is reported back in appliedSettings['signature'] — check it, or pass the full " +
+            "signature to pick a specific overload. appliedSettings['resolvedVia'] names the route " +
+            "('member-info' | 'member-info-static' | 'signature'). " +
+            "INSTANCE METHODS need an object: pass create_object=true and the step is built as the " +
+            "constructor→member CALL CHAIN the adapter requires (Calls[0] constructs, Calls[1] calls " +
+            "the member on it; 'constructor' selects a non-default one by signature, dispose_object " +
+            "releases the object afterwards). Their parameters then read back prefixed with the member " +
+            "name ('Triple.a'), which is also how set_module_parameter addresses them. Calling into an " +
+            "object that already EXISTS elsewhere is not reachable through this API.",
             s => s
                 .AddRequired("file_path", "string", "Path to the sequence file")
                 .AddRequired("sequence_name", "string", "Name of the sequence")
@@ -3079,7 +3103,18 @@ public class TestStandToolRegistry
                 .AddRequired("step_name", "string", "Name of the step")
                 .AddRequired("assembly_path", "string", "Path to the .NET assembly (DLL)")
                 .AddRequired("class_name", "string", "Fully-qualified class name")
-                .AddRequired("method_name", "string", "Name of the method to call")
+                .AddRequired("method_name", "string",
+                    "Member to call: the bare name, or the full signature to select one overload " +
+                    "(e.g. 'Overloaded(Double, Double)')")
+                .AddOptional("create_object", "boolean",
+                    "Construct an instance and call the member on it (required for an INSTANCE " +
+                    "member; default false).", false)
+                .AddOptional("constructor", "string",
+                    "Constructor signature to use with create_object, as the member list spells it " +
+                    "(e.g. 'MyClass(Int32)'). Default: the parameterless constructor.")
+                .AddOptional("dispose_object", "boolean",
+                    "Dispose the constructed object after the call (default false). Only applied " +
+                    "when the adapter keeps it — otherwise it is named in 'note'.", false)
                 .AddOptional("save", "boolean", "Save the file (default true)", true)
                 .AddOptional("load_prototype", "boolean",
                     "Load the method prototype afterwards to populate the parameter interface " +
@@ -3270,6 +3305,10 @@ public class TestStandToolRegistry
             "unloadable .lvlibp, copy_step_module is the headless fallback. Non-LabVIEW adapters always " +
             "run fast, in-process, synchronously. Result carries executionMode ('in-process'|'worker'), " +
             "workerOutcome, jobId and status. " +
+            ".NET: the member is re-resolved with the adapter's own three tiers (the generic module " +
+            "prototype load cannot resolve a .NET member at all), so this completes a step that was " +
+            "configured while its assembly was unreachable, and re-syncs one whose signature changed; " +
+            "the note names the route and the bound signature. An already valid interface is kept. " +
             "FOR LABVIEW, PASS isolate=false. The isolated worker is a separate PROCESS that does not " +
             "inherit the attachment to the running LabVIEW ADE — it tries to start its own and times " +
             "out. Measured on a real file: 8 VI steps x 120s, every one a timeout, versus ~5s per step " +
@@ -5594,7 +5633,10 @@ public class TestStandToolRegistry
             args!.Value.GetRequiredString("class_name"),
             args!.Value.GetRequiredString("method_name"),
             args!.Value.GetBoolOrDefault("save", true),
-            args!.Value.GetBoolOrDefault("load_prototype", true));
+            args!.Value.GetBoolOrDefault("load_prototype", true),
+            args!.Value.GetBoolOrDefault("create_object", false),
+            args!.Value.GetStringOrDefault("constructor", ""),
+            args!.Value.GetBoolOrDefault("dispose_object", false));
         return OkJson(result);
     }
 
