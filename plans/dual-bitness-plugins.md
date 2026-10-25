@@ -31,9 +31,9 @@ expected to be a re-run after the code changes, not a hunt for failures.
   launcher, ARM64, TestStand in CI.
 - **One identity table, no retyped names.** Architecture → plugin name, display name, asset
   prefix, runtime identifier, build platform lives in `build/PluginIdentity.psm1`. Every script
-  reads it; nothing else spells `teststand-mcp-x64`. The two exceptions are committed files that
-  are not generated, `marketplace.json` and the allow hook's prefix list, and a test pins each
-  against the table.
+  reads it; nothing else spells `teststand-mcp-x64`. The one exception is a committed file that
+  is not generated, `marketplace.json`, and a test pins it against the table (amended: the allow
+  hook builds its single prefix from its own `plugin.json` name, see DB-12).
 - **x86 stays the default everywhere** (`dotnet build`, `Build-PluginArchive.ps1`, the dev
   restart command), so existing commands and the parent plan's tests keep their meaning.
 - **Format fidelity:** as in the parent plan (UTF-8 without BOM through .NET file APIs).
@@ -170,9 +170,9 @@ Feature: Each plugin carries its own name
     Then the staged tree is identical to today's and contains no teststand-mcp-x64
 
   Scenario: Allow hook under either plugin
-    Given a read-only tool call with either plugin's prefix on a .seq inside the project
-    Then the allow hook allows it
-    And a mutating tool under either prefix is not allowed
+    Given a read-only tool call under a plugin's own prefix on a .seq inside the project
+    Then that plugin's allow hook allows it
+    And the same call under the other plugin's prefix, or a mutating tool, is not allowed
 
   Scenario: Separate state
     Given both plugins are installed
@@ -190,8 +190,8 @@ Feature: Each plugin carries its own name
 #### Step 3.2: Stamped hooks, agents and hook scripts
 
 **Complexity**: complex
-**IMPLEMENT**: `New-HooksJson` takes the plugin name; staging generates `hooks.json` and the plugin-flavour agents per identity. The allow hook keeps a literal two-entry prefix list. The hooks' state folder derives from the installed `plugin.json` name (x86 keeps `teststand-mcp`, so existing caches stay valid).
-**TEST**: The scenarios above, plus a test that the allow hook's prefix list equals the table's two prefixes.
+**IMPLEMENT**: `New-HooksJson` takes the plugin name; staging generates `hooks.json` and the plugin-flavour agents per identity. The allow hook derives its one prefix from the installed `plugin.json` name (amended from a two-entry list, DB-12). The hooks' state folder derives from the installed `plugin.json` name (x86 keeps `teststand-mcp`, so existing caches stay valid).
+**TEST**: The scenarios above, plus a test that each plugin's allow hook rejects the other plugin's prefix.
 **Commit**: `feat: stamp each plugin's own name into its hooks and agents`
 
 ### Slice 4: Packaging per architecture
@@ -247,7 +247,7 @@ Feature: The guard checks the TestStand this plugin can drive
 #### Step 5.1: Bitness-aware detection
 
 **Complexity**: standard
-**IMPLEMENT**: The guard reads its plugin name, maps it to the bitness through the same two-entry table as the allow hook, and checks only that root (`%ProgramFiles(x86)%` or `%ProgramW6432%`). The `TestStand` / `TestStand64` environment variables count for their own bitness only.
+**IMPLEMENT**: The guard reads its plugin name, maps it to the bitness through the identity table, and checks only that root (`%ProgramFiles(x86)%` or `%ProgramW6432%`). The `TestStand` / `TestStand64` environment variables count for their own bitness only.
 **TEST**: The three scenarios with fake roots.
 **Commit**: `feat: warn when the TestStand of the plugin's bitness is missing`
 
