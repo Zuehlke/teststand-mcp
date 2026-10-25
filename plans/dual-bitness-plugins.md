@@ -437,8 +437,12 @@ suite never runs in a subagent.
 
 ## Pre-PR quality gate
 
-- [ ] Script suites under PowerShell 5.1 and 7, Python stats tests, engine-free tests: green
-- [ ] Pre-push hook: suite green on x86 and x64
-- [ ] `/code-review` backstop on the dual-bitness diff
-- [ ] Fork rehearsal round 3 recorded
-- [ ] PR A body updated: two plugins, both bitnesses tested
+- [x] Script suites, Python stats tests, engine-free tests: green (18 script runs under 5.1, 131 stats, 68 engine-free; PowerShell 7 is not installed on this station, so its runs are left to CI)
+- [x] Pre-push hook: suite green on x86 and x64 (663/663 each)
+- [x] `/code-review` backstop on the dual-bitness diff: 6 findings; two fixed (`fix: name the failing plugin and refuse one hash for two plugins`), the rest skipped as edge cases or cleanup, one recorded below
+- [x] Fork rehearsal round 3 recorded
+- [x] PR A body updated: two plugins, both bitnesses tested
+
+## Follow-ups
+
+- `launch_sequence_editor` resolves `SeqEdit.exe` without the connected engine's `Bin` or the `engine_path` override (`SequenceEditorService.FindSeqEditPath`). It predates this plan; with two installs of one bitness, the editor can differ from the engine.
