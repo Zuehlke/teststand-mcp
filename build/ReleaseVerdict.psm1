@@ -52,7 +52,7 @@ $script:Faults = @{
     'versioned-size-differs'       = @{ Fault = '{0} is {1} bytes but the plugin archive is {2} bytes'
                                         Why = 'the two archives must be the same bytes, or users get a different build depending on the URL'
                                         Fix = '' }
-    'digest-malformed'             = @{ Fault = 'the archive digest is malformed: {0}'
+    'digest-malformed'             = @{ Fault = 'the archive digest {1} is malformed: {0}'
                                         Why = 'the uploaded digest cannot be read, so the plugin archive cannot be checked against it'
                                         Fix = 'The digest must be one "<sha256>  <plugin archive name>" line.' }
     'digest-name'                  = @{ Fault = "the archive digest names '{0}', not {1}"
@@ -171,7 +171,7 @@ function Get-DigestProblems {
     try {
         $digest = ConvertFrom-DigestText -Text (Read-Utf8Text $AssetsByName[$Names.Digest].Path)
     } catch {
-        return @(New-Problem 'digest-malformed' @($_.Exception.Message))
+        return @(New-Problem 'digest-malformed' @($_.Exception.Message, $Names.Digest))
     }
     if ($digest.Name -cne $Names.Archive) { return @(New-Problem 'digest-name' @($digest.Name, $Names.Archive)) }
     if ($digest.Hash -cne $ArchiveHash) { return @(New-Problem 'digest-mismatch' @($digest.Hash, $ArchiveHash, $Names.Archive, $Names.Digest)) }

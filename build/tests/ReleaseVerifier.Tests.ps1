@@ -161,7 +161,7 @@ try {
         Write-TextFile (Join-Path $fixture.Dir 'teststand-mcp.sha256') "garbage`n"
         $run = Invoke-LocalVerify $fixture
         Assert-Equal 1 $run.ExitCode 'exit code for a malformed digest'
-        Assert-Contains $run.Output 'the archive digest is malformed' 'malformed digest fault'
+        Assert-Contains $run.Output 'the archive digest teststand-mcp.sha256 is malformed' 'malformed digest fault, naming the digest'
     }
 
     Invoke-Case 'verify local fault: a malformed, empty or repeating manifest is a manifest fault' {
@@ -736,6 +736,7 @@ try {
         $run = Invoke-LatestVerify (New-FakeApi $fixture) -Extra $stale
         Assert-Equal 1 $run.ExitCode 'exit code for a stale x64 download'
         Assert-Contains $run.Output 'not the archive of the release that was just verified' 'the fault'
+        Assert-Contains $run.Output 'The latest release (teststand-mcp-x64.zip)' 'the failure names the stale plugin'
     }
 
     Invoke-Case 'both plugins: -ExpectedArchiveHashes without an entry per plugin, not JSON, or next to -ExpectedArchiveSha256 is refused' {
@@ -748,6 +749,9 @@ try {
         }
         $run = Invoke-LatestVerify (New-FakeApi $fixture) -Extra @{ ExpectedArchiveSha256 = $hash; ExpectedArchiveHashes = (ConvertTo-Json -Compress @{ 'teststand-mcp.zip' = $hash }) }
         Assert-Equal 1 $run.ExitCode 'exit code for both expectations'
+        $run = Invoke-LatestVerify (New-FakeApi $fixture) -Extra @{ AssetPrefixes = 'teststand-mcp,teststand-mcp-x64'; ExpectedArchiveSha256 = $hash }
+        Assert-Equal 1 $run.ExitCode 'exit code for one hash with two plugins'
+        Assert-Contains $run.Output 'Pass -ExpectedArchiveHashes' 'the failure names the per-plugin parameter'
     }
 
     Invoke-Case 'own-downloads: run_id is a JSON string even when the run id is all digits (the collector compares strings)' {

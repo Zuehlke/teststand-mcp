@@ -164,6 +164,11 @@ function Assert-SourceChoice {
                 -Why 'It is compared with the SHA-256 of the archive users download. An empty value would silently turn the check into the weaker one that accepts the previous release too, so it is refused.' `
                 -Fix 'Pass the archive_sha256 output of the draft verification step, or omit the parameter.'
         }
+        if (@($AssetPrefixes).Count -gt 1) {
+            Write-BuildFailure -What "-ExpectedArchiveSha256 was given for $(@($AssetPrefixes).Count) plugins ($($AssetPrefixes -join ', '))." `
+                -Why 'It holds ONE hash, so every other plugin''s latest download would be accepted on its own digest alone, which a stale previous release also passes.' `
+                -Fix 'Pass -ExpectedArchiveHashes with one hash per plugin (the archive_hashes output of the draft verification step).'
+        }
     }
     if ($ExpectedHashesGiven) {
         if (-not $Latest -or $ExpectedHashGiven) {
@@ -249,17 +254,18 @@ function Test-LatestOnce {
     Assert-DownloadsSucceeded $outcome 'The latest release'
 
     foreach ($names in $plugins) {
+        $subject = "The latest release ($($names.Archive))"   # one release carries several plugins: name the failing one
         try {
             $digest = ConvertFrom-DigestText -Text (Read-Utf8Text $transfer.Saved[$names.Digest])
         } catch {
-            Assert-ReleaseFailure 'The latest release' @(New-Problem 'digest-malformed' @($_.Exception.Message)) 'ApiPublished'
+            Assert-ReleaseFailure $subject @(New-Problem 'digest-malformed' @($_.Exception.Message, $names.Digest)) 'ApiPublished'
         }
         $archiveHash = Get-FileSha256 $transfer.Saved[$names.Archive]
-        if ($digest.Name -cne $names.Archive) { Assert-ReleaseFailure 'The latest release' @(New-Problem 'digest-name' @($digest.Name, $names.Archive)) 'ApiPublished' }
-        if ($digest.Hash -cne $archiveHash) { Assert-ReleaseFailure 'The latest release' @(New-Problem 'latest-mismatch' @($archiveHash, $digest.Hash)) 'ApiPublished' }
+        if ($digest.Name -cne $names.Archive) { Assert-ReleaseFailure $subject @(New-Problem 'digest-name' @($digest.Name, $names.Archive)) 'ApiPublished' }
+        if ($digest.Hash -cne $archiveHash) { Assert-ReleaseFailure $subject @(New-Problem 'latest-mismatch' @($archiveHash, $digest.Hash)) 'ApiPublished' }
         $expectedHash = $ExpectedByArchive[$names.Archive]
         if ($expectedHash -and $archiveHash -cne $expectedHash) {
-            Assert-ReleaseFailure 'The latest release' @(New-Problem 'latest-not-verified' @($archiveHash, $expectedHash)) 'ApiPublished'
+            Assert-ReleaseFailure $subject @(New-Problem 'latest-not-verified' @($archiveHash, $expectedHash)) 'ApiPublished'
         }
         $claim = if ($expectedHash) { 'matches the published archive digest and is the archive of the verified release' } else { 'matches the published archive digest' }
         Write-Host "The latest download of $($names.Archive) $claim ($archiveHash)."
