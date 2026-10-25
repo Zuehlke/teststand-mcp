@@ -192,7 +192,7 @@ try {
         Assert-Contains $log ('CWD=' + $HooksDir) 'working directory of the probe'
     }
 
-    Invoke-Case 'guard: two hanging interpreters are cut off, killed, and reported as no Python within the hook timeout' {
+    Invoke-Case 'guard: two hanging interpreters are reported as no Python (the hook-timeout bound only with TESTSTAND_MCP_TIMING_CHECK=1)' {
         $fixture = New-GuardFixture -PyOut '1 1' -PythonOut '1 1' -StubBody "ping -n 12 127.0.0.1 >nul`r`n"
         $result = Invoke-Guard $fixture
         Assert-GuardClean $result

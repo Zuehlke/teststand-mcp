@@ -4837,7 +4837,8 @@ public sealed class TestStandService : ITestStandService
         Log($"Resolved AnalyzerApp.exe: {analyzerExe}");
         Log($"Resolved saved project:   {(string.IsNullOrEmpty(savedProject) ? "(public dir unknown)" : savedProject)}");
         // Per run: two analyses at once (two async jobs, or the x86 and x64 servers sharing %TEMP%) must not
-        // overwrite or delete each other's project and report.
+        // overwrite or delete each other's project and report. shortcut: ts_analyzer_diag.txt stays one file
+        // (last run wins), because the tool descriptions point users at that name; per-run diag names when that bites.
         string runStem = System.IO.Path.GetFileNameWithoutExtension(filePath) + "_" + Guid.NewGuid().ToString("N")[..8];
         string tempProject = System.IO.Path.Combine(
             System.IO.Path.GetTempPath(), "ts_mcp_analysis_" + runStem + ".tsaproj");
@@ -4896,145 +4897,151 @@ public sealed class TestStandService : ITestStandService
         projectXml = _pathAtLastWriteRx.Replace(projectXml,
             $"<PathAtLastWrite classname='Str'><value>{escapedTempProject}</value></PathAtLastWrite>");
 
-        System.IO.File.WriteAllText(tempProject, projectXml, System.Text.Encoding.UTF8);
-        Log($"Temp project written: {tempProject}");
-        Flush();
-
-        // ── 3. Run AnalyzerApp.exe ────────────────────────────────────────────
-        if (!System.IO.File.Exists(analyzerExe))
-            throw new InvalidOperationException(
-                $"AnalyzerApp.exe not found at: {analyzerExe}." +
-                (string.IsNullOrEmpty(probed) ? "" : $" Probed: {probed}"));
-
-        var psi = new System.Diagnostics.ProcessStartInfo
-        {
-            FileName               = analyzerExe,
-            // AnalyzerApp.exe starts an engine of its own, so without /env it would analyze against
-            // the GLOBAL search directories, type palettes and adapter configuration while the rest
-            // of this server runs in the caller's environment — wrong results, reported as clean.
-            Arguments              = TestStandEnvironmentLocator.PrependEnvSwitch(
-                $"\"{tempProject}\" /analyze /report \"{reportPath}\" /save /quit", environmentPath),
-            UseShellExecute        = false,
-            RedirectStandardOutput = true,
-            RedirectStandardError  = true,
-            CreateNoWindow         = true,
-        };
-
-        // ── Normalize the child environment ───────────────────────────────────
-        // AnalyzerApp.exe is 32-bit and, when it analyzes LabVIEW code modules, loads the 32-bit
-        // LabVIEW Run-Time Engine (lvrt.dll). lvrt builds paths from %ProgramFiles(x86)% and crashes
-        // hard with 0xC0000409 (STATUS_STACK_BUFFER_OVERRUN → exit code -1073740791, empty stdout/
-        // stderr) when that variable is absent. The MCP host can inherit a heavily reduced environment
-        // (observed: ~15 vars, no ProgramFiles(x86)) when its launcher does not pass the full user
-        // environment, so we must guarantee the child has the system variables the analyzer + lvrt
-        // depend on — independent of how TestStandMCP.exe itself was started.
-        //
-        // psi.Environment is pre-seeded with this process's environment. ApplyTestStandToolChildEnv
-        // supplies every variable that is MISSING from it, derived from the OS (NOT from
-        // GetEnvironmentVariable, which returns null when a variable is absent in *this* process).
-        // ProgramFiles(x86) is mandatory; the rest harden common lvrt/Windows lookups.
-        // (UseShellExecute=false above is required for psi.Environment to apply.)
-        ApplyTestStandToolChildEnv(psi);
-
-        Log($"Child env normalized — ProgramFiles(x86)=" +
-            (psi.Environment.TryGetValue("ProgramFiles(x86)", out var pf86) && !string.IsNullOrEmpty(pf86)
-                ? pf86 : "(MISSING!)"));
-
-        Log($"Launching: {analyzerExe} {psi.Arguments}");
-        Flush();
-
-        using var proc = System.Diagnostics.Process.Start(psi)
-            ?? throw new InvalidOperationException("Failed to start AnalyzerApp.exe process.");
-
-        // The output must be drained ASYNCHRONOUSLY and the wait must be the thing that enforces the
-        // timeout. The previous code did `ReadToEnd(); ReadToEnd(); WaitForExit(120_000)` — but
-        // ReadToEnd blocks until the child closes the stream, i.e. until it EXITS, so by the time
-        // WaitForExit ran the process was always gone and the "2 minute timeout" could never fire.
-        // A genuinely hung AnalyzerApp therefore hung the call forever. Reading the two pipes
-        // serially could also deadlock: a child that fills the stderr buffer while we are still
-        // draining stdout blocks, and we never get to stderr.
-        var stdoutTask = proc.StandardOutput.ReadToEndAsync();
-        var stderrTask = proc.StandardError.ReadToEndAsync();
-        int timeoutMs  = Math.Max(1, timeoutSeconds) * 1000;
-
-        if (!proc.WaitForExit(timeoutMs))
-        {
-            try { proc.Kill(entireProcessTree: true); } catch (Exception) { /* best-effort */ }
-            Log($"AnalyzerApp.exe timed out after {timeoutSeconds}s — killed.");
-            Flush();
-            throw new InvalidOperationException(
-                $"AnalyzerApp.exe timed out after {timeoutSeconds} seconds. A cold analysis that " +
-                "loads LabVIEW .lvlibp or Python code modules can legitimately take many minutes " +
-                "(measured: ~8.5 min on a 30-sequence file) — raise timeout_seconds, or run the " +
-                "analysis with async=true and poll get_analysis_status.");
-        }
-
-        // The child has exited, so both reads are complete or about to be; bounded so a stuck pipe
-        // cannot hang us after a successful exit.
-        string stdout = "", stderr = "";
+        // The run names are unique, so a file left by a failed or timed-out run would never be overwritten.
+        List<AnalyzerMessage> result;
         try
         {
-            Task.WaitAll(new Task[] { stdoutTask, stderrTask }, 15_000);
-            if (stdoutTask.IsCompletedSuccessfully) stdout = stdoutTask.Result;
-            if (stderrTask.IsCompletedSuccessfully) stderr = stderrTask.Result;
-        }
-        catch (Exception ex) { Log($"Draining AnalyzerApp output failed: {ex.Message}"); }
+            System.IO.File.WriteAllText(tempProject, projectXml, System.Text.Encoding.UTF8);
+            Log($"Temp project written: {tempProject}");
+            Flush();
 
-        int exitCode = proc.ExitCode;
-        Log($"AnalyzerApp exit code: {exitCode}");
-        if (!string.IsNullOrWhiteSpace(stdout)) Log($"stdout: {stdout.Trim()}");
-        if (!string.IsNullOrWhiteSpace(stderr)) Log($"stderr: {stderr.Trim()}");
-        // exit 0 = clean, 1 = errors, 2 = warnings, <0 = bad args/paths
-        if (exitCode < 0)
-        {
-            // A negative exit (notably -1073740791 / 0xC0000409 from lvrt.dll) means the child
-            // crashed before producing output. Dump the critical child env vars so a regression —
-            // e.g. ProgramFiles(x86) going missing again — is immediately visible in the diag file.
-            Log("AnalyzerApp.exe exited with a negative code — dumping critical child env vars:");
-            foreach (var key in new[]
+            // ── 3. Run AnalyzerApp.exe ────────────────────────────────────────────
+            if (!System.IO.File.Exists(analyzerExe))
+                throw new InvalidOperationException(
+                    $"AnalyzerApp.exe not found at: {analyzerExe}." +
+                    (string.IsNullOrEmpty(probed) ? "" : $" Probed: {probed}"));
+
+            var psi = new System.Diagnostics.ProcessStartInfo
             {
-                "ProgramFiles(x86)", "ProgramFiles", "ProgramData", "ALLUSERSPROFILE",
-                "CommonProgramFiles", "CommonProgramFiles(x86)", "ComSpec",
-                "TMP", "TEMP", "NUMBER_OF_PROCESSORS", "SystemRoot", "PATH",
-            })
+                FileName               = analyzerExe,
+                // AnalyzerApp.exe starts an engine of its own, so without /env it would analyze against
+                // the GLOBAL search directories, type palettes and adapter configuration while the rest
+                // of this server runs in the caller's environment — wrong results, reported as clean.
+                Arguments              = TestStandEnvironmentLocator.PrependEnvSwitch(
+                    $"\"{tempProject}\" /analyze /report \"{reportPath}\" /save /quit", environmentPath),
+                UseShellExecute        = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError  = true,
+                CreateNoWindow         = true,
+            };
+
+            // ── Normalize the child environment ───────────────────────────────────
+            // AnalyzerApp.exe is 32-bit and, when it analyzes LabVIEW code modules, loads the 32-bit
+            // LabVIEW Run-Time Engine (lvrt.dll). lvrt builds paths from %ProgramFiles(x86)% and crashes
+            // hard with 0xC0000409 (STATUS_STACK_BUFFER_OVERRUN → exit code -1073740791, empty stdout/
+            // stderr) when that variable is absent. The MCP host can inherit a heavily reduced environment
+            // (observed: ~15 vars, no ProgramFiles(x86)) when its launcher does not pass the full user
+            // environment, so we must guarantee the child has the system variables the analyzer + lvrt
+            // depend on — independent of how TestStandMCP.exe itself was started.
+            //
+            // psi.Environment is pre-seeded with this process's environment. ApplyTestStandToolChildEnv
+            // supplies every variable that is MISSING from it, derived from the OS (NOT from
+            // GetEnvironmentVariable, which returns null when a variable is absent in *this* process).
+            // ProgramFiles(x86) is mandatory; the rest harden common lvrt/Windows lookups.
+            // (UseShellExecute=false above is required for psi.Environment to apply.)
+            ApplyTestStandToolChildEnv(psi);
+
+            Log($"Child env normalized — ProgramFiles(x86)=" +
+                (psi.Environment.TryGetValue("ProgramFiles(x86)", out var pf86) && !string.IsNullOrEmpty(pf86)
+                    ? pf86 : "(MISSING!)"));
+
+            Log($"Launching: {analyzerExe} {psi.Arguments}");
+            Flush();
+
+            using var proc = System.Diagnostics.Process.Start(psi)
+                ?? throw new InvalidOperationException("Failed to start AnalyzerApp.exe process.");
+
+            // The output must be drained ASYNCHRONOUSLY and the wait must be the thing that enforces the
+            // timeout. The previous code did `ReadToEnd(); ReadToEnd(); WaitForExit(120_000)` — but
+            // ReadToEnd blocks until the child closes the stream, i.e. until it EXITS, so by the time
+            // WaitForExit ran the process was always gone and the "2 minute timeout" could never fire.
+            // A genuinely hung AnalyzerApp therefore hung the call forever. Reading the two pipes
+            // serially could also deadlock: a child that fills the stderr buffer while we are still
+            // draining stdout blocks, and we never get to stderr.
+            var stdoutTask = proc.StandardOutput.ReadToEndAsync();
+            var stderrTask = proc.StandardError.ReadToEndAsync();
+            int timeoutMs  = Math.Max(1, timeoutSeconds) * 1000;
+
+            if (!proc.WaitForExit(timeoutMs))
             {
-                Log($"  {key} = {(psi.Environment.TryGetValue(key, out var v) ? v : "(absent)")}");
+                try { proc.Kill(entireProcessTree: true); } catch (Exception) { /* best-effort */ }
+                Log($"AnalyzerApp.exe timed out after {timeoutSeconds}s — killed.");
+                Flush();
+                throw new InvalidOperationException(
+                    $"AnalyzerApp.exe timed out after {timeoutSeconds} seconds. A cold analysis that " +
+                    "loads LabVIEW .lvlibp or Python code modules can legitimately take many minutes " +
+                    "(measured: ~8.5 min on a 30-sequence file) — raise timeout_seconds, or run the " +
+                    "analysis with async=true and poll get_analysis_status.");
+            }
+
+            // The child has exited, so both reads are complete or about to be; bounded so a stuck pipe
+            // cannot hang us after a successful exit.
+            string stdout = "", stderr = "";
+            try
+            {
+                Task.WaitAll(new Task[] { stdoutTask, stderrTask }, 15_000);
+                if (stdoutTask.IsCompletedSuccessfully) stdout = stdoutTask.Result;
+                if (stderrTask.IsCompletedSuccessfully) stderr = stderrTask.Result;
+            }
+            catch (Exception ex) { Log($"Draining AnalyzerApp output failed: {ex.Message}"); }
+
+            int exitCode = proc.ExitCode;
+            Log($"AnalyzerApp exit code: {exitCode}");
+            if (!string.IsNullOrWhiteSpace(stdout)) Log($"stdout: {stdout.Trim()}");
+            if (!string.IsNullOrWhiteSpace(stderr)) Log($"stderr: {stderr.Trim()}");
+            // exit 0 = clean, 1 = errors, 2 = warnings, <0 = bad args/paths
+            if (exitCode < 0)
+            {
+                // A negative exit (notably -1073740791 / 0xC0000409 from lvrt.dll) means the child
+                // crashed before producing output. Dump the critical child env vars so a regression —
+                // e.g. ProgramFiles(x86) going missing again — is immediately visible in the diag file.
+                Log("AnalyzerApp.exe exited with a negative code — dumping critical child env vars:");
+                foreach (var key in new[]
+                {
+                    "ProgramFiles(x86)", "ProgramFiles", "ProgramData", "ALLUSERSPROFILE",
+                    "CommonProgramFiles", "CommonProgramFiles(x86)", "ComSpec",
+                    "TMP", "TEMP", "NUMBER_OF_PROCESSORS", "SystemRoot", "PATH",
+                })
+                {
+                    Log($"  {key} = {(psi.Environment.TryGetValue(key, out var v) ? v : "(absent)")}");
+                }
+                Flush();
+                throw new InvalidOperationException(
+                    $"AnalyzerApp.exe returned error code {exitCode}. stdout: {stdout.Trim()} stderr: {stderr.Trim()}");
             }
             Flush();
-            throw new InvalidOperationException(
-                $"AnalyzerApp.exe returned error code {exitCode}. stdout: {stdout.Trim()} stderr: {stderr.Trim()}");
+
+            // ── 4. Parse the saved project XML for messages ───────────────────────
+            if (!System.IO.File.Exists(tempProject))
+                throw new InvalidOperationException("AnalyzerApp.exe did not save the project file.");
+
+            string savedXml = System.IO.File.ReadAllText(tempProject, System.Text.Encoding.UTF8);
+
+            // Build the RuleId→Severity map from the report's rule catalog (resolves Default→effective
+            // severity). Best-effort: if the report is missing/unparseable, ParseAnalyzerMessages falls
+            // back to the legacy per-message Severity value.
+            var ruleSeverity = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                if (System.IO.File.Exists(reportPath))
+                {
+                    string reportXml = System.IO.File.ReadAllText(reportPath, System.Text.Encoding.UTF8);
+                    ruleSeverity = ParseRuleSeverities(reportXml, Log);
+                }
+                else
+                {
+                    Log($"Analyzer report not found at {reportPath} — severities fall back to per-message parse.");
+                }
+            }
+            catch (Exception ex) { Log($"Failed to read analyzer report: {ex.Message}"); }
+
+            result = ParseAnalyzerMessages(savedXml, Log, ruleSeverity);
         }
-        Flush();
-
-        // ── 4. Parse the saved project XML for messages ───────────────────────
-        if (!System.IO.File.Exists(tempProject))
-            throw new InvalidOperationException("AnalyzerApp.exe did not save the project file.");
-
-        string savedXml = System.IO.File.ReadAllText(tempProject, System.Text.Encoding.UTF8);
-
-        // Build the RuleId→Severity map from the report's rule catalog (resolves Default→effective
-        // severity). Best-effort: if the report is missing/unparseable, ParseAnalyzerMessages falls
-        // back to the legacy per-message Severity value.
-        var ruleSeverity = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        try
+        finally
         {
-            if (System.IO.File.Exists(reportPath))
-            {
-                string reportXml = System.IO.File.ReadAllText(reportPath, System.Text.Encoding.UTF8);
-                ruleSeverity = ParseRuleSeverities(reportXml, Log);
-            }
-            else
-            {
-                Log($"Analyzer report not found at {reportPath} — severities fall back to per-message parse.");
-            }
+            try { System.IO.File.Delete(tempProject); } catch (Exception) { /* best-effort: delete temp analyzer project file — intentionally ignored */ }
+            try { System.IO.File.Delete(reportPath); } catch (Exception) { /* best-effort: delete temp analyzer report file — intentionally ignored */ }
         }
-        catch (Exception ex) { Log($"Failed to read analyzer report: {ex.Message}"); }
-
-        var result = ParseAnalyzerMessages(savedXml, Log, ruleSeverity);
-
-        // Clean up temp files
-        try { System.IO.File.Delete(tempProject); } catch (Exception) { /* best-effort: delete temp analyzer project file — intentionally ignored */ }
-        try { System.IO.File.Delete(reportPath); } catch (Exception) { /* best-effort: delete temp analyzer report file — intentionally ignored */ }
 
         Log($"Total messages collected: {result.Count}");
         Flush();

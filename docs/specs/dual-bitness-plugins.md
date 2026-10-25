@@ -144,7 +144,7 @@ The server key stays `teststand` in both, so the tool prefixes are
 - **DB-11 Guard per bitness.** The platform guard of each plugin warns when no TestStand of the
   plugin's own bitness is installed, and names the other plugin when only the other bitness is
   installed ("64-bit TestStand found: install teststand-mcp-x64 instead").
-- **DB-12 Hooks per plugin.** The allow hook allows the same read-only set for both prefixes, and
+- **DB-12 Hooks per plugin.** The allow hook allows the same read-only set under its own plugin's tool prefix only, and
   each plugin's update notice names its own plugin in the update command. The two plugins keep
   their hook state in separate folders.
 - **DB-13 Install and update in the fork.** In the throw-away fork, both plugins install side by

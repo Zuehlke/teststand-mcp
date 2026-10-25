@@ -15,8 +15,8 @@ public class UnitFixtureCategoryTests
     public void EveryUnitFixture_CarriesTheCategoryThePrCheckRuns()
     {
         var missing = typeof(UnitFixtureCategoryTests).Assembly.GetTypes()
-            .Where(t => t.Namespace == "TestStandMCP.UnitTests"
-                        && t.GetMethods().Any(m => m.IsDefined(typeof(TestAttribute), false) || m.IsDefined(typeof(TestCaseAttribute), false)))
+            .Where(t => (t.Namespace == "TestStandMCP.UnitTests" || t.Namespace?.StartsWith("TestStandMCP.UnitTests.") == true)
+                        && t.GetMethods().Any(m => m.GetCustomAttributes(false).OfType<NUnit.Framework.Interfaces.ITestBuilder>().Any()))
             .Where(t => !t.GetCustomAttributes(typeof(CategoryAttribute), true).Cast<CategoryAttribute>().Any(c => c.Name == "EngineFree"))
             .Select(t => t.Name)
             .ToList();

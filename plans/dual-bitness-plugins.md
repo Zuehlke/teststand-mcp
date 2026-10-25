@@ -51,7 +51,7 @@ expected to be a re-run after the code changes, not a hunt for failures.
 - [ ] DB-9 Two marketplace entries
 - [ ] DB-10 One tag publishes both archives; every release check covers both
 - [ ] DB-11 Platform guard per bitness, naming the other plugin when that one fits
-- [ ] DB-12 Allow hook for both prefixes; update notice and state folder per plugin
+- [ ] DB-12 Allow hook with the same read-only set, each plugin under its own prefix only; update notice and state folder per plugin
 - [ ] DB-13 Both plugins install and update side by side in the fork
 - [ ] DB-14 Stats per plugin
 - [ ] DB-15 Docs and the rules skill name both bitnesses
