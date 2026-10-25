@@ -47,7 +47,8 @@
 #                                              -PropagationDelaySeconds apart; every try is a
 #                                              recorded download.
 #  -AssetPrefixes names the plugins whose assets the release (or -LocalDir, or releases/latest) carries, each
-#  judged on its own (default teststand-mcp alone; the release workflow passes every plugin). A
+#  judged on its own (default: every plugin in build\PluginIdentity.psm1, so a manual check of a
+#  release covers both). A
 #  comma-separated value is split, since powershell -File passes an array as one string.
 #  -ExpectedArchiveHashes <json> is -ExpectedArchiveSha256 for several plugins: {"<plugin archive>": "<hex>"}
 #  with one entry per plugin, as the draft verification writes it to its step output archive_hashes.
@@ -351,6 +352,8 @@ function Test-LocalRelease {
 try {
     Import-Module (Join-Path $PSScriptRoot 'ReleaseAssets.psm1') -Force
     Import-Module (Join-Path $PSScriptRoot 'ReleaseVerdict.psm1') -Force
+    Import-Module (Join-Path $PSScriptRoot 'PluginIdentity.psm1') -Force
+    if (-not $AssetPrefixes) { $AssetPrefixes = @(Get-PluginAssetPrefixes) }
     $AssetPrefixes = ConvertTo-AssetPrefixList $AssetPrefixes
 
     Assert-SourceChoice

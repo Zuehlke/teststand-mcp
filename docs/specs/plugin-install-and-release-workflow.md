@@ -3,6 +3,10 @@
 
 **Format:** dev-team specs 14.0.1 · **Date:** 2026-10-24 · **Reference:** [Zuehlke/labview-mcp](https://github.com/Zuehlke/labview-mcp) (`release.yml`, `.claude-plugin/marketplace.json`, `plugin/`)
 
+> **Amended by [dual-bitness-plugins.md](dual-bitness-plugins.md):** the x86-only constraint, the
+> one-plugin marketplace and AC-7's four assets now hold per plugin, for `teststand-mcp` (x86) and
+> `teststand-mcp-x64` (x64).
+
 ## Intent Description
 
 Today a TestStand MCP user installs the server by hand. They download a zip that someone built

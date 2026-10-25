@@ -25,6 +25,7 @@ namespace TestStandMCP.UnitTests;
 /// </summary>
 [TestFixture]
 [Category("PureLogic")]
+[Category("EngineFree")] // the PR check runs exactly this category
 public class T34_InstallLocatorTests
 {
     private string _tmp = "";
@@ -120,7 +121,7 @@ public class T34_InstallLocatorTests
         finally { Environment.SetEnvironmentVariable("TESTSTANDBIN", prev); }
     }
 
-    [Test, Category("EngineFree")]
+    [Test]
     public void Resolve_ConnectedEngineLacksTheTool_FailsInsteadOfCrossingBitness()
     {
         // The engine's Bin has no FileDiffer while the other bitness's install has one: returning
@@ -142,7 +143,7 @@ public class T34_InstallLocatorTests
         });
     }
 
-    [Test, Category("EngineFree")]
+    [Test]
     public void Resolve_PrefersEngineBin_WhenItHoldsTheRequestedTool()
     {
         var engineBin = MakeBin("engine", "AnalyzerApp.exe");
@@ -154,7 +155,7 @@ public class T34_InstallLocatorTests
         Assert.That(binDir, Is.EqualTo(engineBin));
     }
 
-    [Test, Category("EngineFree")]
+    [Test]
     public void Resolve_NotConnected_UsesTheEnvironmentVariableUnderTheOwnRoot()
     {
         var envBin = MakeInstall("own", FakeTool);
@@ -165,7 +166,7 @@ public class T34_InstallLocatorTests
         Assert.That(binDir, Is.EqualTo(envBin));
     }
 
-    [Test, Category("EngineFree")]
+    [Test]
     public void Resolve_NotConnected_IgnoresAnEnvironmentVariableOutsideTheOwnRoot()
     {
         // The installer's %TESTSTANDBIN% names whichever bitness was installed last.
@@ -182,7 +183,7 @@ public class T34_InstallLocatorTests
         });
     }
 
-    [Test, Category("EngineFree")]
+    [Test]
     public void Resolve_NotConnected_ScansOnlyTheOwnRoot()
     {
         var x86Bin = MakeInstall("x86root", FakeTool);

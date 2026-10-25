@@ -28,7 +28,6 @@ $script:TestStandVendorFolder = 'National Instruments'
 $script:BrowserRelativePaths = @('Microsoft\Edge\Application\msedge.exe', 'Google\Chrome\Application\chrome.exe')
 $script:BrowserCommandNames = @('msedge', 'chrome')
 $script:ProgramFilesVariables = @('ProgramW6432', 'ProgramFiles', 'ProgramFiles(x86)')
-$script:MarketplaceName = 'zuehlke-teststand'
 # The TestStand bitness each plugin drives, with that bitness's Program Files root and the environment
 # variable its TestStand sets. A plugin's name is the base name plus the row's suffix (the NameSuffix of
 # build/PluginIdentity.psm1; PlatformGuard tests pin this copy), so neither archive spells the other's name.

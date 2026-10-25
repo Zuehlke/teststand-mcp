@@ -66,8 +66,8 @@ function ConvertTo-ListedAssets {
 # The real HTTP boundary: TLS 1.2, a timeout on every call, no progress bar. -TimeoutSec semantics differ:
 # Windows PowerShell 5.1 bounds the wait for the response (HttpWebRequest.Timeout), not the body transfer;
 # PowerShell 7 maps it onto HttpClient.Timeout, which bounds the whole request unless the body is streamed.
-# That is not measured here (no pwsh on this station), so every download gets a size-based timeout that is
-# safe under either reading.
+# So under 5.1 a body that stalls after the headers is NOT cut by -TimeoutSec; the job's step timeout is the
+# real bound there. The size-based timeout only bounds PowerShell 7 (not measured: no pwsh on this station).
 function Invoke-ReleaseHttp {
     param($Uri, $Headers, $OutFile, $TimeoutSeconds)
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12

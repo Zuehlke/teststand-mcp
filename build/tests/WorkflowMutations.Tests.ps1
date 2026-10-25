@@ -101,7 +101,9 @@ Add-Mutation 'the cleanup is given another id than the one the create step repor
 Add-Mutation 'the cleanup id is not the create step output' 'release.yml' 'deletes the draft it created' 'CREATED_RELEASE_ID: ${{ steps.create.outputs.release_id }}' 'CREATED_RELEASE_ID: ${{ steps.verify.outputs.release_id }}'
 Add-Mutation 'the cleanup lists drafts by tag again' 'release.yml' 'deletes the draft it created' '& .\build\Remove-RehearsalRelease.ps1' 'gh api "repos/$env:REPO/releases" --jq ".[] | select(.draft == true)"; & .\build\Remove-RehearsalRelease.ps1'
 Add-Mutation 'the cleanup tolerates failing native commands' 'release.yml' 'tolerates a failing native command' '& .\build\Remove-RehearsalRelease.ps1' "`$ErrorActionPreference = 'Continue'; & .\build\Remove-RehearsalRelease.ps1"
-Add-Mutation 'own-downloads not uploaded after a failure' 'release.yml' 'own-downloads is uploaded' "        if: always()`n        uses: actions/upload-artifact" '        uses: actions/upload-artifact'
+Add-Mutation 'own-downloads not uploaded after a failure' 'release.yml' 'own-downloads is uploaded' "        if: always() && env.DRY_RUN != 'true'`n        uses: actions/upload-artifact" "        if: env.DRY_RUN != 'true'`n        uses: actions/upload-artifact"
+Add-Mutation 'own-downloads uploaded for a dry run' 'release.yml' 'own-downloads is uploaded' "        if: always() && env.DRY_RUN != 'true'`n        uses: actions/upload-artifact" "        if: always()`n        uses: actions/upload-artifact"
+Add-Mutation 'own-downloads cannot be re-uploaded by a re-run' 'release.yml' 'own-downloads is uploaded' '          overwrite: true' '          overwrite: false'
 Add-Mutation 'own-downloads uploaded under another name' 'release.yml' 'own-downloads is uploaded' 'name: own-downloads' 'name: downloads'
 Add-Mutation 'the asset artifact kept for 90 days' 'release.yml' 'short-lived artifact' 'retention-days: 1' 'retention-days: 90'
 Add-Mutation 'the release job checks out something else than the tagged commit' 'release.yml' 'short-lived artifact' 'ref: ${{ github.sha }}' 'ref: main'

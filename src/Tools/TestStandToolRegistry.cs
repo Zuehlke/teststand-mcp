@@ -68,7 +68,8 @@ public class TestStandToolRegistry
                 "for diff_sequence_files, AnalyzerApp.exe for analyze_sequence_file) are launched. " +
                 @"Accepts the engine DLL (…\Bin\teapi.dll), the Bin directory, or the install root " +
                 @"(…\National Instruments\TestStand 2026). Leave empty to resolve automatically " +
-                "(engine Bin -> %TESTSTANDBIN% -> COM registration -> newest install). A path that " +
+                "(the connected engine's Bin; before a connect, %TESTSTANDBIN%, COM registration and the newest " +
+                "install, each of this server's own bitness only). A path that " +
                 "does not exist is rejected with an error. Does NOT select which engine is loaded.")
              .AddOptional("tsenv_path", "string",
                 "Optional alternate TestStand ENVIRONMENT: the path to a .tsenv file, the in-process " +

@@ -193,7 +193,7 @@ function New-ReleaseJsonText {
 
 function Invoke-LocalVerify {
     param($Fixture, [hashtable]$UploaderByAsset = @{}, [switch]$NoReleaseJson, [hashtable]$Extra = @{}, [string[]]$ListedNames = @(), [switch]$NoDecoy, [switch]$ListNothing)
-    $arguments = @{ Tag = $Fixture.Tag; LocalDir = $Fixture.Dir }
+    $arguments = @{ Tag = $Fixture.Tag; LocalDir = $Fixture.Dir; AssetPrefixes = @($Fixture.Prefixes) -join ',' }
     if (-not $NoReleaseJson) {
         $names = if ($ListNothing) { @() } elseif ($ListedNames.Count -gt 0) { $ListedNames } else { @(Get-RequiredAssetNames -Version $Fixture.Version -Prefixes $Fixture.Prefixes) }
         $jsonPath = Join-Path (New-TempDir) 'release.json'
@@ -253,7 +253,7 @@ function Invoke-ApiVerify {
     $delays = New-Object System.Collections.ArrayList
     $delay = { param([int]$Seconds) [void]$delays.Add($Seconds) }.GetNewClosure()
     if (-not $Tag) { $Tag = $Fixture.Tag }
-    $arguments = @{ Repo = $ExpectedRepoSlug; Tag = $Tag; HttpGet = $Api.Http; Delay = $delay }
+    $arguments = @{ Repo = $ExpectedRepoSlug; Tag = $Tag; HttpGet = $Api.Http; Delay = $delay; AssetPrefixes = @($Fixture.Prefixes) -join ',' }
     if (-not $OmitToken) { $arguments.Token = $FakeToken }
     if ($ForceDraft) { $arguments.Draft = $true }
     if ($OwnDownloadsPath) { $arguments.OwnDownloadsPath = $OwnDownloadsPath }
@@ -267,7 +267,7 @@ function Invoke-LatestVerify {
     param($Api, [hashtable]$Extra = @{})
     $delays = New-Object System.Collections.ArrayList
     $delay = { param([int]$Seconds) [void]$delays.Add($Seconds) }.GetNewClosure()
-    $arguments = @{ Latest = $true; HttpGet = $Api.Http; Delay = $delay }
+    $arguments = @{ Latest = $true; HttpGet = $Api.Http; Delay = $delay; AssetPrefixes = 'teststand-mcp' }
     foreach ($key in $Extra.Keys) { $arguments[$key] = $Extra[$key] }
     $run = Invoke-Script $VerifierPath $arguments
     $run.Delays = @($delays)

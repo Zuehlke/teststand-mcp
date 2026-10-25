@@ -592,7 +592,8 @@ $ExpectedWorkflows = @('ci.yml', 'pages.yml', 'release.yml')
 
     Invoke-Case 'release.yml: own-downloads is uploaded under the exact name the collector reads, even when the run failed' {
         $upload = $releaseSteps[$releaseSteps.Count - 1]
-        Assert-Equal 'always()' (Get-StepField $upload 'if') 'the upload must run on failure too'
+        Assert-Equal "always() && env.DRY_RUN != 'true'" (Get-StepField $upload 'if') 'the upload must run on failure too, and never for a dry run (its deleted draft never reaches a snapshot)'
+        Assert-True ($upload.Text -cmatch '(?m)^\s+overwrite: true\s*$') 'a re-run of the job uploads the same name again'
         Assert-True ($upload.Text -cmatch '(?m)^\s+name: own-downloads\s*$') 'the artifact must be named own-downloads'
         Assert-True ($upload.Text -cmatch 'path:\s*\$\{\{ env\.OWN_DOWNLOADS_FILE \}\}') 'the artifact holds the record file'
         Assert-True ($releaseEnv -cmatch '(?m)^  OWN_DOWNLOADS_FILE:\s*\S*[/\\]own-downloads\.json\s*$') 'the file is called own-downloads.json and sits outside the release assets folder'

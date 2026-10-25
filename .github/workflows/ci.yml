@@ -64,8 +64,8 @@ jobs:
         with:
           python-version: '3.12'
 
-      # AnyCPU: the project is built for x86 (the TestStand engine is 32-bit), and an x86 test host
-      # would need an x86 .NET runtime the runner does not have. The tests are pure logic.
+      # AnyCPU: the project builds for x86 or x64 to match the TestStand bitness, but these tests are
+      # pure logic and need neither, and an x86 test host would need an x86 .NET runtime the runner lacks.
       - name: Run the engine-free unit tests
         timeout-minutes: 15
         run: dotnet test Test/TestExecution/TestStandMCP.IntegrationTests.csproj --filter "Category=EngineFree" -p:PlatformTarget=AnyCPU --nologo

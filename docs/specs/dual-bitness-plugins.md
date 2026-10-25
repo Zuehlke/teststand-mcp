@@ -124,7 +124,8 @@ The server key stays `teststand` in both, so the tool prefixes are
   example) is skipped on that bitness with the reason in its skip message. A skip is not a pass:
   the list of skips per bitness goes into `docs/validation/dual-bitness.md`.
 - **DB-8 Pre-push per bitness.** `.githooks/run-tests.ps1` detects which TestStand bitnesses are
-  installed (the same detection as the platform guard) and runs the suite once per installed
+  installed by looking for each engine's `National Instruments\TestStand*\Bin	eapi.dll` (not
+  the platform guard's detection: the suite needs a runnable engine, not a registered one) and runs the suite once per installed
   bitness, printing which one runs. The push is blocked if any run fails, or if no TestStand is
   installed.
 

@@ -32,7 +32,6 @@ $script:StateFile = 'update-notify.json'
 $script:PlaceholderVersion = [version]'0.0.0'
 $script:VersionPattern = '\A[vV]?(\d+\.\d+\.\d+)\z'
 $script:TagInLocationPattern = '/tag/([^/?#]+)(?:[?#].*)?\z'
-$script:MarketplaceName = 'zuehlke-teststand'
 
 # ----------------------------------------------------------------------------
 #  Pure decisions

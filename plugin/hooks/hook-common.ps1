@@ -64,6 +64,7 @@ function Get-HookProperty {
 $script:StateDirOverrideVariable = 'TESTSTAND_MCP_STATE_DIR'      # tests and unusual stations
 $script:PluginDataVariable = 'CLAUDE_PLUGIN_DATA'                 # survives plugin updates
 $script:DefaultPluginName = 'teststand-mcp'                       # when the installed plugin.json is unreadable
+$script:MarketplaceName = 'zuehlke-teststand'                     # .claude-plugin/marketplace.json name
 $script:PluginRootVariable = 'CLAUDE_PLUGIN_ROOT'
 $script:PluginJsonRelativePath = '.claude-plugin\plugin.json'
 $script:ClockOverrideVariable = 'TESTSTAND_MCP_NOW'               # an ISO 8601 instant, for the tests

@@ -49,7 +49,7 @@ $RepoRoot = Split-Path -Parent $PSScriptRoot
 $PublishDirName = 'publish'
 $StageDirName = 'stage'
 $StepClock = [Diagnostics.Stopwatch]::StartNew()
-$GitTimeoutSeconds = 30
+$GitTimeoutSeconds = 60   # the same budget as PluginArchive.psm1's git calls
 
 # The commit of the checkout, when none was given.
 function Get-HeadCommit {

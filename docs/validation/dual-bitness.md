@@ -75,3 +75,5 @@ investigated.
   "other bitness only" warning are covered by script tests (`.githooks/run-tests.ps1 -DryRun`,
   `PlatformGuard.Tests.ps1`), not by a real install.
 - Installing through Claude Code from the marketplace. That is fork rehearsal round 3.
+- Which runtime the self-contained x64 exe loads (the `coreclr.dll` path) and its cold-start time. Both
+  were measured for x86 only (`self-contained-x86.md`); x64 uses the same publish settings.

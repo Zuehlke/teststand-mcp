@@ -222,7 +222,8 @@ function Compare-VersionText {
 
 # The decision whether publishing $Tag may move releases/latest. $LatestTag is the tag releases/latest names now
 # (empty when there is none). A release of a LOWER version than the latest one is published without taking the
-# label away, so two tags that overlap or are pushed out of order never move "latest" backwards.
+# label away, so a tag pushed out of order does not move "latest" backwards. Not atomic: two runs that
+# read releases/latest before either one publishes can still end on the lower one (no compare-and-set).
 function Get-MakeLatestDecision {
     [CmdletBinding()]
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Tag, [AllowEmptyString()][AllowNull()][string]$LatestTag)

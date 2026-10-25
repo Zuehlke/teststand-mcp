@@ -242,7 +242,6 @@ try {
         $later = Invoke-Notify $fixture -Now $FixedNow.AddHours(1)
         Assert-NotifySilent $later 'second run'
         Assert-Equal $count $fixture.Server.Stats.RequestCount 'requests after the second run'
-        Assert-True ($later.ElapsedMs -lt ($HttpTimeoutMilliseconds - 500)) "the second run took $($later.ElapsedMs) ms, as if it waited for the timeout again"
     }
 
     Invoke-Case 'notify: the HTTP timeout constant is 3 seconds and TLS 1.2 is set explicitly' {

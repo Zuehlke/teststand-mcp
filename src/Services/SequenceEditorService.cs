@@ -80,7 +80,7 @@ public class SequenceEditorService : ISequenceEditorService
                 if (string.IsNullOrEmpty(_resolvedPath) || !File.Exists(_resolvedPath))
                     throw new FileNotFoundException(
                         "Could not find SeqEdit.exe. Provide the path explicitly or ensure " +
-                        "NI TestStand is installed and the TESTSTANDBIN environment variable is set.");
+                        "an NI TestStand of this server's bitness is installed (the other bitness is never used).");
 
                 // Check if already running
                 var existing = Process.GetProcessesByName(EditorProcessName);

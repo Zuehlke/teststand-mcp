@@ -40,7 +40,7 @@ try {
 
     Invoke-Case 'verify local: -Version without a tag (the packaging step has no tag) verifies the staged assets' {
         $fixture = New-ReleaseFixture
-        $run = Invoke-Script $VerifierPath @{ LocalDir = $fixture.Dir; Version = '1.9.0' }
+        $run = Invoke-Script $VerifierPath @{ AssetPrefixes = 'teststand-mcp'; LocalDir = $fixture.Dir; Version = '1.9.0' }
         Assert-Equal 0 $run.ExitCode "exit code. Output was:`n$($run.Output)"
         Assert-Contains $run.Output 'staged assets of version 1.9.0' 'subject'
     }
@@ -54,23 +54,23 @@ try {
             @{ LocalDir = $fixture.Dir; Version = '1.9.0'; ReleaseJson = (Join-Path $fixture.Dir 'x.json') }
             @{ LocalDir = $fixture.Dir }
         )) {
-            $run = Invoke-Script $VerifierPath $arguments
+            $run = Invoke-Script $VerifierPath (@{ AssetPrefixes = 'teststand-mcp' } + $arguments)
             Assert-Equal 1 $run.ExitCode "exit code for $(($arguments.Keys | ForEach-Object { "$_=$($arguments[$_])" }) -join ' ')"
         }
     }
 
     Invoke-Case 'verify local: the rehearsal tag is accepted with -Rehearsal (version is the plain X.Y.Z) and rejected without it' {
         $fixture = New-ReleaseFixture
-        $run = Invoke-Script $VerifierPath @{ LocalDir = $fixture.Dir; Tag = 'v1.9.0-rehearsal'; Rehearsal = $true }
+        $run = Invoke-Script $VerifierPath @{ AssetPrefixes = 'teststand-mcp'; LocalDir = $fixture.Dir; Tag = 'v1.9.0-rehearsal'; Rehearsal = $true }
         Assert-Equal 0 $run.ExitCode "exit code. Output was:`n$($run.Output)"
-        $run = Invoke-Script $VerifierPath @{ LocalDir = $fixture.Dir; Tag = 'v1.9.0-rehearsal' }
+        $run = Invoke-Script $VerifierPath @{ AssetPrefixes = 'teststand-mcp'; LocalDir = $fixture.Dir; Tag = 'v1.9.0-rehearsal' }
         Assert-Equal 1 $run.ExitCode 'exit code without -Rehearsal'
         Assert-Contains $run.Output 'rejected: suffix' 'tag verdict'
     }
 
     Invoke-Case 'verify: an invalid tag fails with the tag rejection text (the rule lives once)' {
         $fixture = New-ReleaseFixture
-        $run = Invoke-Script $VerifierPath @{ LocalDir = $fixture.Dir; Tag = 'V1.9.0' }
+        $run = Invoke-Script $VerifierPath @{ AssetPrefixes = 'teststand-mcp'; LocalDir = $fixture.Dir; Tag = 'V1.9.0' }
         Assert-Equal 1 $run.ExitCode 'exit code'
         Assert-Contains $run.Output 'rejected: upper-case V' 'verdict'
         Assert-Contains $run.Output 'git tag -d -- V1.9.0' 'retag command'
@@ -229,12 +229,12 @@ try {
 
     Invoke-Case 'verify local: a missing or foreign -ReleaseJson is a three-part failure' {
         $fixture = New-ReleaseFixture
-        $run = Invoke-Script $VerifierPath @{ Tag = $fixture.Tag; LocalDir = $fixture.Dir; ReleaseJson = (Join-Path (New-TempDir) 'absent.json') }
+        $run = Invoke-Script $VerifierPath @{ AssetPrefixes = 'teststand-mcp'; Tag = $fixture.Tag; LocalDir = $fixture.Dir; ReleaseJson = (Join-Path (New-TempDir) 'absent.json') }
         Assert-Equal 1 $run.ExitCode 'exit code for a missing file'
         Assert-Contains $run.Output 'absent.json' 'file name'
         $jsonPath = Join-Path (New-TempDir) 'other.json'
         Write-TextFile $jsonPath (New-ReleaseJsonText -Tag 'v9.9.9' -AssetNames @('x'))
-        $run = Invoke-Script $VerifierPath @{ Tag = $fixture.Tag; LocalDir = $fixture.Dir; ReleaseJson = $jsonPath }
+        $run = Invoke-Script $VerifierPath @{ AssetPrefixes = 'teststand-mcp'; Tag = $fixture.Tag; LocalDir = $fixture.Dir; ReleaseJson = $jsonPath }
         Assert-Equal 1 $run.ExitCode 'exit code for a release that is not in the file'
         Assert-Contains $run.Output 'has 0 releases tagged v1.9.0' 'reason'
     }
@@ -243,7 +243,7 @@ try {
         $fixture = New-ReleaseFixture
         $jsonPath = Join-Path (New-TempDir) 'broken.json'
         Write-TextFile $jsonPath '{ this is not json'
-        $run = Invoke-Script $VerifierPath @{ Tag = $fixture.Tag; LocalDir = $fixture.Dir; ReleaseJson = $jsonPath }
+        $run = Invoke-Script $VerifierPath @{ AssetPrefixes = 'teststand-mcp'; Tag = $fixture.Tag; LocalDir = $fixture.Dir; ReleaseJson = $jsonPath }
         Assert-Equal 1 $run.ExitCode 'exit code'
         Assert-Contains $run.Output 'Unexpected error' 'unexpected-error label'
     }
@@ -259,7 +259,7 @@ try {
             @{ Tag = 'v1.9.0'; Repo = 'a/b/c' }
             @{ Repo = $ExpectedRepoSlug }
         )) {
-            $run = Invoke-Script $VerifierPath $arguments
+            $run = Invoke-Script $VerifierPath (@{ AssetPrefixes = 'teststand-mcp' } + $arguments)
             Assert-Equal 1 $run.ExitCode "exit code for $(($arguments.Keys | ForEach-Object { "$_=$($arguments[$_])" }) -join ' ')"
         }
     }
@@ -267,10 +267,10 @@ try {
     Invoke-Case 'verify: a child process under -File exits 1 for a faulty release and 0 for a good one' {
         $powershell = (Get-Process -Id $PID).Path
         $good = New-ReleaseFixture
-        & $powershell -NoProfile -ExecutionPolicy Bypass -File $VerifierPath -Tag $good.Tag -LocalDir $good.Dir *> $null
+        & $powershell -NoProfile -ExecutionPolicy Bypass -File $VerifierPath -AssetPrefixes teststand-mcp -Tag $good.Tag -LocalDir $good.Dir *> $null
         Assert-Equal 0 $LASTEXITCODE 'exit code for a good release'
         Remove-Item -LiteralPath (Join-Path $good.Dir 'teststand-mcp.sha256')
-        & $powershell -NoProfile -ExecutionPolicy Bypass -File $VerifierPath -Tag $good.Tag -LocalDir $good.Dir *> $null
+        & $powershell -NoProfile -ExecutionPolicy Bypass -File $VerifierPath -AssetPrefixes teststand-mcp -Tag $good.Tag -LocalDir $good.Dir *> $null
         Assert-Equal 1 $LASTEXITCODE 'exit code for a faulty release'
     }
 
@@ -724,6 +724,14 @@ try {
         Assert-Contains $run.Output 'teststand-mcp-x64.zip' 'the failure names the x64 archive'
     }
 
+    Invoke-Case 'both plugins: without -AssetPrefixes a manual run checks every plugin, so a broken x64 asset still fails' {
+        $tampered = Add-PluginAssets (New-ReleaseFixture)
+        Write-TextFile (Join-Path $tampered.Dir 'teststand-mcp-x64.sha256') ($ZeroHash + '  teststand-mcp-x64.zip' + "`n")
+        $run = Invoke-Script $VerifierPath @{ Tag = $tampered.Tag; LocalDir = $tampered.Dir }
+        Assert-Equal 1 $run.ExitCode 'exit code for an x64 digest mismatch with the default prefixes'
+        Assert-Contains $run.Output 'teststand-mcp-x64.zip' 'the failure names the x64 archive'
+    }
+
     Invoke-Case 'both plugins: -ExpectedArchiveHashes checks each latest download, and a stale x64 one fails naming it' {
         $fixture = Add-PluginAssets (New-ReleaseFixture)
         $hash = (Get-FileHash -LiteralPath (Join-Path $fixture.Dir 'teststand-mcp.zip') -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -825,7 +833,7 @@ try {
             Assert-Equal 1 $run.ExitCode "exit code for [$bad]"
             Assert-Contains $run.Output 'ExpectedArchiveSha256' 'the failure names the parameter'
         }
-        $local = Invoke-Script $VerifierPath @{ Tag = $fixture.Tag; LocalDir = $fixture.Dir; ExpectedArchiveSha256 = ('a' * 64) }
+        $local = Invoke-Script $VerifierPath @{ AssetPrefixes = 'teststand-mcp'; Tag = $fixture.Tag; LocalDir = $fixture.Dir; ExpectedArchiveSha256 = ('a' * 64) }
         Assert-Equal 1 $local.ExitCode 'exit code without -Latest'
         Assert-Contains $local.Output 'only with -Latest' 'the failure says where it applies'
     }
@@ -855,7 +863,7 @@ try {
 
     Invoke-Case 'latest: -Latest with -LocalDir, or a bad -Repo, is still refused' {
         $fixture = New-ReleaseFixture
-        $both = Invoke-Script $VerifierPath @{ Latest = $true; LocalDir = $fixture.Dir; Version = '1.9.0' }
+        $both = Invoke-Script $VerifierPath @{ AssetPrefixes = 'teststand-mcp'; Latest = $true; LocalDir = $fixture.Dir; Version = '1.9.0' }
         Assert-Equal 1 $both.ExitCode 'exit code for two sources'
         $bad = Invoke-LatestVerify (New-FakeApi $fixture) -Extra @{ Repo = 'not a repo' }
         Assert-Equal 1 $bad.ExitCode 'exit code for a bad repo'
