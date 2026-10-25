@@ -100,6 +100,18 @@ does not guess a version:
 
 Then pick the version you mean and use the same four commands with it.
 
+### A tag is not on main
+
+Only a commit on `main` is released. The gate also checks that the tagged commit is an ancestor of
+`refs/remotes/origin/main` and stops the run otherwise, so a tag on a branch that was never merged builds and publishes
+nothing:
+
+> The tag <...> points at <...>, which is not on <...>.
+
+Merge the change into `main`, then move the tag to the merged commit with the same four commands. A dry run
+skips this check: it may run from any branch and publishes nothing. To check locally before you push, add
+`-MainRef refs/remotes/origin/main -Commit <sha>` to the gate command above (after a `git fetch`).
+
 ### A hand-uploaded asset fails verification
 
 The verifier checks the uploader of EVERY asset on the release. Each one must have been uploaded by

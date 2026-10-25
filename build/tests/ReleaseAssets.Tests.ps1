@@ -245,6 +245,78 @@ try {
         }
     }
 
+    # --- Scenario: Only a commit on main is released ---------------------------------------------
+    # A repository with one commit on main and one on a side branch that never merged.
+    function New-MainFixture {
+        $dir = New-TempDir
+        $git = { param([string[]]$GitArgs)
+            $run = Invoke-ChildProcess -FilePath 'git' -ArgumentList (@('-C', $dir, '-c', 'user.name=t', '-c', 'user.email=t@example.invalid') + $GitArgs) -TimeoutSeconds 60
+            Assert-Equal 0 $run.ExitCode "git $($GitArgs -join ' ') said: $($run.Stderr)"
+            return $run.Stdout.Trim()
+        }
+        [void](& $git @('init', '-q', '-b', 'main'))
+        [void](& $git @('commit', '-q', '--allow-empty', '-m', 'on main'))
+        $onMain = & $git @('rev-parse', 'HEAD')
+        [void](& $git @('checkout', '-q', '-b', 'side'))
+        [void](& $git @('commit', '-q', '--allow-empty', '-m', 'unmerged'))
+        return @{ Dir = $dir; OnMain = $onMain; OffMain = (& $git @('rev-parse', 'HEAD')) }
+    }
+
+    Invoke-Case 'gate: -MainRef passes a commit on that branch and writes the outputs' {
+        $repo = New-MainFixture
+        $outFile = Join-Path (New-TempDir) 'github_output'
+        Use-Environment @{ GITHUB_OUTPUT = $outFile } {
+            $run = Invoke-Script $TagGatePath @{ Tag = 'v1.9.0'; Commit = $repo.OnMain; MainRef = 'refs/heads/main'; RepoRoot = $repo.Dir }
+            Assert-Equal 0 $run.ExitCode "exit code. Output was:`n$($run.Output)"
+            Assert-Contains $run.Output "is on refs/heads/main" 'the check says it ran'
+        }
+        Assert-Equal "version=1.9.0`ntag=v1.9.0`n" ([IO.File]::ReadAllText($outFile, $Utf8NoBom)) 'GITHUB_OUTPUT text'
+    }
+
+    Invoke-Case 'gate: -MainRef refuses a commit that is not on that branch, says how to retag and writes nothing' {
+        $repo = New-MainFixture
+        $outFile = Join-Path (New-TempDir) 'github_output'
+        Use-Environment @{ GITHUB_OUTPUT = $outFile } {
+            $run = Invoke-Script $TagGatePath @{ Tag = 'v1.9.0'; Commit = $repo.OffMain; MainRef = 'refs/heads/main'; RepoRoot = $repo.Dir }
+            Assert-Equal 1 $run.ExitCode 'exit code'
+            Assert-Contains $run.Output "points at $($repo.OffMain), which is not on refs/heads/main" 'what'
+            Assert-Contains $run.Output 'git push origin --delete refs/tags/v1.9.0' 'the retag starts with the remote delete'
+        }
+        Assert-True (-not (Test-Path -LiteralPath $outFile)) 'GITHUB_OUTPUT must not be written for a refused commit'
+    }
+
+    Invoke-Case 'gate: -MainRef naming a branch the clone does not have fails and says to fetch the full history' {
+        $repo = New-MainFixture
+        $run = Invoke-Script $TagGatePath @{ Tag = 'v1.9.0'; Commit = $repo.OnMain; MainRef = 'refs/remotes/origin/main'; RepoRoot = $repo.Dir }
+        Assert-Equal 1 $run.ExitCode 'exit code'
+        Assert-Contains $run.Output 'fetch-depth: 0' 'the fix'
+    }
+
+    Invoke-Case 'gate: -MainRef without a full commit sha fails before any git call' {
+        $repo = New-MainFixture
+        $run = Invoke-Script $TagGatePath @{ Tag = 'v1.9.0'; Commit = 'main'; MainRef = 'refs/heads/main'; RepoRoot = $repo.Dir }
+        Assert-Equal 1 $run.ExitCode 'exit code'
+        Assert-Contains $run.Output 'No commit to check against refs/heads/main' 'what'
+    }
+
+    Invoke-Case 'gate: -MainRef refuses a short name, which a tag of the same name would shadow' {
+        $repo = New-MainFixture
+        $tag = Invoke-ChildProcess -FilePath 'git' -ArgumentList @('-C', $repo.Dir, 'tag', 'main', $repo.OffMain) -TimeoutSeconds 60
+        Assert-Equal 0 $tag.ExitCode "git tag said: $($tag.Stderr)"
+        $short = Invoke-Script $TagGatePath @{ Tag = 'v1.9.0'; Commit = $repo.OffMain; MainRef = 'main'; RepoRoot = $repo.Dir }
+        Assert-Equal 1 $short.ExitCode 'a short name is refused'
+        Assert-Contains $short.Output 'is not a full ref' 'what'
+        $full = Invoke-Script $TagGatePath @{ Tag = 'v1.9.0'; Commit = $repo.OffMain; MainRef = 'refs/heads/main'; RepoRoot = $repo.Dir }
+        Assert-Equal 1 $full.ExitCode 'the full ref ignores the shadowing tag'
+        Assert-Contains $full.Output 'which is not on refs/heads/main' 'what'
+    }
+
+    Invoke-Case 'gate: without -MainRef no ancestry check runs (a dry run from a branch)' {
+        $run = Invoke-Script $TagGatePath @{ Tag = 'v0.0.1-rehearsal'; Rehearsal = $true; Commit = $SampleCommit; RepoRoot = (New-TempDir) }
+        Assert-Equal 0 $run.ExitCode "exit code. Output was:`n$($run.Output)"
+        Assert-NotContains $run.Output 'is on ' 'no ancestry check'
+    }
+
     # --- Scenario: An unfixable tag asks for a choice --------------------------------------------
     Invoke-Case 'gate: v1.9 asks the maintainer to choose a vX.Y.Z, shows the delete commands and the create template' {
         $run = Invoke-Script $TagGatePath @{ Tag = 'v1.9'; Commit = $SampleCommit }

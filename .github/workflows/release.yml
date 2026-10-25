@@ -31,6 +31,8 @@
 #     (teststand-mcp for x86, teststand-mcp-x64 for x64), and each plugin's four assets are verified on
 #     their own. The fixed names teststand-mcp.zip and teststand-mcp-x64.zip are what users fetch from
 #     releases/latest/download/.
+#   * Only a commit on main is released: the tag gate refuses a tag on any other commit (a dry run
+#     may come from a branch and publishes nothing, so it skips that check).
 #   * Tag names, inputs and refs are user input: they reach `run:` only through env, never inline.
 #   * Every run queues per ref (`release-<ref>`) and a running release is never cancelled, so two runs of
 #     one tag never overlap (a dry run queues per BRANCH, so dry runs of one rehearsal tag started from
@@ -120,6 +122,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0 # the gate checks that the tagged commit is on refs/remotes/origin/main
 
       - name: Refuse a manual run that is not a dry run
         if: env.EVENT_NAME == 'workflow_dispatch' && env.DRY_RUN != 'true'
@@ -132,7 +135,8 @@ jobs:
         timeout-minutes: 5
         run: |
           $rehearsal = ($env:DRY_RUN -eq 'true')
-          & .\build\Assert-ReleaseTag.ps1 -Tag $env:TAG -Rehearsal:$rehearsal
+          $mainRef = if ($rehearsal) { '' } else { 'refs/remotes/origin/main' }
+          & .\build\Assert-ReleaseTag.ps1 -Tag $env:TAG -Rehearsal:$rehearsal -MainRef $mainRef
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Require a rehearsal tag for a dry run

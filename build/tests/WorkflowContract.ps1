@@ -475,6 +475,10 @@ $ExpectedWorkflows = @('ci.yml', 'pages.yml', 'release.yml')
         Assert-Contains $gate '-Tag $env:TAG' 'the gate gets the tag from the environment'
         Assert-Contains $gate '$rehearsal = ($env:DRY_RUN -eq ''true'')' 'a rehearsal is whatever DRY_RUN says, never the shape of the tag'
         Assert-Contains $gate '-Rehearsal:$rehearsal' 'the gate is told about the rehearsal'
+        Assert-Contains $gate '$mainRef = if ($rehearsal) { '''' } else { ''refs/remotes/origin/main'' }' 'a real release must be a commit on main, named by its full ref (a short name can be shadowed by a tag); only a dry run skips that'
+        Assert-Contains $gate '-MainRef $mainRef' 'the gate is told which branch the commit must be on'
+        $checkout = Get-PackageStep 'actions/checkout@' 'package checkout'
+        Assert-True ($checkout.Text -cmatch '(?m)^\s+fetch-depth:\s*0(\s|$)') 'the full history, or origin/main is missing for the ancestry check'
     }
 
     Invoke-Case 'release.yml: a manual run that is not a dry run is refused before anything else, and a dry run needs a rehearsal tag' {
