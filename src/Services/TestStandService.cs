@@ -4965,7 +4965,7 @@ public sealed class TestStandService : ITestStandService
             if (!proc.WaitForExit(timeoutMs))
             {
                 try { proc.Kill(entireProcessTree: true); } catch (Exception) { /* best-effort */ }
-                // Kill is asynchronous: wait (bounded) so AnalyzerApp, which writes both files, has exited before the best-effort deletes below.
+                // Kill is asynchronous: wait up to 5 s for AnalyzerApp (which writes both files) to exit; the deletes below are best-effort and run even if it has not exited yet.
                 try { proc.WaitForExit(5_000); } catch (Exception) { /* best-effort */ }
                 Log($"AnalyzerApp.exe timed out after {timeoutSeconds}s — killed.");
                 Flush();
