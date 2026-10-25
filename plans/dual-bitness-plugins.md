@@ -247,7 +247,7 @@ Feature: The guard checks the TestStand this plugin can drive
 #### Step 5.1: Bitness-aware detection
 
 **Complexity**: standard
-**IMPLEMENT**: The guard reads its plugin name, maps it to the bitness through the identity table, and checks only that root (`%ProgramFiles(x86)%` or `%ProgramW6432%`). The `TestStand` / `TestStand64` environment variables count for their own bitness only.
+**IMPLEMENT**: The guard reads its plugin name, maps it to the bitness through its copy of the identity table's suffix rows (a PlatformGuard test pins it against `build/PluginIdentity.psm1`), and checks only that root (`%ProgramFiles(x86)%` or `%ProgramW6432%`). The `TestStand` / `TestStand64` environment variables count for their own bitness only.
 **TEST**: The three scenarios with fake roots.
 **Commit**: `feat: warn when the TestStand of the plugin's bitness is missing`
 
