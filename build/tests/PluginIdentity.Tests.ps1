@@ -172,6 +172,12 @@ try {
         }
     }
 
+    Invoke-Case 'identity: the hooks fall back to the x86 plugin name, the one in the identity table' {
+        $text = [IO.File]::ReadAllText((Join-Path $RepoRoot 'plugin\hooks\hook-common.ps1'))
+        Assert-True ($text -cmatch "(?m)^\`$script:DefaultPluginName = '([^']+)'") 'hook-common.ps1 defines DefaultPluginName'
+        Assert-Equal (Get-PluginIdentity -Architecture x86).name $Matches[1] 'DefaultPluginName'
+    }
+
     # --- Scenario: The marketplace points at the fixed latest URL -------------
     Invoke-Case 'marketplace: teststand-mcp first, with the fixed latest archive URL' {
         $marketplace = Read-JsonFile $MarketplacePath

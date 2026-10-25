@@ -87,7 +87,10 @@ def asset_counts_from_releases(releases: object) -> tuple[list[AssetCount], list
     """Cumulative counts of the assets of all releases, drafts included, plus warnings.
 
     Draft assets are counted because only the repository's own workflow downloads them, and
-    those downloads are recorded as own downloads on the same day.
+    those downloads are recorded as own downloads on the same day. Not for a dry run: it records
+    nothing, because its draft is deleted. shortcut: a dry-run draft still listed by a snapshot
+    (a failed cleanup, or a snapshot taken mid-run) counts as installs; attributing own downloads
+    per tag would close it.
     """
     if not isinstance(releases, list):
         raise CollectError("the releases response is not a list")

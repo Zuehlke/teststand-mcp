@@ -150,13 +150,13 @@ try {
     Invoke-Case 'runner: no script starts once less than one per-script timeout is left of -TotalSeconds, and the skipped one FAILS (never dropped)' {
         $slow = New-FixtureScript 'slow.Tests.ps1' @('PASS  one') -Header @('Start-Sleep -Seconds 3')
         $late = New-FixtureScript 'late.Tests.ps1' @('PASS  two')
-        $run = Invoke-RunnerOnly @($slow, $late) @('-PwshPath', (Format-PowerShellLiteral $MissingPwsh), '-TimeoutSeconds', '5', '-TotalSeconds', '6')
+        $run = Invoke-RunnerOnly @($slow, $late) @('-PwshPath', (Format-PowerShellLiteral $MissingPwsh), '-TimeoutSeconds', '20', '-TotalSeconds', '22')
         Assert-Equal 1 $run.ExitCode "exit code. Output was:`n$($run.Output)"
         Assert-Contains $run.Output 'PASS  slow.Tests.ps1 under powershell.exe' 'the script that started in time ran'
         Assert-Contains $run.Output 'FAIL  late.Tests.ps1 under powershell.exe: not started' 'the late script is reported as not started'
         Assert-Contains $run.Output '1 script run(s), 1 failed' 'only one script ran'
         Assert-ThreePartFailure $run.Output
-        $enough = Invoke-RunnerOnly @($slow, $late) @('-PwshPath', (Format-PowerShellLiteral $MissingPwsh), '-TimeoutSeconds', '5', '-TotalSeconds', '600')
+        $enough = Invoke-RunnerOnly @($slow, $late) @('-PwshPath', (Format-PowerShellLiteral $MissingPwsh), '-TimeoutSeconds', '20', '-TotalSeconds', '600')
         Assert-Equal 0 $enough.ExitCode "with a budget that is enough, both run. Output was:`n$($enough.Output)"
         Assert-Contains $enough.Output '2 script run(s), 0 failed' 'both ran'
     }

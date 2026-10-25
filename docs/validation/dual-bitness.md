@@ -10,7 +10,8 @@ Measured 2026-10-25 on station `BGTAS-STAGING-L`, with both editions of TestStan
 - 32-bit: `C:\Program Files (x86)\National Instruments\TestStand 2026`
 - 64-bit: `C:\Program Files\National Instruments\TestStand 2026`
 
-The source is commit `97bb93d` (branch `claude/mcp-installation-workflow-88cdb4`).
+The source is commit `97bb93d` (branch `claude/mcp-installation-workflow-88cdb4`). Later commits are
+re-run on both bitnesses by the pre-push gate on every push; the counts below are from `97bb93d`.
 
 ## 1. The integration suite, once per bitness
 

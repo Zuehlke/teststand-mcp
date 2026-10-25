@@ -4,8 +4,9 @@
 #  exit 1. The judging itself is ReleaseVerdict.psm1 (no network) and the fetching (HTTP, the
 #  downloads, the one retry) is ReleaseDownload.psm1; this script owns the parameters, the order
 #  of the checks, the report and the exit code.
-#    - the four assets exist: the plugin archive teststand-mcp.zip, the versioned archive
-#      teststand-mcp-v<version>.zip, the archive digest and the archive manifest;
+#    - each plugin's four assets exist (by default both plugins, so eight): the plugin archive
+#      teststand-mcp.zip, the versioned archive teststand-mcp-v<version>.zip, the archive digest and
+#      the archive manifest, and the same four for teststand-mcp-x64;
 #    - EVERY asset of the release was uploaded by github-actions[bot];
 #    - the plugin archive's SHA-256 equals the archive digest;
 #    - every zip entry equals the archive manifest (none extra, none missing, none changed, none
@@ -37,8 +38,9 @@
 #                                              published download. -Repo names the repository whose
 #                                              latest release is fetched (default: the contract
 #                                              repository), so a fork checks itself.
-#                                              -ExpectedArchiveSha256 <hex> is the hash of the archive
-#                                              that was just verified: the check then fails while
+#                                              -ExpectedArchiveSha256 <hex> (needs exactly one
+#                                              -AssetPrefixes; for several use -ExpectedArchiveHashes)
+#                                              is the hash of the archive that was just verified: the check then fails while
 #                                              releases/latest still serves ANOTHER release (the
 #                                              previous one: its archive and digest agree with each
 #                                              other, so without this it would pass). That state is
@@ -48,8 +50,7 @@
 #                                              recorded download.
 #  -AssetPrefixes names the plugins whose assets the release (or -LocalDir, or releases/latest) carries, each
 #  judged on its own (default: every plugin in build\PluginIdentity.psm1, so a manual check of a
-#  release covers both). A
-#  comma-separated value is split, since powershell -File passes an array as one string.
+#  release covers both). A comma-separated value is split, since powershell -File passes an array as one string.
 #  -ExpectedArchiveHashes <json> is -ExpectedArchiveSha256 for several plugins: {"<plugin archive>": "<hex>"}
 #  with one entry per plugin, as the draft verification writes it to its step output archive_hashes.
 #  -Rehearsal accepts the dry-run tag v<X.Y.Z>-rehearsal.
@@ -168,7 +169,7 @@ function Assert-SourceChoice {
         if (@($AssetPrefixes).Count -gt 1) {
             Write-BuildFailure -What "-ExpectedArchiveSha256 was given for $(@($AssetPrefixes).Count) plugins ($($AssetPrefixes -join ', '))." `
                 -Why 'It holds ONE hash, so every other plugin''s latest download would be accepted on its own digest alone, which a stale previous release also passes.' `
-                -Fix 'Pass -ExpectedArchiveHashes with one hash per plugin (the archive_hashes output of the draft verification step).'
+                -Fix 'Pass -ExpectedArchiveHashes with one hash per plugin (the archive_hashes output of the draft verification step), or name the one plugin with -AssetPrefixes.'
         }
     }
     if ($ExpectedHashesGiven) {

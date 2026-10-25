@@ -34,7 +34,8 @@ try {
     Invoke-Case 'gate: both TestStands installed -> x86 run, then x64 run' {
         $run = Invoke-Gate (New-FakeRoot -WithEngine) (New-FakeRoot -WithEngine)
         Assert-Equal 0 $run.ExitCode 'exit code'
-        Assert-Contains $run.Output 'would test as x86, then as x64' 'both runs, x86 first'
+        Assert-Contains $run.Output 'would test as x86, then as x64 (-p:Platform=x64)' 'both runs, x86 first, x64 built for x64'
+        Assert-NotContains $run.Output 'x86 (' 'the x86 run keeps the default (x86) build'
     }
 
     Invoke-Case 'gate: only 32-bit TestStand -> the x86 run alone, the x64 run is skipped by name' {

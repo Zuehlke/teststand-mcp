@@ -208,7 +208,7 @@ function Move-HookStateIntoPlace {
 }
 
 # Writes the state file atomically (temp file, then move or replace). True when it was written;
-# a failure is swallowed, so a read-only profile can only cost a repeated message.
+# a failure is swallowed, so a read-only profile costs a repeated message and a repeated lookup.
 function Write-HookState {
     param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][hashtable]$State)
     $temp = $null

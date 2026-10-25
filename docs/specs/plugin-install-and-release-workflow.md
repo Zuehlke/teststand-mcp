@@ -190,7 +190,8 @@ bin/CLAUDE.md                   the user rules of the skill, generated; no READM
   - the uploader is not `github-actions[bot]`.
 
   One retry, after a 30 s wait, is allowed only when the first attempt cannot download an asset
-  (HTTP error or timeout). A hash, manifest, missing-asset or uploader failure is not retried.
+  (HTTP error or timeout). Amended: under Windows PowerShell 5.1 a body that stalls after the headers
+  may not time out at all; the verify step's timeout then ends the run unpublished, with no retry. A hash, manifest, missing-asset or uploader failure is not retried.
   The one exception is the check after publishing: `releases/latest` can serve the previous release
   for a short while, so the comparison of the public latest download with the hash of the verified
   archive (`-Latest -ExpectedArchiveSha256`) is tried up to six times, 15 seconds apart. That
@@ -377,7 +378,8 @@ bin/CLAUDE.md                   the user rules of the skill, generated; no READM
   shows two download series, the latest-archive asset `teststand-mcp.zip` and all versioned
   archives `teststand-mcp-vX.Y.Z.zip` summed, and covers at most the last 366 days.
   Every download a workflow makes is recorded per asset and per date in one run artifact: each
-  verify attempt, the retry, and the final public fetch. The collector subtracts those counts per
+  verify attempt, the retry, and the final public fetch. Amended: a dry run records nothing, because
+  its draft is deleted before a snapshot can count it (a draft left by a failed cleanup would count). The collector subtracts those counts per
   asset and per date, clamped at zero. A test on the shared fixture checks that the subtracted value
   equals the recorded count. The record is
   `{ "run_id", "counts": { "<YYYY-MM-DD>": { "<asset>": { "draft": n, "published": m } } } }`, so

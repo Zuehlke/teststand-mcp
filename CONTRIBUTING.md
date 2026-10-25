@@ -31,9 +31,10 @@ Two things to know about the push itself:
   the integration suite, so save open Sequence Editor work first. See [.githooks/README.md](.githooks/README.md).
   On the real repository, let the hook run.
 - Every tag has its own run, and a running release is never cancelled. Two tags pushed close together may
-  overlap. The workflow then never lets the older one take the label "latest" from the newer one: before it
-  publishes, it compares the version with the current latest release, and a lower version is published with
-  `make_latest=false`. The log of the publish step says which value it chose.
+  overlap. Before it publishes, the workflow compares the version with the current latest release, and a
+  lower version is published with `make_latest=false`, so a tag pushed out of order does not take "latest"
+  from a newer one. The check is not atomic: two runs that publish at the same moment can still end on the
+  older one, so push release tags one at a time. The log of the publish step says which value it chose.
 
 What the workflow does, in order:
 

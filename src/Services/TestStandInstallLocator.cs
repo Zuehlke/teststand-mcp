@@ -77,7 +77,7 @@ internal static class TestStandInstallLocator
             return File.Exists(candidate);
         }
 
-        string Fail() => $"{(is64 ? 64 : 32)}-bit process: " +
+        string DescribeProbeFailure() => $"{(is64 ? 64 : 32)}-bit process: " +
             (probed.Count > 0 ? string.Join(" | ", probed) : "(no candidate directory)");
 
         // An explicit override wins over everything, including the connected engine's own Bin: the
@@ -85,7 +85,7 @@ internal static class TestStandInstallLocator
         if (Holds(explicitBinDir, "engine_path override")) return (explicitBinDir!, "");
 
         if (!string.IsNullOrWhiteSpace(engineBinDir))
-            return Holds(engineBinDir, "engine BinDirectory") ? (engineBinDir!, "") : ("", Fail());
+            return Holds(engineBinDir, "engine BinDirectory") ? (engineBinDir!, "") : ("", DescribeProbeFailure());
 
         var root = programFilesRoot ?? GetProgramFilesRoot(is64);
 
@@ -100,7 +100,7 @@ internal static class TestStandInstallLocator
             foreach (var bin in EnumerateTestStandBins(root))
                 if (Holds(bin, "installed TestStand")) return (bin, "");
 
-        return ("", Fail());
+        return ("", DescribeProbeFailure());
     }
 
     /// <summary>True when <paramref name="path"/> lies below <paramref name="root"/>.</summary>

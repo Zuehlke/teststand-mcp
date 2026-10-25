@@ -4836,16 +4836,17 @@ public sealed class TestStandService : ITestStandService
             : "";
         Log($"Resolved AnalyzerApp.exe: {analyzerExe}");
         Log($"Resolved saved project:   {(string.IsNullOrEmpty(savedProject) ? "(public dir unknown)" : savedProject)}");
+        // Per run: two analyses at once (two async jobs, or the x86 and x64 servers sharing %TEMP%) must not
+        // overwrite or delete each other's project and report.
+        string runStem = System.IO.Path.GetFileNameWithoutExtension(filePath) + "_" + Guid.NewGuid().ToString("N")[..8];
         string tempProject = System.IO.Path.Combine(
-            System.IO.Path.GetTempPath(), "ts_mcp_analysis_" + System.IO.Path.GetFileNameWithoutExtension(filePath) + ".tsaproj");
+            System.IO.Path.GetTempPath(), "ts_mcp_analysis_" + runStem + ".tsaproj");
         // The saved project's per-message records carry NO severity — only a RuleId. Effective
         // severity (what the editor's Analysis-Results pane shows) is per-RULE and only materialises
         // in the analyzer REPORT, so we also ask AnalyzerApp to emit an XML report and read the
         // resolved RuleId→Severity map from its rule catalog. (See ParseRuleSeverities.)
         string reportPath = System.IO.Path.Combine(
-            System.IO.Path.GetTempPath(), "ts_mcp_report_" + System.IO.Path.GetFileNameWithoutExtension(filePath) + ".xml");
-        try { if (System.IO.File.Exists(reportPath)) System.IO.File.Delete(reportPath); }
-        catch (Exception) { /* best-effort: clear stale report before the run */ }
+            System.IO.Path.GetTempPath(), "ts_mcp_report_" + runStem + ".xml");
 
         // ── 1. Build temp project XML ─────────────────────────────────────────
         // Start from the user's saved project (rules configured) or a minimal template.

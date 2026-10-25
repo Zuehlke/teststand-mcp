@@ -33,7 +33,8 @@
 #     releases/latest/download/.
 #   * Tag names, inputs and refs are user input: they reach `run:` only through env, never inline.
 #   * Every run queues per ref (`release-<ref>`) and a running release is never cancelled, so two runs of
-#     one tag never overlap. Different tags may overlap, and the one that finishes last would otherwise
+#     one tag never overlap (a dry run queues per BRANCH, so dry runs of one rehearsal tag started from
+#     two branches can overlap; nothing they do can publish). Different tags may overlap, and the one that finishes last would otherwise
 #     take the label "latest": build\Publish-Release.ps1 therefore compares the version with the current
 #     latest release and publishes a LOWER version with make_latest=false (it prints which it chose, and the
 #     final check of releases/latest is skipped for such a release: latest rightly serves another one).

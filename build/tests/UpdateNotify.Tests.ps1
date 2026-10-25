@@ -234,7 +234,7 @@ try {
         if ($env:TESTSTAND_MCP_TIMING_CHECK -eq '1') { Assert-True ($result.ElapsedMs -lt $WallTimeBoundMilliseconds) "$($result.ElapsedMs) ms exceeds the $WallTimeBoundMilliseconds ms budget" }
     }
 
-    Invoke-ServerCase 'notify: after a timed-out lookup the failure is cached - an hour later it is silent, makes no request and returns quickly' {
+    Invoke-ServerCase 'notify: after a timed-out lookup the failure is cached - an hour later it is silent and makes no request' {
         $fixture = New-NotifyFixture -Mode hang
         [void](Invoke-Notify $fixture)
         $count = $fixture.Server.Stats.RequestCount

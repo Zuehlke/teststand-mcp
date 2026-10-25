@@ -757,6 +757,9 @@ try {
         }
         $run = Invoke-LatestVerify (New-FakeApi $fixture) -Extra @{ ExpectedArchiveSha256 = $hash; ExpectedArchiveHashes = (ConvertTo-Json -Compress @{ 'teststand-mcp.zip' = $hash }) }
         Assert-Equal 1 $run.ExitCode 'exit code for both expectations'
+        $run = Invoke-Script $VerifierPath @{ Latest = $true; HttpGet = (New-FakeApi $fixture).Http; ExpectedArchiveSha256 = $hash }
+        Assert-Equal 1 $run.ExitCode 'exit code for one hash with the default (every plugin) prefixes'
+        Assert-Contains $run.Output 'ExpectedArchiveHashes' 'the failure names the parameter to use instead'
         $run = Invoke-LatestVerify (New-FakeApi $fixture) -Extra @{ AssetPrefixes = 'teststand-mcp,teststand-mcp-x64'; ExpectedArchiveSha256 = $hash }
         Assert-Equal 1 $run.ExitCode 'exit code for one hash with two plugins'
         Assert-Contains $run.Output 'Pass -ExpectedArchiveHashes' 'the failure names the per-plugin parameter'

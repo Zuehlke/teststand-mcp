@@ -59,7 +59,7 @@ if ($runs.Count -eq 0) {
     exit 1
 }
 if ($DryRun) {
-    Write-Host ('  dry run: would test as ' + (($runs | ForEach-Object { $_.Arch }) -join ', then as '))
+    Write-Host ('  dry run: would test as ' + (($runs | ForEach-Object { $_.Arch + $(if ($_.Platform) { ' (' + ($_.Platform -join ' ') + ')' }) }) -join ', then as '))
     exit 0
 }
 

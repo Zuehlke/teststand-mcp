@@ -43,7 +43,7 @@ attribute missing from the built-in analyzer project, unrelated to bitness; it i
 | `build/PluginIdentity.psm1`, `build/PluginStaging.psm1` | One identity table: architecture → plugin name, display name, description, asset prefix. Staging stamps the name into `plugin.json` and generates `hooks.json` and the agents with that name's tool prefix. |
 | `build/ReleaseAssets.psm1`, `build/Assert-PublishedRelease.ps1`, release scripts | The release asset set is the union of both architectures' sets (8 assets). Every check that today covers one archive covers each. |
 | `.claude-plugin/marketplace.json` | Two plugin entries, each pointing at its own fixed `releases/latest/download/<prefix>.zip`. |
-| `plugin/hooks/*` | The allow hook accepts both plugins' tool prefixes. The platform guard checks for a TestStand of the plugin's own bitness. The state folder is per plugin. |
+| `plugin/hooks/*` | The allow hook accepts its own plugin's tool prefix, with the same read-only set in both plugins (DB-12). The platform guard checks for a TestStand of the plugin's own bitness. The state folder is per plugin. |
 | `src/Services/TestStandInstallLocator.cs`, `SequenceEditorService.cs` | Same-bitness only: the process's own Program Files root and registry view; once connected, the engine's own `Bin` only. |
 | `src/VersionInfo.cs`, `VERSION.txt` | `--version` and `VERSION.txt` name the architecture. |
 | `.github/workflows/ci.yml`, `release.yml` | Package, smoke and verify both architectures in one package job. |
@@ -124,9 +124,11 @@ The server key stays `teststand` in both, so the tool prefixes are
   example) is skipped on that bitness with the reason in its skip message. A skip is not a pass:
   the list of skips per bitness goes into `docs/validation/dual-bitness.md`.
 - **DB-8 Pre-push per bitness.** `.githooks/run-tests.ps1` detects which TestStand bitnesses are
-  installed by looking for each engine's `National Instruments\TestStand*\Bin	eapi.dll` (not
-  the platform guard's detection: the suite needs a runnable engine, not a registered one) and runs the suite once per installed
-  bitness, printing which one runs. The push is blocked if any run fails, or if no TestStand is
+  installed by looking for each engine's `National Instruments\TestStand*\Bin\teapi.dll` (not
+  the platform guard's detection, which accepts the TestStand environment variable or any `TestStand*`
+  folder: the suite needs the engine DLL itself) and runs
+  the suite once per installed bitness, printing which one runs. The push is blocked if any run
+  fails, or if no TestStand is
   installed.
 
 ### Plugins and release

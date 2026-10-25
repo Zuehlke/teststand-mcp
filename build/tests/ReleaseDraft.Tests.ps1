@@ -3,7 +3,7 @@
 #  build/New-ReleaseDraft.ps1, build/Publish-Release.ps1, build/Remove-RehearsalRelease.ps1, plus the
 #  fetch mode of build/Assert-ReleaseAssetSet.ps1. Everything the release workflow does to GitHub
 #  releases that is not verification: clearing the leftover draft of a re-run, creating the draft and
-#  naming ITS id, publishing by id with a make_latest decision that never moves "latest" backwards, and the
+#  naming ITS id, publishing by id with a make_latest decision that keeps an out-of-order tag from moving "latest" backwards, and the
 #  dry run's cleanup that deletes only what its own run created.
 #  Runs under Windows PowerShell 5.1 and PowerShell 7:
 #    powershell.exe -NoProfile -ExecutionPolicy Bypass -File build\tests\ReleaseDraft.Tests.ps1
@@ -323,7 +323,7 @@ try {
     }
 
     # ============================================================================================
-    #  Get-MakeLatestDecision and Publish-ReleaseById: latest never moves backwards
+    #  Get-MakeLatestDecision and Publish-ReleaseById: an out-of-order tag never moves latest backwards
     # ============================================================================================
     $DecisionRows = @(
         @{ Tag = 'v1.9.0';  Latest = $null;                 Expect = 'true';  Why = 'no latest release yet' }
