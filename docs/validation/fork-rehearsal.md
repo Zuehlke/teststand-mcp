@@ -76,3 +76,34 @@ Running the suites against the fork also exposed one test that called the real G
 `-Latest -Repo` argument row passed only because `Zuehlke/teststand-mcp` has no plugin archive yet,
 so CI would have turned red with the first release. It was removed
 (`test: no live GitHub call in the verifier argument checks`).
+
+## Third round, two plugins from one tag (2026-10-25)
+
+The dual-bitness branch (`plans/dual-bitness-plugins.md`) was merged into the fork branch with the
+slug switched, so one tag released `teststand-mcp` (x86) and `teststand-mcp-x64` (x64), eight assets.
+
+| Step | Run | Result |
+|---|---|---|
+| `ci.yml` on push | 40219522699 | **Fail, real bug**: the five `T34_InstallLocatorTests` were tagged `EngineFree` but sat in the `TestStandMCP.IntegrationTests` namespace, so the assembly `SetUpFixture` tried to connect an engine first and all five failed in `OneTimeSetUp` on the runner without TestStand. Locally they passed because an engine was there. Fixed in `test: keep the install-locator tests outside the engine setup fixture`. |
+| `ci.yml` on push (after the fix) | 40220241886 | Pass in 14 min; both architectures packaged. |
+| Dry run, no fault | 40219541690 | Pass: 8 assets verified through the API, draft deleted, no tag left. |
+| Dry run, `corrupt-zip-x64` | 40219856570 | Fails as intended at the listing check (`teststand-mcp-x64-v1.9.3.zip` 82557789 bytes, plugin archive 15 bytes); nothing published; draft deleted. |
+| Tag push `v1.9.3` | 40221358987 | Pass: "the 8 required assets match"; published, marked latest. The public `releases/latest/download/` archive of each plugin matched its `.sha256`. |
+| Tag push `v1.9.4` | 40221832616 | Pass; latest moved to `v1.9.4` with 8 assets. |
+
+Install and update in an isolated profile (`CLAUDE_CONFIG_DIR=C:\fr3p`, Claude Code 2.1.310); the
+maintainer's `known_marketplaces.json` and `installed_plugins.json` were not written and hold no fork entry:
+
+- `claude plugin marketplace add ThatsTheEnd/teststand-mcp`, then `claude plugin install` of
+  `teststand-mcp@zuehlke-teststand` (17 s) and `teststand-mcp-x64@zuehlke-teststand` (18 s), both 1.9.3.
+- `claude mcp list` connected both side by side: `plugin:teststand-mcp:teststand` and
+  `plugin:teststand-mcp-x64:teststand`, each from its own cache folder. `VERSION.txt` of both names
+  `v1.9.3` and the same commit.
+- With `v1.9.4` latest, each plugin's update notice (own state directory each) named 1.9.3 and 1.9.4
+  and its OWN update command (`claude plugin update teststand-mcp` vs. `... teststand-mcp-x64`); a
+  second run was silent.
+- `claude plugin marketplace update zuehlke-teststand`, then `claude plugin update` of each: "updated
+  from 1.9.3 to 1.9.4"; `claude mcp list` connects both from the `1.9.4` folders; `--version` reports
+  1.9.4 and `v1.9.4`; the 1.9.3 folders are kept.
+- The installed exes are the right bitness: PE machine `0x014C` (i386) in `teststand-mcp`, `0x8664`
+  (AMD64) in `teststand-mcp-x64`. The engine-level checks per bitness are in `dual-bitness.md`.
