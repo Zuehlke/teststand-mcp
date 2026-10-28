@@ -20,13 +20,15 @@ namespace TestStandMCP.Services;
 /// </para>
 ///
 /// <para>
-/// <b>2. A 32-bit host cannot see the 64-bit install through the usual APIs.</b> This host is x86,
-/// and under WOW64 <see cref="Environment.SpecialFolder.ProgramFiles"/> is redirected to
-/// "…\Program Files (x86)" — the very same path as
-/// <see cref="Environment.SpecialFolder.ProgramFilesX86"/>. Iterating both scans one directory twice
-/// and never reaches a 64-bit install; <c>%ProgramW6432%</c> is the only reliable way to name the
-/// 64-bit root from a 32-bit process. The same asymmetry applies to the registry: a 64-bit TestStand
-/// registers its Engine coclass exclusively in the 64-bit view.
+/// <b>2. Never cross bitness.</b> The engine is an in-process COM server, so a 32-bit host drives
+/// 32-bit TestStand and a 64-bit host 64-bit TestStand; a helper tool from the other tree would
+/// analyse or diff against a different install (a 32-bit host once launched the 64-bit analyzer
+/// because the 32-bit install lacked a file). So once connected, the engine's own Bin is the only
+/// automatic candidate, and without an engine only the process's own root and registry view are
+/// probed: <c>%ProgramW6432%</c> and Registry64 for x64, <c>%ProgramFiles(x86)%</c> and Registry32
+/// for x86 (under WOW64 <see cref="Environment.SpecialFolder.ProgramFiles"/> is redirected to the
+/// x86 path, so it never names the 64-bit root). Only the operator's <c>engine_path</c> may point
+/// elsewhere.
 /// </para>
 ///
 /// Nothing here is version-pinned — releases are always matched with a <c>TestStand*</c> wildcard.
@@ -42,22 +44,27 @@ internal static class TestStandInstallLocator
     /// Resolves the TestStand <c>Bin</c> directory that actually CONTAINS <paramref name="requiredExe"/>.
     /// <para>
     /// Order: <paramref name="explicitBinDir"/> (an operator-supplied override — the manual escape
-    /// hatch for a station the automatic search gets wrong) → <paramref name="engineBinDir"/> (the
-    /// connected engine, i.e. the exact running version) → <c>%TESTSTANDBIN%</c> → the Engine
-    /// coclass' COM registration in BOTH registry views → a newest-first scan of every install root.
+    /// hatch for a station the automatic search gets wrong). Then, when connected, ONLY
+    /// <paramref name="engineBinDir"/>; when not connected, <c>%TESTSTANDBIN%</c> if it lies under the
+    /// process's own Program Files root, the Engine coclass' COM registration in the process's own
+    /// registry view, and a newest-first scan of that root.
     /// </para>
     /// </summary>
     /// <param name="requiredExe">File name of the tool that must be present, e.g. "FileDiffer.exe".</param>
     /// <param name="engineBinDir">The connected engine's BinDirectory, or null when not connected.</param>
     /// <param name="explicitBinDir">Operator override (connect_engine's <c>engine_path</c>), or null.</param>
+    /// <param name="is64BitProcess">The bitness to resolve for; null = this process's.</param>
+    /// <param name="programFilesRoot">The install root to scan; null = the bitness's own root.</param>
     /// <returns>
     /// The directory holding <paramref name="requiredExe"/> and an empty <c>Probed</c>; or an empty
-    /// <c>BinDir</c> plus a <c>Probed</c> trail of every candidate tried, so the caller can raise a
-    /// diagnosable error on a station where the tool is nowhere to be found.
+    /// <c>BinDir</c> plus a <c>Probed</c> trail naming the bitness and every candidate tried, so the
+    /// caller can raise a diagnosable error on a station where the tool is nowhere to be found.
     /// </returns>
     internal static (string BinDir, string Probed) Resolve(
-        string requiredExe, string? engineBinDir, string? explicitBinDir = null)
+        string requiredExe, string? engineBinDir, string? explicitBinDir = null,
+        bool? is64BitProcess = null, string? programFilesRoot = null)
     {
+        bool is64 = is64BitProcess ?? Environment.Is64BitProcess;
         var probed = new List<string>();
 
         bool Holds(string? dir, string source)
@@ -70,26 +77,45 @@ internal static class TestStandInstallLocator
             return File.Exists(candidate);
         }
 
+        string DescribeProbeFailure() => $"{(is64 ? 64 : 32)}-bit process: " +
+            (probed.Count > 0 ? string.Join(" | ", probed) : "(no candidate directory)");
+
         // An explicit override wins over everything, including the connected engine's own Bin: the
         // operator set it precisely because the automatic order picked the wrong install.
         if (Holds(explicitBinDir, "engine_path override")) return (explicitBinDir!, "");
 
-        if (Holds(engineBinDir, "engine BinDirectory")) return (engineBinDir!, "");
+        if (!string.IsNullOrWhiteSpace(engineBinDir))
+            return Holds(engineBinDir, "engine BinDirectory") ? (engineBinDir!, "") : ("", DescribeProbeFailure());
+
+        var root = programFilesRoot ?? GetProgramFilesRoot(is64);
 
         var envBin = Environment.GetEnvironmentVariable("TESTSTANDBIN");
-        if (Holds(envBin, "%TESTSTANDBIN%")) return (envBin!, "");
+        if (IsUnder(envBin, root) && Holds(envBin, "%TESTSTANDBIN%")) return (envBin!, "");
 
-        foreach (var view in new[] { RegistryView.Registry32, RegistryView.Registry64 })
-        {
-            var regBin = FindBinFromRegistry(view);
-            if (Holds(regBin, $"engine COM registration ({view})")) return (regBin!, "");
-        }
+        var view = is64 ? RegistryView.Registry64 : RegistryView.Registry32;
+        var regBin = FindBinFromRegistry(view);
+        if (Holds(regBin, $"engine COM registration ({view})")) return (regBin!, "");
 
-        foreach (var root in GetProgramFilesRoots())
+        if (root != null)
             foreach (var bin in EnumerateTestStandBins(root))
                 if (Holds(bin, "installed TestStand")) return (bin, "");
 
-        return ("", probed.Count > 0 ? string.Join(" | ", probed) : "(no candidate directory)");
+        return ("", DescribeProbeFailure());
+    }
+
+    /// <summary>True when <paramref name="path"/> lies below <paramref name="root"/>.</summary>
+    private static bool IsUnder(string? path, string? root)
+    {
+        if (string.IsNullOrWhiteSpace(path) || string.IsNullOrWhiteSpace(root)) return false;
+        try
+        {
+            var full = Path.GetFullPath(path!).TrimEnd('\\') + "\\";
+            return full.StartsWith(Path.GetFullPath(root!).TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return false;
+        }
     }
 
     /// <summary>
@@ -120,26 +146,16 @@ internal static class TestStandInstallLocator
     }
 
     /// <summary>
-    /// The Program Files roots to scan for NI installs — deduplicated (under WOW64 several of the
-    /// sources collapse onto the same path) and existing-only. The x86 root comes first because it
-    /// matches this process's bitness, and therefore the in-process 32-bit engine: when both trees
-    /// carry the wanted tool, the same-bitness one wins.
+    /// The Program Files root that holds the installs of the given bitness, or null when it does
+    /// not exist: <c>%ProgramW6432%</c> for 64-bit (visible from WOW64, unlike
+    /// <see cref="Environment.SpecialFolder.ProgramFiles"/>), the x86 folder for 32-bit.
     /// </summary>
-    internal static IEnumerable<string> GetProgramFilesRoots()
+    internal static string? GetProgramFilesRoot(bool is64)
     {
-        var roots = new[]
-        {
-            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
-            Environment.GetEnvironmentVariable("ProgramW6432"),   // 64-bit root, visible from WOW64
-            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
-        };
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var root in roots)
-        {
-            if (string.IsNullOrWhiteSpace(root)) continue;
-            if (!seen.Add(root!.TrimEnd('\\'))) continue;
-            if (Directory.Exists(root)) yield return root!;
-        }
+        var root = is64
+            ? Environment.GetEnvironmentVariable("ProgramW6432")
+            : Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+        return !string.IsNullOrWhiteSpace(root) && Directory.Exists(root) ? root : null;
     }
 
     /// <summary>

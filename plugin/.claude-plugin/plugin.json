@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "teststand-mcp",
+  "displayName": "TestStand MCP (32-bit)",
+  "version": "0.0.0",
+  "description": "TestStand MCP: build, edit, run and document NI TestStand sequence files from an AI assistant, with bundled TestStand agents and usage rules. For 32-bit NI TestStand on Windows.",
+  "author": {
+    "name": "Zühlke Engineering AG"
+  },
+  "homepage": "https://github.com/Zuehlke/teststand-mcp",
+  "repository": "https://github.com/Zuehlke/teststand-mcp",
+  "license": "MIT",
+  "keywords": [
+    "teststand",
+    "ni",
+    "mcp",
+    "sequence",
+    "test-automation",
+    "windows"
+  ],
+  "userConfig": {
+    "tsenv_path": {
+      "type": "file",
+      "title": "TestStand environment (.tsenv)",
+      "description": "Path to the TestStand environment file (.tsenv) the server should use. Leave empty to use the global TestStand environment.",
+      "required": false
+    }
+  }
+}

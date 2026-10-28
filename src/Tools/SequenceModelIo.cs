@@ -319,7 +319,7 @@ public class PropertyNodeSpec
     public int? NumElements { get; set; }
     /// <summary>PropFlags to apply.</summary>
     public int? Flags { get; set; }
-    /// <summary>Assign <see cref="Flags"/> exactly (turning bits off) instead of OR-ing.</summary>
+    /// <summary>Write <see cref="Flags"/> through the verified exact path (read-back check, instance-override fallback).</summary>
     public bool ClearFlags { get; set; }
     /// <summary>Numeric representation: float64/int64/uint64.</summary>
     public string? Representation { get; set; }

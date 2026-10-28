@@ -3,6 +3,7 @@ using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
@@ -36,6 +37,9 @@ internal class Program
     private const int  STD_ERROR_HANDLE = -12;
     private const uint ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004;
 
+    private const string LoadPrototypeWorkerFlag = "--load-prototype-worker";
+    private const string SetupAgentsFlag         = "--setup-agents";
+
     static async Task<int> Main(string[] args)
     {
         // Out-of-process prototype-load worker (spawned by the server itself). Handle it FIRST —
@@ -43,15 +47,22 @@ internal class Program
         // result line, and never allocates a console window. It owns its own short-lived engine,
         // performs the (possibly process-fatal) native LabVIEW Load Prototype, and hard-exits. See
         // LoadPrototypeWorker for the rationale (isolating the 0xC06D007E .lvlibp delay-load crash).
-        if (args.Length > 0 && args[0] == "--load-prototype-worker")
+        if (args.Length > 0 && args[0] == LoadPrototypeWorkerFlag)
             return await LoadPrototypeWorker.RunAsync(args);
+
+        // Informational flags are answered HERE — before AllocConsole, the banner, configuration and
+        // DI — so they work on a machine without TestStand (CI, the packaging smoke test), write to
+        // STDOUT where a caller can capture them, and never start an engine.
+        var earlyExitCode = TryRunInformationalCommand(args);
+        if (earlyExitCode.HasValue)
+            return earlyExitCode.Value;
 
         // When launched as an MCP subprocess stdin is redirected — allocate a visible
         // console window so Console.Error output (banner + command panel) is visible.
         if (Console.IsInputRedirected)
         {
             AllocConsole();
-            SetConsoleTitle("TestStand MCP Server");
+            SetConsoleTitle(VersionInfo.ProductName);
             SetConsoleOutputCP(65001); // UTF-8
 
             // Re-point Console.Error at the new console window (CONOUT$)
@@ -92,7 +103,7 @@ internal class Program
         // the .claude\agents folder shipped next to this exe, so Claude Code sees the deployed
         // agents user-wide. Meaningless under non-Claude hosts (Copilot etc.) that don't read
         // ~/.claude/agents — which is exactly why it stays a deliberate manual step.
-        if (args.Contains("--setup-agents"))
+        if (args.Contains(SetupAgentsFlag))
             return SetupAgents();
 
         // ── Configuration ─────────────────────────────────────────────────────
@@ -115,9 +126,7 @@ internal class Program
         });
 
         services.AddSingleton<IConfiguration>(config);
-        services.AddSingleton<ITestStandService, TestStandService>();
-        services.AddSingleton<ISequenceEditorService, SequenceEditorService>();
-        services.AddSingleton<TestStandToolRegistry>();
+        AddToolCatalog(services);
         services.AddSingleton<TestStandResourceProvider>();
         services.AddSingleton<TestStandPromptProvider>();
         services.AddSingleton<McpServer>();
@@ -130,37 +139,22 @@ internal class Program
         // TestStand ENVIRONMENT belongs in configuration, not in a per-call parameter: it can only be
         // chosen before the engine is created, so it is a property of the server process, and MCP
         // hosts configure a server exactly once — through args/env in their mcp.json.
+        // The plugin's optional userConfig value arrives under its OWN key (TestStand:PluginEnvironmentPath)
+        // and only wins when it holds a real path, so an unset plugin setting never masks a machine-wide
+        // TESTSTAND_MCP_TestStand__EnvironmentPath (see EnvironmentPathSetting).
         // Deliberately NOT reading the older TestStand:AutoConnect / TestStand:EnginePath keys: they
         // have never been consumed, and quietly activating them now would change behaviour on any
         // station that filled them in expecting them to work.
         sp.GetRequiredService<ITestStandService>().ApplyStationDefaults(
-            environmentPath:       config["TestStand:EnvironmentPath"],
+            environmentPath:       EnvironmentPathSetting.Resolve(config["TestStand:PluginEnvironmentPath"], config["TestStand:EnvironmentPath"]),
             environmentAutoDetect: bool.TryParse(config["TestStand:EnvironmentAutoDetect"], out var autoDetect) && autoDetect,
             connectTimeoutSeconds: int.TryParse(config["TestStand:ConnectTimeoutSeconds"], out var timeout) ? timeout : 0);
 
         // ── Run ───────────────────────────────────────────────────────────────
         var logger = sp.GetRequiredService<ILogger<Program>>();
-        logger.LogInformation("TestStand MCP Server v1.0.0 starting...");
+        logger.LogInformation("{Product} v{Version} starting...", VersionInfo.ProductName, VersionInfo.Current.Version);
         logger.LogInformation("Platform: {OS}", Environment.OSVersion);
         logger.LogInformation("Runtime: {Runtime}", RuntimeInformation.FrameworkDescription);
-
-        // Handle --version flag
-        if (args.Contains("--version"))
-        {
-            Console.WriteLine("TestStand MCP Server 1.0.0");
-            return 0;
-        }
-
-        // Handle --list-tools flag (useful for debugging)
-        if (args.Contains("--list-tools"))
-        {
-            var registry = sp.GetRequiredService<TestStandToolRegistry>();
-            Console.Error.WriteLine("\nAvailable Tools:");
-            foreach (var tool in registry.GetTools())
-                Console.Error.WriteLine($"  {tool.Name,-35} {tool.Description}");
-            Console.Error.WriteLine();
-            return 0;
-        }
 
         using var cts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) =>
@@ -205,6 +199,61 @@ internal class Program
         Console.Error.Flush();
         TerminateProcess(GetCurrentProcess(), (uint)exitCode);
         return exitCode; // not reached
+    }
+
+    /// <summary>
+    /// Handles <c>--version</c> and <c>--list-tools [--json]</c>. Returns the exit code when a flag was
+    /// handled, or null when the process should carry on and serve MCP.
+    /// </summary>
+    private static int? TryRunInformationalCommand(string[] args)
+    {
+        var command = InformationalCommands.Parse(args);
+        if (command == InformationalCommand.None)
+            return null;
+
+        // Its own UTF-8 (no BOM) writer instead of Console.Out: the console's code page (e.g. 850)
+        // would garble the non-ASCII tool descriptions for the caller that captures stdout, and
+        // changing Console.OutputEncoding changes the code page of a real console as a side effect.
+        using var stdout = new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false)) { AutoFlush = true };
+
+        if (command == InformationalCommand.Version)
+            stdout.Write(VersionInfo.Current.FormatForCli());
+        else
+            WriteToolList(stdout, asJson: command == InformationalCommand.ListToolsJson);
+        return 0;
+    }
+
+    /// <summary>
+    /// The tool registry and the two services it needs, whose constructors only store a logger — no
+    /// engine connection and no COM until a tool is called. Shared by the MCP serve path and
+    /// <c>--list-tools</c>, so what is listed is exactly what is served.
+    /// </summary>
+    private static void AddToolCatalog(IServiceCollection services)
+    {
+        services.AddSingleton<ITestStandService, TestStandService>();
+        services.AddSingleton<ISequenceEditorService, SequenceEditorService>();
+        services.AddSingleton<TestStandToolRegistry>();
+    }
+
+    private static void WriteToolList(TextWriter output, bool asJson)
+    {
+        // Minimal container: logging (no providers, so nothing reaches stdout) plus the catalog.
+        var services = new ServiceCollection();
+        services.AddLogging();
+        AddToolCatalog(services);
+        using var provider = services.BuildServiceProvider();
+        var tools = provider.GetRequiredService<TestStandToolRegistry>().GetTools();
+
+        if (asJson)
+        {
+            output.WriteLine(JsonSerializer.Serialize(tools.Select(tool => tool.Name)));
+            return;
+        }
+
+        output.WriteLine("Available Tools:");
+        foreach (var tool in tools)
+            output.WriteLine($"  {tool.Name,-35} {tool.Description}");
+        output.WriteLine();
     }
 
     /// <summary>

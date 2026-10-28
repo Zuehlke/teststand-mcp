@@ -1,0 +1,130 @@
+# Daily download statistics.
+#
+#   collect  appends the cumulative download counts of every release asset (and, with the
+#            optional STATS_TRAFFIC_TOKEN secret, the repository traffic) to CSV files on the
+#            `stats` branch, builds the page from them and uploads it as the Pages artifact.
+#   deploy   publishes that artifact. It is a job of its own, so a repository whose Pages
+#            source is not set to "GitHub Actions" fails only this job: the statistics have
+#            already been committed by then, and ci.yml and release.yml are separate workflows.
+#
+# A snapshot means "the counts at the end of UTC day D", recorded shortly after midnight under
+# the date D (cron 00:17 UTC, snapshot dated the previous day). The own downloads of the release
+# workflow carry their UTC date, so a release run on day D is subtracted from D's snapshot. A
+# manual run (workflow_dispatch) during the day also records the previous day, with counts that
+# already include part of today; that is accepted, the next scheduled run adds only the rest.
+#
+# Any API error on the releases, the artifact list or the traffic, a rate limit included, fails
+# `collect` before a file is written, so nothing is committed. A run whose counts equal the last
+# snapshot commits nothing. The token is never stored in .git/config: it is handed to the
+# git commands that need it through a single-use http.extraheader.
+#
+# The own-downloads records come from the `own-downloads` artifacts of release.yml runs
+# (file own-downloads.json, schema in docs/specs/plugin-install-and-release-workflow.md, AC-18).
+name: pages
+
+on:
+  schedule:
+    - cron: '17 0 * * *'
+  workflow_dispatch:
+
+# Every job states its own permissions; the workflow grants nothing by default.
+permissions: {}
+
+# Two runs must not push to the stats branch at the same time, and a run must not be cancelled
+# half-way through a push.
+concurrency:
+  group: pages-stats
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write   # commit to the stats branch
+      actions: read     # list and download the own-downloads artifacts of release runs
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false # the token is passed to the git commands that need it, below
+
+      - name: Check out the stats branch as a worktree
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          echo "::add-mask::$auth"
+          git_auth=(-c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth")
+          stats_dir="$RUNNER_TEMP/stats"
+          status=0
+          git "${git_auth[@]}" ls-remote --exit-code --heads origin stats >/dev/null || status=$?
+          case "$status" in
+            0)
+              git "${git_auth[@]}" fetch --no-tags --depth=1 origin '+refs/heads/stats:refs/remotes/origin/stats'
+              git worktree add -B stats "$stats_dir" refs/remotes/origin/stats
+              ;;
+            2)
+              echo "No stats branch yet; creating it as an orphan."
+              git worktree add --detach "$stats_dir"
+              git -C "$stats_dir" checkout --orphan stats
+              git -C "$stats_dir" rm -rf --quiet .
+              ;;
+            *)
+              echo "::error::Could not list the remote branches (git ls-remote exit code $status)."
+              exit 1
+              ;;
+          esac
+
+      - name: Collect download counts
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          STATS_TRAFFIC_TOKEN: ${{ secrets.STATS_TRAFFIC_TOKEN }} # optional; traffic is skipped when empty
+        run: python3 .github/stats/collect.py --stats-dir "$RUNNER_TEMP/stats"
+
+      - name: Build the page
+        env:
+          HAS_TRAFFIC_TOKEN: ${{ secrets.STATS_TRAFFIC_TOKEN != '' }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [ "$HAS_TRAFFIC_TOKEN" != "true" ]; then args+=(--traffic-skipped); fi
+          python3 .github/site/build.py --stats-dir "$RUNNER_TEMP/stats" --out "$RUNNER_TEMP/site" "${args[@]}"
+
+      - name: Commit the statistics when they changed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/stats"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Nothing changed; nothing to commit."
+            exit 0
+          fi
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit --quiet -m "stats: snapshot $(date -u +%F)"
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          echo "::add-mask::$auth"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin HEAD:refs/heads/stats
+
+      - name: Upload the page
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: ${{ runner.temp }}/site
+
+  deploy:
+    needs: collect
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write      # publish the Pages artifact
+      id-token: write   # prove to Pages that the deployment comes from this workflow
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

@@ -6,7 +6,7 @@ using Microsoft.Win32;
 using NUnit.Framework;
 using TestStandMCP.Services;
 
-namespace TestStandMCP.IntegrationTests.Tests;
+namespace TestStandMCP.UnitTests;
 
 /// <summary>
 /// Pure (engine-free) tests for <see cref="TestStandInstallLocator"/> and the child-environment
@@ -19,10 +19,13 @@ namespace TestStandMCP.IntegrationTests.Tests;
 ///      are the SAME directory — the 64-bit install root was unreachable from this x86 host;
 ///   3. the COM-registration probe only read the 32-bit registry view, so a 64-bit TestStand
 ///      registration was invisible.
-/// Does NOT inherit TestBase, so no TestStand engine is connected.
+/// The fix for (1)-(3) then crossed bitness (an x86 host launched 64-bit tools), so resolution is
+/// now same-bitness only: the connected engine's Bin, else the process's own root and view.
+/// Outside the TestStandMCP.IntegrationTests namespace, so the assembly SetUpFixture connects no engine.
 /// </summary>
 [TestFixture]
 [Category("PureLogic")]
+[Category("EngineFree")] // the PR check runs exactly this category
 public class T34_InstallLocatorTests
 {
     private string _tmp = "";
@@ -49,47 +52,26 @@ public class T34_InstallLocatorTests
         return dir;
     }
 
-    // ── GetProgramFilesRoots: the WOW64 trap (defect 2) ──────────────────────────
+    // ── GetProgramFilesRoot: one root per bitness, WOW64-safe (defect 2) ─────────
 
     [Test]
-    public void GetProgramFilesRoots_ReachesTheSixtyFourBitRoot()
+    public void GetProgramFilesRoot_SixtyFourBit_IsProgramW6432()
     {
         var w6432 = Environment.GetEnvironmentVariable("ProgramW6432");
         Assume.That(w6432, Is.Not.Null.And.Not.Empty,
             "32-bit-only Windows has no %ProgramW6432% — nothing to reach.");
 
-        Assert.That(TestStandInstallLocator.GetProgramFilesRoots(),
-            Has.Some.EqualTo(w6432).IgnoreCase,
-            "the 64-bit install root must be scanned; under WOW64 SpecialFolder.ProgramFiles " +
-            "is redirected to the (x86) path and can never name it");
+        Assert.That(TestStandInstallLocator.GetProgramFilesRoot(is64: true), Is.EqualTo(w6432).IgnoreCase,
+            "under WOW64 SpecialFolder.ProgramFiles is redirected to the (x86) path and can never name it");
     }
 
     [Test]
-    public void GetProgramFilesRoots_ReachesTheX86Root()
+    public void GetProgramFilesRoot_ThirtyTwoBit_IsTheX86Folder()
     {
         var pf86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
         Assume.That(Directory.Exists(pf86), Is.True);
 
-        Assert.That(TestStandInstallLocator.GetProgramFilesRoots(),
-            Has.Some.EqualTo(pf86).IgnoreCase);
-    }
-
-    [Test]
-    public void GetProgramFilesRoots_HasNoDuplicates()
-    {
-        // The original bug: SpecialFolder.ProgramFiles and ProgramFilesX86 collapse onto the same
-        // path in a 32-bit process, so the scan walked one directory twice and the other never.
-        var roots = TestStandInstallLocator.GetProgramFilesRoots().ToList();
-
-        Assert.That(roots.Select(r => r.TrimEnd('\\').ToLowerInvariant()).Distinct().Count(),
-            Is.EqualTo(roots.Count), "roots must be deduplicated");
-    }
-
-    [Test]
-    public void GetProgramFilesRoots_OnlyReturnsExistingDirectories()
-    {
-        Assert.That(TestStandInstallLocator.GetProgramFilesRoots(),
-            Is.All.Matches<string>(Directory.Exists));
+        Assert.That(TestStandInstallLocator.GetProgramFilesRoot(is64: false), Is.EqualTo(pf86).IgnoreCase);
     }
 
     // ── EnumerateTestStandBins: version wildcard + newest-first ordering ─────────
@@ -119,93 +101,142 @@ public class T34_InstallLocatorTests
             Is.Empty);
     }
 
-    // ── Resolve: probe for the tool actually being launched (defect 1) ───────────
+    // ── Resolve: the tool actually launched, from the engine's own bitness only ──
+
+    private const string FakeTool = "NoSuchNiTool_9f3a.exe";
+
+    /// <summary>Creates <c>&lt;root&gt;\National Instruments\TestStand 2026\Bin</c> holding the files.</summary>
+    private string MakeInstall(string rootName, params string[] files)
+    {
+        var bin = Path.Combine(_tmp, rootName, "National Instruments", "TestStand 2026", "Bin");
+        Directory.CreateDirectory(bin);
+        foreach (var f in files) File.WriteAllText(Path.Combine(bin, f), "");
+        return bin;
+    }
+
+    private static T WithTestStandBin<T>(string? value, Func<T> body)
+    {
+        var prev = Environment.GetEnvironmentVariable("TESTSTANDBIN");
+        try { Environment.SetEnvironmentVariable("TESTSTANDBIN", value); return body(); }
+        finally { Environment.SetEnvironmentVariable("TESTSTANDBIN", prev); }
+    }
 
     [Test]
-    public void Resolve_SkipsEngineBin_WhenItLacksTheRequestedTool()
+    public void Resolve_ConnectedEngineLacksTheTool_FailsInsteadOfCrossingBitness()
     {
-        // THE reported failure: the engine's Bin carries AnalyzerApp but no FileDiffer, while a
-        // different install carries the differ. Probing for a fixed stand-in returned the engine's
-        // Bin and the launch then failed on a path that does not exist.
-        var engineBin = MakeBin("engine", "AnalyzerApp.exe");
-        var differBin = MakeBin("differ", "FileDiffer.exe");
+        // The engine's Bin has no FileDiffer while the other bitness's install has one: returning
+        // that one would diff against a different TestStand than the one the server drives.
+        var engineBin = MakeInstall("x86root", "AnalyzerApp.exe");
+        var otherBin  = MakeInstall("x64root", "FileDiffer.exe");
 
-        var prev = Environment.GetEnvironmentVariable("TESTSTANDBIN");
-        try
+        var (binDir, probed) = WithTestStandBin(otherBin, () => TestStandInstallLocator.Resolve(
+            "FileDiffer.exe", engineBin, is64BitProcess: false,
+            programFilesRoot: Path.Combine(_tmp, "x64root")));
+
+        Assert.Multiple(() =>
         {
-            Environment.SetEnvironmentVariable("TESTSTANDBIN", differBin);
-            var (binDir, probed) = TestStandInstallLocator.Resolve("FileDiffer.exe", engineBin);
-
-            Assert.Multiple(() =>
-            {
-                Assert.That(binDir, Is.EqualTo(differBin),
-                    "must keep probing past a Bin that does not hold the requested tool");
-                Assert.That(probed, Is.Empty, "a successful resolve reports no probe trail");
-            });
-        }
-        finally { Environment.SetEnvironmentVariable("TESTSTANDBIN", prev); }
+            Assert.That(binDir, Is.Empty);
+            Assert.That(probed, Does.Contain("FileDiffer.exe"), "the error must name the tool");
+            Assert.That(probed, Does.StartWith("32-bit process"), "the error must name the bitness");
+            Assert.That(probed, Does.Contain(engineBin), "the error must list the probed path");
+            Assert.That(probed, Does.Not.Contain(otherBin), "the other bitness is never probed");
+        });
     }
 
     [Test]
     public void Resolve_PrefersEngineBin_WhenItHoldsTheRequestedTool()
     {
-        // The engine's own Bin is the exact running version and must win over every fallback.
         var engineBin = MakeBin("engine", "AnalyzerApp.exe");
         var otherBin  = MakeBin("other",  "AnalyzerApp.exe");
 
-        var prev = Environment.GetEnvironmentVariable("TESTSTANDBIN");
-        try
-        {
-            Environment.SetEnvironmentVariable("TESTSTANDBIN", otherBin);
-            var (binDir, _) = TestStandInstallLocator.Resolve("AnalyzerApp.exe", engineBin);
+        var (binDir, _) = WithTestStandBin(otherBin, () => TestStandInstallLocator.Resolve(
+            "AnalyzerApp.exe", engineBin, programFilesRoot: _tmp));
 
-            Assert.That(binDir, Is.EqualTo(engineBin));
-        }
-        finally { Environment.SetEnvironmentVariable("TESTSTANDBIN", prev); }
+        Assert.That(binDir, Is.EqualTo(engineBin));
     }
 
     [Test]
-    public void Resolve_FallsBackToEnvironmentVariable_WhenNotConnected()
+    public void Resolve_NotConnected_UsesTheEnvironmentVariableUnderTheOwnRoot()
     {
-        var envBin = MakeBin("envbin", "FileDiffer.exe");
+        var envBin = MakeInstall("own", FakeTool);
 
-        var prev = Environment.GetEnvironmentVariable("TESTSTANDBIN");
-        try
-        {
-            Environment.SetEnvironmentVariable("TESTSTANDBIN", envBin);
-            var (binDir, _) = TestStandInstallLocator.Resolve("FileDiffer.exe", engineBinDir: null);
+        var (binDir, _) = WithTestStandBin(envBin, () => TestStandInstallLocator.Resolve(
+            FakeTool, engineBinDir: null, programFilesRoot: Path.Combine(_tmp, "own")));
 
-            Assert.That(binDir, Is.EqualTo(envBin));
-        }
-        finally { Environment.SetEnvironmentVariable("TESTSTANDBIN", prev); }
+        Assert.That(binDir, Is.EqualTo(envBin));
     }
 
     [Test]
-    public void Resolve_UnknownTool_ReturnsEmptyBinAndADiagnosableProbeTrail()
+    public void Resolve_NotConnected_IgnoresAnEnvironmentVariableOutsideTheOwnRoot()
     {
-        var engineBin = MakeBin("engine", "AnalyzerApp.exe");
+        // The installer's %TESTSTANDBIN% names whichever bitness was installed last.
+        var foreignBin = MakeInstall("other", FakeTool);
+        Directory.CreateDirectory(Path.Combine(_tmp, "own"));
 
-        var (binDir, probed) = TestStandInstallLocator.Resolve("NoSuchNiTool_9f3a.exe", engineBin);
+        var (binDir, probed) = WithTestStandBin(foreignBin, () => TestStandInstallLocator.Resolve(
+            FakeTool, engineBinDir: null, programFilesRoot: Path.Combine(_tmp, "own")));
 
         Assert.Multiple(() =>
         {
             Assert.That(binDir, Is.Empty);
-            Assert.That(probed, Does.Contain("engine BinDirectory"));
-            Assert.That(probed, Does.Contain("NoSuchNiTool_9f3a.exe"),
-                "the trail must name the tool that was looked for");
+            Assert.That(probed, Does.Not.Contain("%TESTSTANDBIN%"));
         });
     }
 
     [Test]
-    public void Resolve_ProbesBothRegistryViews()
+    public void Resolve_NotConnected_ScansOnlyTheOwnRoot()
     {
-        // Defect 3: only Registry32 was read, so a 64-bit TestStand registration stayed invisible.
-        Assume.That(TestStandInstallLocator.FindBinFromRegistry(RegistryView.Registry64),
-            Is.Not.Null, "no 64-bit TestStand engine registered on this station");
+        var x86Bin = MakeInstall("x86root", FakeTool);
+        var x64Bin = MakeInstall("x64root", FakeTool);
 
-        var (_, probed) = TestStandInstallLocator.Resolve("NoSuchNiTool_9f3a.exe", engineBinDir: null);
+        var (as64, _) = WithTestStandBin(null, () => TestStandInstallLocator.Resolve(
+            FakeTool, engineBinDir: null, is64BitProcess: true, programFilesRoot: Path.Combine(_tmp, "x64root")));
+        var (as32, _) = WithTestStandBin(null, () => TestStandInstallLocator.Resolve(
+            FakeTool, engineBinDir: null, is64BitProcess: false, programFilesRoot: Path.Combine(_tmp, "x86root")));
 
-        Assert.That(probed, Does.Contain("Registry64"));
+        Assert.Multiple(() =>
+        {
+            Assert.That(as64, Is.EqualTo(x64Bin));
+            Assert.That(as32, Is.EqualTo(x86Bin));
+        });
+    }
+
+    [TestCase(true,  "Registry64", "Registry32")]
+    [TestCase(false, "Registry32", "Registry64")]
+    public void Resolve_NotConnected_ProbesOnlyTheOwnRegistryView(bool is64, string own, string other)
+    {
+        Assume.That(TestStandInstallLocator.FindBinFromRegistry(
+                is64 ? RegistryView.Registry64 : RegistryView.Registry32),
+            Is.Not.Null, $"no TestStand engine registered in {own} on this station");
+
+        var (_, probed) = WithTestStandBin(null, () => TestStandInstallLocator.Resolve(
+            FakeTool, engineBinDir: null, is64BitProcess: is64));
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(probed, Does.Contain(own));
+            Assert.That(probed, Does.Not.Contain(other));
+        });
+    }
+
+    [Test]
+    public void Resolve_NotConnected_RealStation_NeverProbesTheOtherRoot()
+    {
+        var w6432 = Environment.GetEnvironmentVariable("ProgramW6432");
+        Assume.That(w6432, Is.Not.Null.And.Not.Empty);
+        var pf86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+
+        var (as64, trail64) = WithTestStandBin(null, () =>
+            TestStandInstallLocator.Resolve(FakeTool, engineBinDir: null, is64BitProcess: true));
+        var (as32, trail32) = WithTestStandBin(null, () =>
+            TestStandInstallLocator.Resolve(FakeTool, engineBinDir: null, is64BitProcess: false));
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(as64 + as32, Is.Empty);
+            Assert.That(trail64, Does.Not.Contain(pf86), "a 64-bit resolve must not probe the x86 root");
+            Assert.That(trail32, Does.Not.Contain(w6432 + @"\National"), "a 32-bit resolve must not probe the 64-bit root");
+        });
     }
 
     [Test]
@@ -278,7 +309,8 @@ public class T34_InstallLocatorTests
 
         var (binDir, _) = TestStandInstallLocator.Resolve("FileDiffer.exe", engineBin, overrideBin);
 
-        Assert.That(binDir, Is.EqualTo(overrideBin));
+        Assert.That(binDir, Is.EqualTo(overrideBin),
+            "the override may even name the other bitness's Bin: the operator chose it");
     }
 
     [Test]

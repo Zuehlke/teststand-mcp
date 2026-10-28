@@ -1,0 +1,58 @@
+{
+  "description": "TestStand MCP hooks: read-only TestStand tools on .seq files inside the project run without a permission prompt, a startup check warns about a missing TestStand or doc-agent dependency, and a startup notice names a newer release. The hooks print nothing and never block when something fails.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "mcp__plugin_teststand-mcp_teststand__audit_sequence_references|mcp__plugin_teststand-mcp_teststand__audit_type_consistency|mcp__plugin_teststand-mcp_teststand__check_expression|mcp__plugin_teststand-mcp_teststand__check_user_privilege|mcp__plugin_teststand-mcp_teststand__expand_path_macros|mcp__plugin_teststand-mcp_teststand__find_in_file|mcp__plugin_teststand-mcp_teststand__get_active_executions|mcp__plugin_teststand-mcp_teststand__get_adapter_details|mcp__plugin_teststand-mcp_teststand__get_analysis_status|mcp__plugin_teststand-mcp_teststand__get_array_variable|mcp__plugin_teststand-mcp_teststand__get_breakpoints|mcp__plugin_teststand-mcp_teststand__get_callbacks|mcp__plugin_teststand-mcp_teststand__get_current_user|mcp__plugin_teststand-mcp_teststand__get_data_type_fields|mcp__plugin_teststand-mcp_teststand__get_data_types|mcp__plugin_teststand-mcp_teststand__get_editor_status|mcp__plugin_teststand-mcp_teststand__get_engine_paths|mcp__plugin_teststand-mcp_teststand__get_enum_values|mcp__plugin_teststand-mcp_teststand__get_execution_log|mcp__plugin_teststand-mcp_teststand__get_execution_results|mcp__plugin_teststand-mcp_teststand__get_execution_status|mcp__plugin_teststand-mcp_teststand__get_execution_threads|mcp__plugin_teststand-mcp_teststand__get_execution_time|mcp__plugin_teststand-mcp_teststand__get_file_globals|mcp__plugin_teststand-mcp_teststand__get_file_properties|mcp__plugin_teststand-mcp_teststand__get_full_report|mcp__plugin_teststand-mcp_teststand__get_loaded_adapters|mcp__plugin_teststand-mcp_teststand__get_loaded_sequence_files|mcp__plugin_teststand-mcp_teststand__get_local_variables|mcp__plugin_teststand-mcp_teststand__get_module_parameters|mcp__plugin_teststand-mcp_teststand__get_numeric_limits|mcp__plugin_teststand-mcp_teststand__get_output_messages|mcp__plugin_teststand-mcp_teststand__get_process_model|mcp__plugin_teststand-mcp_teststand__get_property|mcp__plugin_teststand-mcp_teststand__get_property_object|mcp__plugin_teststand-mcp_teststand__get_property_tree|mcp__plugin_teststand-mcp_teststand__get_prototype_load_status|mcp__plugin_teststand-mcp_teststand__get_report_text|mcp__plugin_teststand-mcp_teststand__get_result_schemas|mcp__plugin_teststand-mcp_teststand__get_runstate_summary|mcp__plugin_teststand-mcp_teststand__get_runtime_variable|mcp__plugin_teststand-mcp_teststand__get_search_directories|mcp__plugin_teststand-mcp_teststand__get_sequence|mcp__plugin_teststand-mcp_teststand__get_sequence_parameters|mcp__plugin_teststand-mcp_teststand__get_sequence_properties|mcp__plugin_teststand-mcp_teststand__get_station_globals|mcp__plugin_teststand-mcp_teststand__get_station_info|mcp__plugin_teststand-mcp_teststand__get_station_options|mcp__plugin_teststand-mcp_teststand__get_step|mcp__plugin_teststand-mcp_teststand__get_step_module_info|mcp__plugin_teststand-mcp_teststand__get_step_properties|mcp__plugin_teststand-mcp_teststand__get_step_result|mcp__plugin_teststand-mcp_teststand__get_step_templates|mcp__plugin_teststand-mcp_teststand__get_step_type|mcp__plugin_teststand-mcp_teststand__get_step_types|mcp__plugin_teststand-mcp_teststand__get_step_unique_id|mcp__plugin_teststand-mcp_teststand__get_steps|mcp__plugin_teststand-mcp_teststand__get_sync_objects|mcp__plugin_teststand-mcp_teststand__get_thread_call_stack|mcp__plugin_teststand-mcp_teststand__get_thread_status|mcp__plugin_teststand-mcp_teststand__get_type_palettes|mcp__plugin_teststand-mcp_teststand__get_undo_stack|mcp__plugin_teststand-mcp_teststand__get_user_privileges|mcp__plugin_teststand-mcp_teststand__get_user_profiles|mcp__plugin_teststand-mcp_teststand__get_users|mcp__plugin_teststand-mcp_teststand__get_uut_info|mcp__plugin_teststand-mcp_teststand__get_watch_expressions|mcp__plugin_teststand-mcp_teststand__get_workspace|mcp__plugin_teststand-mcp_teststand__list_expression_reference|mcp__plugin_teststand-mcp_teststand__list_file_typedefs|mcp__plugin_teststand-mcp_teststand__search_steps|mcp__plugin_teststand-mcp_teststand__sequence_name_exists|mcp__plugin_teststand-mcp_teststand__step_name_exists|mcp__plugin_teststand-mcp_teststand__user_name_exists|mcp__plugin_teststand-mcp_teststand__validate_sequence_plan",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell.exe",
+            "args": [
+              "-NoProfile",
+              "-NonInteractive",
+              "-ExecutionPolicy",
+              "Bypass",
+              "-File",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/allow-readonly.ps1"
+            ],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell.exe",
+            "args": [
+              "-NoProfile",
+              "-NonInteractive",
+              "-ExecutionPolicy",
+              "Bypass",
+              "-File",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/platform-guard.ps1"
+            ],
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "powershell.exe",
+            "args": [
+              "-NoProfile",
+              "-NonInteractive",
+              "-ExecutionPolicy",
+              "Bypass",
+              "-File",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/update-notify.ps1"
+            ],
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

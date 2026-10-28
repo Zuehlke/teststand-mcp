@@ -4,6 +4,7 @@
     <TargetFramework>net8.0-windows</TargetFramework>
     <LangVersion>latest</LangVersion>
     <PlatformTarget>x86</PlatformTarget>
+    <PlatformTarget Condition="'$(Platform)' == 'x64'">x64</PlatformTarget>
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
     <RootNamespace>TestStandMCP.IntegrationTests</RootNamespace>
@@ -24,6 +25,7 @@
     <Compile Include="..\..\src\Services\TestStandService.cs" Link="Shared\TestStandService.cs" />
     <Compile Include="..\..\src\Services\TestStandInstallLocator.cs" Link="Shared\TestStandInstallLocator.cs" />
     <Compile Include="..\..\src\Services\TestStandEnvironmentLocator.cs" Link="Shared\TestStandEnvironmentLocator.cs" />
+    <Compile Include="..\..\src\Services\EnvironmentPathSetting.cs" Link="Shared\EnvironmentPathSetting.cs" />
     <Compile Include="..\..\src\Services\SequenceEditorService.cs" Link="Shared\SequenceEditorService.cs" />
     <Compile Include="..\..\src\Tools\SequencePlanValidator.cs" Link="Shared\SequencePlanValidator.cs" />
     <Compile Include="..\..\src\Tools\InputGuards.cs" Link="Shared\InputGuards.cs" />
@@ -35,6 +37,8 @@
     <Compile Include="..\..\src\Tools\StepCopyPolicy.cs" Link="Shared\StepCopyPolicy.cs" />
     <Compile Include="..\..\src\Tools\TypeConsistencyAuditor.cs" Link="Shared\TypeConsistencyAuditor.cs" />
     <Compile Include="..\..\src\Tools\TestStandToolRegistry.cs" Link="Shared\TestStandToolRegistry.cs" />
+    <Compile Include="..\..\src\VersionInfo.cs" Link="Shared\VersionInfo.cs" />
+    <Compile Include="..\..\src\InformationalCommands.cs" Link="Shared\InformationalCommands.cs" />
   </ItemGroup>
 
   <!-- ── Fixture assembly for the .NET adapter tests ───────────────────── -->

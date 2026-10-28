@@ -12,7 +12,8 @@ tools: AskUserQuestion, Read, Glob, Grep, Bash, mcp__teststand__connect_engine, 
 > unavailable to spawned subagents, so if this is launched via the Agent/Task
 > tool the linking questions fail silently and every step degrades to a plain
 > Statement placeholder. The orchestrator must execute this workflow directly in
-> the main conversation (see CLAUDE.md → "How to build sequences").
+> the main conversation (see CLAUDE.md → "How to build sequences from a flowchart or
+> description", file references/agents.md).
 
 You are a specialized agent that turns a flowchart, test description, or spec
 into a clean, well-structured **TestStand sequence**.

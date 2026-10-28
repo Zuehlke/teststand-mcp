@@ -68,7 +68,8 @@ public class TestStandToolRegistry
                 "for diff_sequence_files, AnalyzerApp.exe for analyze_sequence_file) are launched. " +
                 @"Accepts the engine DLL (…\Bin\teapi.dll), the Bin directory, or the install root " +
                 @"(…\National Instruments\TestStand 2026). Leave empty to resolve automatically " +
-                "(engine Bin -> %TESTSTANDBIN% -> COM registration -> newest install). A path that " +
+                "(the connected engine's Bin; before a connect, %TESTSTANDBIN%, COM registration and the newest " +
+                "install, each of this server's own bitness only). A path that " +
                 "does not exist is rejected with an error. Does NOT select which engine is loaded.")
              .AddOptional("tsenv_path", "string",
                 "Optional alternate TestStand ENVIRONMENT: the path to a .tsenv file, the in-process " +
@@ -532,13 +533,15 @@ public class TestStandToolRegistry
             CreateStepPropertyAsync);
 
         Register("set_step_property_flags",
-            "Set the raw PropFlags bitfield of a step property (PropertyObject.SetFlags) — " +
+            "Set the raw PropFlags bitfield of a step property (PropertyObject.SetFlags, which REPLACES " +
+            "the bitfield; the engine keeps its own 0x400000 bit) — " +
             "e.g. 0x4 PassByReference, 0x2000 NotSerializedIfDefault-style markers like the " +
             "0x200000 flag TestStand puts on module containers. Returns the read-back flags. " +
             "Use get_property_tree (node.flags) to inspect current values first. " +
-            "SetFlags only ever turns bits ON — pass exact=true to ASSIGN the bitfield, the only way " +
-            "to turn a bit OFF (e.g. clear a 0x4 PassByReference that a prototype load copied from the " +
-            "callee onto a caller's argument where the original has 0x0).",
+            "A plain write already clears bits that are not in 'flags' (0x4 then 0x80 reads back 0x80, " +
+            "not 0x84). exact=true takes the verified path (read-back check, then the instance-override " +
+            "layer) for a bit that survives, e.g. a 0x4 PassByReference that a prototype load copied " +
+            "from the callee onto a caller's argument where the original has 0x0.",
             s => s
                 .AddRequired("sequence_file_path", "string", "Path to the sequence file")
                 .AddRequired("sequence_name", "string", "Name of the sequence")
@@ -548,7 +551,8 @@ public class TestStandToolRegistry
                     "Property path relative to the step (empty string = the step itself).")
                 .AddRequired("flags", "number", "The PropFlags bitfield value to set.")
                 .AddOptional("exact", "boolean",
-                    "Assign the bitfield exactly instead of OR-ing (turns bits OFF too). Default false.", false)
+                    "Use the verified exact write (read-back check plus instance-override fallback). " +
+                    "Default false.", false)
                 .AddOptional("save", "boolean", "Save the file after writing (default true).", true),
             SetStepPropertyFlagsAsync);
 
@@ -1797,7 +1801,7 @@ public class TestStandToolRegistry
                         .AddOptional("ordinal", "integer", "Enum ordinal")
                         .AddOptional("num_elements", "integer", "Element count for array_elements")
                         .AddOptional("flags", "integer", "PropFlags bitfield")
-                        .AddOptional("clear_flags", "boolean", "Assign flags exactly (turns bits off)")
+                        .AddOptional("clear_flags", "boolean", "Verified exact flags write (read-back check)")
                         .AddOptional("representation", "string", "float64/int64/uint64", null,
                             new[] { "float64", "int64", "uint64" })
                         .AddOptional("number_format", "string", "Display NumericFormat")
@@ -2553,10 +2557,10 @@ public class TestStandToolRegistry
             "typed array. An ENUM is always stored as an EXPLICITLY-SET value (FileDiffer '[val]'): " +
             "the ordinal is resolved to its enumerator NAME first — from this file's types, then " +
             "engine-wide, then off the property itself — because only the by-name write clears " +
-            "TestStand's type-default flag. 'flags' sets raw PropFlags (OR semantics by default — " +
-            "e.g. 0x84 = 0x04 PassByReference + 0x80); pass clear_flags=true to assign the bitfield " +
-            "EXACTLY, which is the only way to turn a bit OFF (needed when the original has 0x0 where " +
-            "a prototype load left 0x4 behind). representation/number_format set a NUMBER's width " +
+            "TestStand's type-default flag. 'flags' sets raw PropFlags (a plain write replaces the bitfield, " +
+            "e.g. 0x84 = 0x04 PassByReference + 0x80); pass clear_flags=true for the verified exact write " +
+            "(read-back check plus instance-override fallback), needed when the original has 0x0 where " +
+            "a prototype load left 0x4 behind. representation/number_format set a NUMBER's width " +
             "(float64/int64/uint64) and display format ('%#.4x'). A value is written only when " +
             "supplied, so a flags-only call leaves the value untouched. For StationGlobals the change " +
             "commits to the station .ini (file_path is unused); every other scope saves the sequence " +
@@ -2584,10 +2588,11 @@ public class TestStandToolRegistry
                 .AddOptional("num_elements", "integer",
                     "For value_type 'array_elements': the number of elements to size the array to.")
                 .AddOptional("flags", "integer",
-                    "PropFlags bitfield to OR onto the node (e.g. 132 / 0x84). Omit to leave flags unchanged.")
+                    "PropFlags bitfield to write onto the node (e.g. 132 / 0x84). Omit to leave flags unchanged.")
                 .AddOptional("clear_flags", "boolean",
-                    "Assign 'flags' EXACTLY instead of OR-ing (the only way to turn a bit OFF, e.g. to " +
-                    "clear a 0x4 PassByReference a prototype load left behind). Default false.", false)
+                    "Write 'flags' through the verified exact path (read-back check plus instance-override " +
+                    "fallback), e.g. to clear a 0x4 PassByReference a prototype load left behind. " +
+                    "Default false.", false)
                 .AddOptional("representation", "string",
                     "Numeric width for a NUMBER node: 'float64', 'int64' or 'uint64'.",
                     null, new[] { "float64", "int64", "uint64" })

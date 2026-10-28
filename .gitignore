@@ -67,3 +67,6 @@ nunit-*.xml
 /build_tmp
 /Test/*.seq
 /Test/TestExecution/*.seq
+
+# Python bytecode
+__pycache__/

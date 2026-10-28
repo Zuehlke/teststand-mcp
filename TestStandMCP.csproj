@@ -3,24 +3,25 @@
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <!-- net8.0-windows: COM interop (TestStand engine) is a Windows-only feature.
-         The TestStand engine COM server is 32-bit, so the host process must stay x86;
-         an x86 .NET 8 runtime is installed under "C:\Program Files (x86)\dotnet". -->
+         The TestStand engine COM server is in-process, so the host's bitness must match the
+         TestStand install it drives: x86 for 32-bit TestStand (the default), x64 for 64-bit. -->
     <TargetFramework>net8.0-windows</TargetFramework>
     <LangVersion>latest</LangVersion>
     <AssemblyName>TestStandMCP</AssemblyName>
     <RootNamespace>TestStandMCP</RootNamespace>
     <Nullable>enable</Nullable>
-    <!-- PlatformTarget x86 + the x86 .NET SDK produce a 32-bit apphost (TestStandMCP.exe)
-         so the process loads the in-process 32-bit TestStand COM server. (No RuntimeIdentifier
-         on purpose — keeps the output path bin\x86\Debug\net8.0-windows\ clean.) -->
+    <!-- PlatformTarget follows -p:Platform (x86 or x64, default x86) and gives the apphost
+         (TestStandMCP.exe) the same bitness. (No RuntimeIdentifier on purpose — keeps the
+         output path bin\<platform>\Debug\net8.0-windows\ clean.) -->
     <PlatformTarget>x86</PlatformTarget>
+    <PlatformTarget Condition="'$(Platform)' == 'x64'">x64</PlatformTarget>
     <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
-    <Version>1.0.0</Version>
+    <Version>0.0.0-dev</Version>
     <Description>MCP Server for NI TestStand automation and integration</Description>
     <Authors>TestStandMCP</Authors>
-    <Platforms>AnyCPU;x86</Platforms>
+    <Platforms>AnyCPU;x86;x64</Platforms>
   </PropertyGroup>
 
   <!-- Exclude the test project subtree — the SDK wildcard would pick it up otherwise -->

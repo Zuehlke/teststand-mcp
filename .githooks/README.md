@@ -5,7 +5,11 @@ Versioned Git hooks for TestStandMCP.
 ## What it does
 
 `pre-push` runs the integration test suite (`Test/TestExecution`) before every
-push and **rejects the push unless all tests pass**.
+push and **rejects the push unless all tests pass**. It runs the suite once per
+installed TestStand bitness: as x86 when 32-bit TestStand is installed, then as
+x64 (`-p:Platform=x64`) when 64-bit TestStand is. A missing bitness is skipped
+with a note; a station with no TestStand at all cannot push. Both runs together
+take about twice as long as one.
 
 Because the tests need exclusive access to the TestStand COM engine, the hook
 first **terminates any running `TestStandMCP.exe` / `SeqEdit.exe`** — so save
@@ -36,7 +40,7 @@ git config core.hooksPath   # -> .githooks
 | File            | Role                                                        |
 | --------------- | ---------------------------------------------------------- |
 | `pre-push`      | POSIX-sh entry point Git invokes; delegates to PowerShell. |
-| `run-tests.ps1` | Stops engine processes, runs `dotnet test`, returns the result. |
+| `run-tests.ps1` | Stops engine processes, runs `dotnet test` per installed bitness, returns the result. `-DryRun` prints the runs it would make. |
 
 The `pre-push` stub is forced to LF line endings via `.gitattributes`; without
 that, `sh.exe` on Windows would fail with `bad interpreter: /bin/sh^M`.
