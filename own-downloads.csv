@@ -1,1 +1,9 @@
 run_id,date,asset,draft,published
+40722378836,2026-10-28,teststand-mcp-v1.9.1.zip,1,0
+40722378836,2026-10-28,teststand-mcp-x64-v1.9.1.zip,1,0
+40722378836,2026-10-28,teststand-mcp-x64.manifest.sha256,1,0
+40722378836,2026-10-28,teststand-mcp-x64.sha256,1,1
+40722378836,2026-10-28,teststand-mcp-x64.zip,1,1
+40722378836,2026-10-28,teststand-mcp.manifest.sha256,1,0
+40722378836,2026-10-28,teststand-mcp.sha256,1,1
+40722378836,2026-10-28,teststand-mcp.zip,1,1
