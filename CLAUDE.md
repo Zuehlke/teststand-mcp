@@ -853,6 +853,22 @@ max+1. (`T22`.)
   dynamic-COM binder throws `TargetParameterCountException` on `GetTypeDefinition` and
   mis-binds others. A `var tul = ...` off a `dynamic sf` silently re-poisons the chain.
 
+### Custom data types = TypeUsageList entries (2026-11-04, issue #43)
+`create_data_type` / `add_data_type_field` / `remove_data_type_field` / `rename_data_type_field` /
+`delete_data_type` / `get_data_types(file)` all work on the file's **TypeUsageList** — the same store as
+the editor's Types view, `copy_typedefs` and `list_file_typedefs`. They used to address a file-ROOT
+subproperty: real types failed with "Unknown variable or property name", and a created "type" could not
+be instantiated and vanished on save.
+- Create = `Engine.NewDataType` → `InsertType(…, TypeCategory_CustomDataTypes)` → attach → `TypeVersion`
+  `1.0.0.0` + `IsModifiedType=false`. Refused when the name is already known to the engine (palette or
+  another open file) — that would be a type conflict; use `copy_typedefs`.
+- Every field edit bumps the last version digit (or takes `type_version`) and clears `IsModifiedType` —
+  otherwise `audit_type_consistency` reports `W_MODIFIED_TYPE`. Instances in the file update immediately.
+- Dotted field paths create missing parent containers; `'Name[]'` / `is_array` make an array field.
+- `delete_data_type` refuses a type still used (`PropertyObject.ContainsTypeInstance` on the file and on
+  every other type) unless `force:true`. Pinned by `T17`.
+- New tool NAME `rename_data_type_field` + new params → need a FRESH MCP session.
+
 ### Pre-build validation
 - `validate_sequence_plan` is engine-free; run it on the exact `steps` array before
   `insert_steps_bulk` (pass the planned `locals` AND `parameters`). Error codes:

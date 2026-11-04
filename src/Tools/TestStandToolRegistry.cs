@@ -986,10 +986,9 @@ public class TestStandToolRegistry
 
         Register("get_data_types",
             "List all custom data types. Optionally pass a sequence file path to get " +
-            "data types defined in that file; otherwise returns engine-level data types. " +
-            "NOTE: for a file this lists only file-ROOT subproperty data types — it does NOT see " +
-            "LabVIEW-cluster container typedefs (which live in the file's TypeUsageList). Use " +
-            "list_file_typedefs for those.",
+            "data types defined in that file (its TypeUsageList, step types excluded — the store " +
+            "create_data_type writes to); otherwise returns engine-level data types. " +
+            "list_file_typedefs is the richer per-file listing (enumerator values on request).",
             s => s.AddOptional("sequence_file_path", "string",
                 "Optional path to a sequence file to read data types from"),
             GetDataTypesAsync);
@@ -2620,19 +2619,33 @@ public class TestStandToolRegistry
         // ── Data Type Operations ───────────────────────────────────────────────
 
         Register("create_data_type",
-            "Create a new custom data type (TypeDef) in a sequence file.",
+            "Create a new custom data type in a sequence file — a real type in the file's TypeUsageList, " +
+            "the same as the Sequence Editor's Types view creates: attached to the file (so it persists on " +
+            "save), versioned, and immediately usable as the data_type of insert_file_global / " +
+            "insert_local_variable / insert_sequence_parameter. Usually a container: add its fields with " +
+            "add_data_type_field. Refuses a name already in the file or already known to the engine " +
+            "(a palette or another loaded file) — use copy_typedefs for that.",
             s => s
                 .AddRequired("file_path", "string", "Path to the sequence file")
                 .AddRequired("type_name", "string", "Name of the new data type")
                 .AddOptional("base_type", "string",
-                    "Base type name (default: 'Object')", "Object"),
+                    "'Container' (default; 'Object' is accepted as an alias), 'Number', 'String' or " +
+                    "'Boolean'. A type cannot derive from another named type — add a field of that type.",
+                    "Container")
+                .AddOptional("type_version", "string", "Type version (default '1.0.0.0')")
+                .AddOptional("save", "boolean", "Save the file (default true)", true),
             CreateDataTypeAsync);
 
         Register("delete_data_type",
-            "Delete a custom data type from a sequence file.",
+            "Delete a custom data type (container, leaf or enum) from a sequence file's TypeUsageList. " +
+            "Refuses a type that is still used — by a variable, parameter or step in the file, or as a " +
+            "field of another type — unless force=true.",
             s => s
                 .AddRequired("file_path", "string", "Path to the sequence file")
-                .AddRequired("type_name", "string", "Name of the data type to delete"),
+                .AddRequired("type_name", "string", "Name of the data type to delete")
+                .AddOptional("force", "boolean",
+                    "Remove the definition even while instances still use it (default false)", false)
+                .AddOptional("save", "boolean", "Save the file (default true)", true),
             DeleteDataTypeAsync);
 
         // ── Enumeration Data Types ─────────────────────────────────────────────
@@ -3534,13 +3547,20 @@ public class TestStandToolRegistry
         // ── Data-Type Field Editing ─────────────────────────────────────────────
 
         Register("add_data_type_field",
-            "Add a field (subproperty) to a custom data type in a sequence file.",
+            "Add a field to a custom data type in the file's TypeUsageList (one created with " +
+            "create_data_type, in the Sequence Editor, or copied with copy_typedefs). Existing instances " +
+            "in the file pick the field up immediately. A dotted field_name ('Setup.Inner.Flag') creates " +
+            "the missing parent containers. Each edit bumps the type's version (or sets type_version) and " +
+            "clears its modified flag. Returns the type's fields.",
             s => s
                 .AddRequired("file_path", "string", "Path to the sequence file")
                 .AddRequired("type_name", "string", "Name of the custom data type")
-                .AddRequired("field_name", "string", "Name of the new field")
+                .AddRequired("field_name", "string", "Name of the new field (dotted path for nesting)")
                 .AddRequired("field_type", "string",
-                    "Field type: 'Number', 'String', 'Boolean', or the name of another custom type")
+                    "'Number', 'String', 'Boolean', 'Container', 'Reference', or the name of another type " +
+                    "(e.g. another custom container). Append '[]' for an array.")
+                .AddOptional("is_array", "boolean", "Make the field an array (same as a '[]' suffix)", false)
+                .AddOptional("type_version", "string", "Explicit new type version (default: bump the last digit)")
                 .AddOptional("save", "boolean", "Save the file (default true)", true),
             AddDataTypeFieldAsync);
 
@@ -3558,13 +3578,28 @@ public class TestStandToolRegistry
             GetDataTypeFieldsAsync);
 
         Register("remove_data_type_field",
-            "Remove a field (subproperty) from a custom data type.",
+            "Remove a field from a custom data type in the file's TypeUsageList (dotted path for a " +
+            "nested field). Bumps the type's version (or sets type_version). Returns the remaining fields.",
             s => s
                 .AddRequired("file_path", "string", "Path to the sequence file")
                 .AddRequired("type_name", "string", "Name of the custom data type")
                 .AddRequired("field_name", "string", "Name of the field to remove")
+                .AddOptional("type_version", "string", "Explicit new type version (default: bump the last digit)")
                 .AddOptional("save", "boolean", "Save the file (default true)", true),
             RemoveDataTypeFieldAsync);
+
+        Register("rename_data_type_field",
+            "Rename a field of a custom data type in the file's TypeUsageList (dotted path for a nested " +
+            "field; new_name is the plain new name). Bumps the type's version (or sets type_version). " +
+            "Returns the type's fields.",
+            s => s
+                .AddRequired("file_path", "string", "Path to the sequence file")
+                .AddRequired("type_name", "string", "Name of the custom data type")
+                .AddRequired("field_name", "string", "Current name (or dotted path) of the field")
+                .AddRequired("new_name", "string", "New field name")
+                .AddOptional("type_version", "string", "Explicit new type version (default: bump the last digit)")
+                .AddOptional("save", "boolean", "Save the file (default true)", true),
+            RenameDataTypeFieldAsync);
 
         // ── CSV Record Streams ──────────────────────────────────────────────────
 
@@ -5855,13 +5890,29 @@ public class TestStandToolRegistry
 
     private async Task<CallToolResult> AddDataTypeFieldAsync(JsonElement? args)
     {
-        await _ts.AddDataTypeFieldAsync(
+        var typeName = args!.Value.GetRequiredString("type_name");
+        var fields = await _ts.AddDataTypeFieldAsync(
             args!.Value.GetRequiredString("file_path"),
-            args!.Value.GetRequiredString("type_name"),
+            typeName,
             args!.Value.GetRequiredString("field_name"),
             args!.Value.GetRequiredString("field_type"),
-            args!.Value.GetBoolOrDefault("save", true));
-        return Ok("Data-type field added.");
+            args!.Value.GetBoolOrDefault("save", true),
+            args!.Value.GetBoolOrDefault("is_array", false),
+            args!.Value.GetStringOrDefault("type_version", null));
+        return OkJson(new { typeName, fields });
+    }
+
+    private async Task<CallToolResult> RenameDataTypeFieldAsync(JsonElement? args)
+    {
+        var typeName = args!.Value.GetRequiredString("type_name");
+        var fields = await _ts.RenameDataTypeFieldAsync(
+            args!.Value.GetRequiredString("file_path"),
+            typeName,
+            args!.Value.GetRequiredString("field_name"),
+            args!.Value.GetRequiredString("new_name"),
+            args!.Value.GetBoolOrDefault("save", true),
+            args!.Value.GetStringOrDefault("type_version", null));
+        return OkJson(new { typeName, fields });
     }
 
     private async Task<CallToolResult> GetDataTypeFieldsAsync(JsonElement? args)
@@ -5874,12 +5925,14 @@ public class TestStandToolRegistry
 
     private async Task<CallToolResult> RemoveDataTypeFieldAsync(JsonElement? args)
     {
-        await _ts.RemoveDataTypeFieldAsync(
+        var typeName = args!.Value.GetRequiredString("type_name");
+        var fields = await _ts.RemoveDataTypeFieldAsync(
             args!.Value.GetRequiredString("file_path"),
-            args!.Value.GetRequiredString("type_name"),
+            typeName,
             args!.Value.GetRequiredString("field_name"),
-            args!.Value.GetBoolOrDefault("save", true));
-        return Ok("Data-type field removed.");
+            args!.Value.GetBoolOrDefault("save", true),
+            args!.Value.GetStringOrDefault("type_version", null));
+        return OkJson(new { typeName, fields });
     }
 
     // ── CSV Stream Handlers ───────────────────────────────────────────────────
@@ -6207,8 +6260,10 @@ public class TestStandToolRegistry
     {
         var filePath = args!.Value.GetRequiredString("file_path");
         var typeName = args!.Value.GetRequiredString("type_name");
-        var baseType = args!.Value.GetStringOrDefault("base_type", "Object");
-        var info     = await _ts.CreateDataTypeAsync(filePath, typeName, baseType);
+        var baseType = args!.Value.GetStringOrDefault("base_type", "Container");
+        var info     = await _ts.CreateDataTypeAsync(filePath, typeName, baseType,
+            args!.Value.GetStringOrDefault("type_version", null),
+            args!.Value.GetBoolOrDefault("save", true));
         return OkJson(info);
     }
 
@@ -6216,7 +6271,9 @@ public class TestStandToolRegistry
     {
         var filePath = args!.Value.GetRequiredString("file_path");
         var typeName = args!.Value.GetRequiredString("type_name");
-        await _ts.DeleteDataTypeAsync(filePath, typeName);
+        await _ts.DeleteDataTypeAsync(filePath, typeName,
+            args!.Value.GetBoolOrDefault("force", false),
+            args!.Value.GetBoolOrDefault("save", true));
         return Ok($"Data type '{typeName}' deleted from '{filePath}'.");
     }
 
