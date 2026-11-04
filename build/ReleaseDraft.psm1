@@ -29,8 +29,8 @@ $script:ReleaseIdPattern = '\A[0-9]+\z'
 $script:ReleaseNotes = 'Built and verified by the release workflow. Install it through the Claude Code plugin marketplace.'
 $script:NotFoundPattern = 'HTTP 404'
 $script:UnknownAssetCount = -1   # the listing did not say: such a published release is never replaceable
-# What one listed release is reduced to. A constant, so the tests can run it through real jq (gh evaluates --jq
-# with gojq, a jq-compatible implementation; both agree on this filter).
+# What one listed release is reduced to. A constant, so the tests can run it through real jq. gh evaluates --jq
+# with gojq (github.com/itchyny/gojq, a dependency in cli/cli's go.mod); the filter is tested with jq only.
 $script:ReleaseListFilter = '.[] | {id, tag_name, draft, body, asset_count: (.assets | length)} | tojson'
 
 # ----------------------------------------------------------------------------

@@ -21,7 +21,7 @@
 #     runs gh alone may dispatch.
 #   * One queue, never cancelled: two merges close together update the release PR one after the other. GitHub
 #     keeps one running and one pending run per queue, so a THIRD push while one runs cancels the pending one
-#     (GitHub docs, "Control the concurrency of workflows and jobs").
+#     (GitHub docs, "Control the concurrency of workflows and jobs": a new queued run cancels the pending one).
 #     release-please works from the state of main and its PR labels, so the next run does what the cancelled
 #     one would have. A release it creates that late has its tag on the merge commit while the call builds a
 #     later one: release.yml's tag gate refuses that, so the run fails instead of publishing other code under

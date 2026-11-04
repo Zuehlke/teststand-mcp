@@ -280,7 +280,7 @@ try {
     Invoke-Case 'draft: the listing filter, run by real jq over a GitHub-shaped response, gives the bodies and asset counts the decision needs' {
         $jq = Get-Command jq -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($null -eq $jq) {
-            # gh's --jq (gojq) prints strings raw like jq -r; the runners have jq, so only a maintainer's machine may lack it.
+            # gh's --jq (gojq) prints strings raw like jq -r; tested with jq only. The runners have jq, so only a maintainer's machine may lack it.
             Assert-True ($env:CI -ne 'true') 'jq is missing on a CI runner, so the filter that decides a deletion was not run'
             Write-Host 'SKIP  jq is not on the PATH; the listing filter was not run.'
             return

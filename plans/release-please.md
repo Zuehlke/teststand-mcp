@@ -135,7 +135,7 @@ In `build/ReleaseDraft.psm1`:
 
 | Risk | Mitigation |
 |---|---|
-| The release PR's CI started by `workflow_dispatch` does not satisfy the required check on the PR | Test on the first release PR. Fallback: a GitHub App token for release-please; then drop the `workflow_call` job and let the tag push trigger `release.yml` (one trigger only, never both). |
+| The release PR's checks started by `workflow_dispatch` (`ci.yml`, and `pr-title.yml` whose job is then skipped) do not satisfy the required checks on the PR | Test on the first release PR. Fallback: a GitHub App token for release-please; then drop the `workflow_call` job and let the tag push trigger `release.yml` (one trigger only, never both). |
 | `force-tag-creation` creates the tag but the draft creation fails | `release.yml` is not called (`release_created` false); re-run the release-please job. Nothing is published. |
 | A non-conventional squash title slips in | It is only missing from the changelog and the version bump; the next `fix:` releases it. The PR-title check makes this rare. |
 | Someone still publishes in the web UI | Slice 5 recovers an empty one; a published release WITH assets is refused as today. |

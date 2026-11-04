@@ -9,8 +9,8 @@
 #    -Tag $env:TAG
 #  -Rehearsal also accepts v<X.Y.Z>-rehearsal (the dry-run tag); it adds "rehearsal=true" to the
 #  output, and "version" is still the plain X.Y.Z.
-#  -Commit is the commit the retag commands point at and, with -MainRef, the commit the tag must resolve to
-#  (default: GITHUB_SHA when set).
+#  -Commit is the commit the run builds: the one a malformed tag's retag commands point at and, with -MainRef,
+#  the commit the tag must resolve to (default: GITHUB_SHA when set).
 #  -MainRef refs/remotes/origin/main also requires -Commit to be on that branch (git merge-base
 #  --is-ancestor in -RepoRoot, default the repository of this script), so a tag on an unmerged commit
 #  publishes nothing, and requires the tag to resolve to -Commit: release-please.yml CALLS the release

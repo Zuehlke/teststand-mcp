@@ -87,11 +87,14 @@ What the workflow does, in order:
 
 A failed verification leaves a draft. `releases/latest` never moves until the whole check has passed. To run it
 again, use Re-run failed jobs on the run: the leftover draft of the tag is deleted first, so the second run
-does not collide with the first. If the first run failed after it had already replaced release-please's draft, the
-re-run's notes hold only the workflow's fixed line: paste the version's section of `CHANGELOG.md` into the release
-notes after it is published. If a PUBLISHED release with assets already carries the tag, the run stops with:
+does not collide with the first. Only when the first run failed while CREATING its draft (after it had deleted
+release-please's) do the re-run's notes hold only the workflow's fixed line: then paste the version's section of
+`CHANGELOG.md` into the release notes after it is published. A draft that was created keeps the notes, and the
+re-run carries them over. If a PUBLISHED release with assets already carries the tag, the run stops with:
 
-> A published release of <...> already carries the tag <...> (id <...>).
+> A published release of <...> <...> already carries the tag <...> (id <...>).
+
+The second `<...>` is `with assets`, or `with an unknown number of assets` when the release list did not say; such a release is refused as well, because it may have been downloaded.
 
 That tag is spent. Fix forward with the next patch version.
 
@@ -154,6 +157,7 @@ and push it again at the commit the message names first (`<tagged sha>` below). 
 which may point elsewhere. The push starts a run on that commit, which also replaces release-please's draft:
 
 ```powershell
+git fetch origin
 git push origin --delete refs/tags/v1.9.3
 git push origin <tagged sha>:refs/tags/v1.9.3
 ```
