@@ -19,6 +19,8 @@ on:
     branches: [main]
   push:
     branches: [main]
+  # release-please.yml starts it on the release PR, which the workflow token opens without a pull_request run.
+  workflow_dispatch:
 
 # The token can read the repository and nothing else.
 permissions:

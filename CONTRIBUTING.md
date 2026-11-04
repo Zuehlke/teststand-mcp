@@ -9,8 +9,37 @@ The scripts run on Windows. They work under Windows PowerShell 5.1 (`powershell.
 
 ## Cutting a release
 
-Push a tag `vX.Y.Z` and the release workflow (`.github/workflows/release.yml`) takes it from there. You
-never edit a version number: the tag is the version.
+Merge the release PR. `.github/workflows/release-please.yml` keeps one open, titled
+`chore(main): release X.Y.Z`, and updates it on every merge to `main`: it bumps the version in
+`.release-please-manifest.json` and writes `CHANGELOG.md` from the PR titles. When you merge it,
+release-please creates a DRAFT release with the tag `vX.Y.Z` and calls the release workflow
+(`.github/workflows/release.yml`) with that tag. The release workflow builds, verifies and publishes
+exactly as for a pushed tag, and keeps the changelog as the release notes.
+
+The PR title decides the version, because every PR is squash-merged and its title becomes the commit
+release-please reads. The `pr-title` check enforces a conventional commit title:
+
+| Title | Next version |
+|---|---|
+| `fix: ...` | patch (1.9.2 to 1.9.3) |
+| `feat: ...` | minor (1.9.2 to 1.10.0) |
+| `feat!: ...`, or a `BREAKING CHANGE:` footer | major (1.9.2 to 2.0.0) |
+| `chore:`, `ci:`, `docs:`, `test:`, `refactor:`, `build:` | none (no release PR until a `fix` or `feat` arrives) |
+
+Never create or publish a release in the GitHub web UI. A published release without assets takes
+`releases/latest`, and every marketplace install fails with a 404 until it has assets. The release
+workflow deletes such an empty release of its tag and replaces it, but only when it runs.
+
+The release PR is opened with the workflow token, which starts no `pull_request` run. release-please.yml
+therefore starts `ci.yml` and `pr-title.yml` on the release branch by hand (`workflow_dispatch`), so the
+required checks report. If they do not appear on the release PR, close and reopen the PR: that event is yours
+and starts both.
+
+### Pushing a tag by hand (fallback)
+
+Push a tag `vX.Y.Z` and the release workflow takes it from there. You never edit a version number: the tag
+is the version. Use this only when release-please cannot cut the release, and update
+`.release-please-manifest.json` to the same version afterwards, or release-please proposes it again.
 
 ```powershell
 git switch main
@@ -42,8 +71,9 @@ What the workflow does, in order:
    (x86, then x64), each of which builds the exe, stages the plugin, smoke-tests it and zips it. Both plugins'
    assets are kept as one workflow artifact. If this job fails, nothing is created, not even a draft.
 2. Job `release` (write token): checks that the artifact holds exactly each plugin's four assets, deletes every
-   leftover DRAFT of the same tag (from an earlier failed run), and creates a DRAFT release with them
-   (`build\New-ReleaseDraft.ps1`). A published release that already carries the tag stops the run.
+   DRAFT of the same tag (release-please's, or the leftover of an earlier failed run) and a published release
+   of the tag that has NO assets, and creates a DRAFT release with them and the notes of what it deleted
+   (`build\New-ReleaseDraft.ps1`). A published release with assets that already carries the tag stops the run.
 3. Verifies the draft through the API, downloading the assets the way a user would
    (`build\Assert-PublishedRelease.ps1`).
 4. Re-checks that the draft still holds exactly the verified asset ids (`build\Assert-ReleaseAssetSet.ps1`).
@@ -56,7 +86,7 @@ What the workflow does, in order:
 
 A failed verification leaves a draft. `releases/latest` never moves until the whole check has passed. To run it
 again, use Re-run failed jobs on the run: the leftover draft of the tag is deleted first, so the second run
-does not collide with the first. If a PUBLISHED release already carries the tag, the run stops with:
+does not collide with the first. If a PUBLISHED release with assets already carries the tag, the run stops with:
 
 > A published release of <...> already carries the tag <...> (id <...>).
 
@@ -256,6 +286,12 @@ Done once by a repository admin:
    statistics workflow `.github/workflows/pages.yml` has a `deploy` job that publishes the page. Without
    this setting only that job fails. The download counts are already committed to the `stats` branch by
    then, and `ci.yml` and `release.yml` are not affected.
+4. **Squash merging only, with the PR title as the commit** (Settings, General, Pull Requests): untick "Allow
+   merge commits" and "Allow rebase merging", keep "Allow squash merging" and set its default commit message
+   to "Pull request title". release-please reads those squash commits.
+5. **Protect `main`** (Settings, Rules, Rulesets, `ProtectMain`): enforcement Active, target the default
+   branch, require a pull request, require the status checks `check` and `pr-title`, block force pushes.
+   GitHub offers a check here only after it has run once, so add `pr-title` after the first PR that ran it.
 3. **Optional: the `STATS_TRAFFIC_TOKEN` secret** (Settings, Secrets and variables, Actions). The workflow
    token cannot read repository traffic, so the views and clones need a token that can. Without the secret
    the statistics skip traffic, and the page says so. Make it a fine-grained personal access token for this

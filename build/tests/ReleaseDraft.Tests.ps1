@@ -27,8 +27,9 @@ $NotFound = 'gh: Not Found (HTTP 404)'
 $script:TempDirPrefix = 'ReleaseDraftTests_'
 
 # --- The fake gh ------------------------------------------------------------------------------------------
-# State: Releases (ordered, newest first: { Id; Tag; Draft; Assets }), Tags, Latest (the tag releases/latest
-# names, or $null), Calls (every argument list) and Patches (the PATCH arguments). -Fail maps a regex over the
+# State: Releases (ordered, newest first: { Id; Tag; Draft; Assets; Body }), Tags, Latest (the tag releases/latest
+# names, or $null), Calls (every argument list), Patches (the PATCH arguments) and Notes (the text of the notes
+# file of every gh release create, read while the call runs: the file is deleted afterwards). -Fail maps a regex over the
 # joined arguments to the stderr text of a failed call; -PageSize is what one listing page holds.
 function New-FakeGh {
     param([object[]]$Releases = @(), [string[]]$Tags = @(), [string]$Latest = $null, [hashtable]$Fail = @{}, [int]$PageSize = 100, [string]$PatchedDraft = 'false')
@@ -36,7 +37,7 @@ function New-FakeGh {
     $state = @{
         Releases = (New-Object System.Collections.ArrayList); Tags = (New-Object System.Collections.ArrayList)
         Latest = $Latest; Calls = (New-Object System.Collections.ArrayList); Patches = (New-Object System.Collections.ArrayList)
-        NextId = $BigId; Creates = (New-Object System.Collections.ArrayList)
+        NextId = $BigId; Creates = (New-Object System.Collections.ArrayList); Notes = (New-Object System.Collections.ArrayList)
     }
     foreach ($release in $Releases) { [void]$state.Releases.Add($release) }
     foreach ($tag in $Tags) { [void]$state.Tags.Add($tag) }
@@ -51,8 +52,10 @@ function New-FakeGh {
         if ($Arguments[0] -ceq 'release' -and $Arguments[1] -ceq 'create') {
             $tag = $Arguments[2]
             [void]$state.Creates.Add($Arguments)
+            $notes = [IO.File]::ReadAllText($Arguments[($Arguments.IndexOf('--notes-file') + 1)])
+            [void]$state.Notes.Add($notes)
             $state.NextId++
-            [void]$state.Releases.Insert(0, @{ Id = $state.NextId; Tag = $tag; Draft = $true; Assets = @() })
+            [void]$state.Releases.Insert(0, @{ Id = $state.NextId; Tag = $tag; Draft = $true; Assets = @(); Body = $notes })
             return (New-GhResult -Stdout "https://github.com/x/y/releases/tag/$tag")
         }
         if ($Arguments[0] -cne 'api') { return (New-GhResult -ExitCode 1 -Stderr "unexpected gh command $joined") }
@@ -64,7 +67,7 @@ function New-FakeGh {
             $page = [int]$Matches[2]
             $all = @($state.Releases | ForEach-Object { $_ })
             $slice = @($all | Select-Object -Skip (($page - 1) * $PageSize) -First $PageSize)
-            $lines = @($slice | ForEach-Object { ConvertTo-Json -InputObject ([ordered]@{ id = $_.Id; tag_name = $_.Tag; draft = $_.Draft }) -Compress })
+            $lines = @($slice | ForEach-Object { ConvertTo-Json -InputObject ([ordered]@{ id = $_.Id; tag_name = $_.Tag; draft = $_.Draft; body = $_.Body; asset_count = @($_.Assets).Count }) -Compress })
             return (New-GhResult -Stdout ($lines -join "`n"))
         }
         if ($method -ceq 'GET' -and $path -match '/releases/latest\z') {
@@ -101,9 +104,10 @@ function New-FakeGh {
 }
 
 function New-Release {
-    param($Id, [string]$Tag, [bool]$Draft = $true)
-    return @{ Id = $Id; Tag = $Tag; Draft = $Draft; Assets = @() }
+    param($Id, [string]$Tag, [bool]$Draft = $true, [object[]]$Assets = @(), [string]$Body = '')
+    return @{ Id = $Id; Tag = $Tag; Draft = $Draft; Assets = $Assets; Body = $Body }
 }
+$OneAsset = @(@{ id = 9; name = 'teststand-mcp.zip' })   # what makes a published release one users may have downloaded
 
 # A folder with the four assets of a version (any bytes: the draft code only needs the names).
 function New-AssetFolder {
@@ -177,7 +181,7 @@ try {
         foreach ($flag in @('--draft', '--verify-tag')) { Assert-True ($create -ccontains $flag) "gh release create lacks $flag" }
         Assert-True ($create -cnotcontains '--target') 'a real release names no target commit'
         Assert-Equal $Repo $create[($create.IndexOf('--repo') + 1)] 'repository'
-        foreach ($name in (Get-RequiredAssetNames -Version '1.9.0')) { Assert-True (@($create | Where-Object { $_ -like "*\$name" }).Count -eq 1) "asset $name is not an argument of gh release create" }
+        foreach ($name in (Get-RequiredAssetNames -Version '1.9.0')) { Assert-True (@($create | Where-Object { $_ -like "*[\/]$name" }).Count -eq 1) "asset $name is not an argument of gh release create" }
         Assert-Equal 'v1.9.0/draft' ((Get-TagsOfReleases $fake)[0] -replace '/\d+\z', '') 'the new draft is the newest release'
     }
 
@@ -228,13 +232,51 @@ try {
     }
 
     Invoke-Case 'draft: a PUBLISHED release with the tag fails with the fix-forward advice and nothing is deleted or created' {
-        $fake = New-FakeGh -Releases @((New-Release 31 'v1.9.0'), (New-Release 32 'v1.9.0' $false))
+        $fake = New-FakeGh -Releases @((New-Release 31 'v1.9.0'), (New-Release 32 'v1.9.0' $false $OneAsset))
         $failure = Get-Failure { New-ReleaseDraft -Repo $Repo -Tag 'v1.9.0' -AssetDir (New-AssetFolder) -Gh $fake.Gh }
         Assert-ThreePartFailure $failure
         Assert-Contains $failure 'A published release of Zuehlke/teststand-mcp already carries the tag v1.9.0 (id 32)' 'what'
         Assert-Contains $failure 'next patch version' 'the fix'
         Assert-Equal 0 @(Get-DeleteCalls $fake).Count 'deleted releases (a draft must not be deleted on the way to a refusal)'
         Assert-Equal 0 $fake.State.Creates.Count 'created releases'
+    }
+
+    Invoke-Case 'draft: a published release of the tag WITHOUT assets (made by hand in the web UI) is deleted and replaced, its notes kept' {
+        $fake = New-FakeGh -Releases @((New-Release 33 'v1.9.0' $false -Body 'Hand-written notes'), (New-Release 34 'v1.8.0' $false))
+        [void](New-ReleaseDraft -Repo $Repo -Tag 'v1.9.0' -AssetDir (New-AssetFolder) -Gh $fake.Gh)
+        Assert-Equal "repos/$Repo/releases/33" (@(Get-DeleteCalls $fake))[0][3] 'the empty published release'
+        Assert-Equal 1 @(Get-DeleteCalls $fake).Count 'deleted releases (the other tag is left alone)'
+        Assert-Equal 1 $fake.State.Creates.Count 'created releases'
+        Assert-True ($fake.State.Notes[0].StartsWith('Hand-written notes')) "the notes are carried over: $($fake.State.Notes[0])"
+    }
+
+    Invoke-Case 'draft: a listing that does not say how many assets a published release has refuses it, as one with assets' {
+        $fake = New-FakeGh -Releases @((New-Release 35 'v1.9.0' $false))
+        $inner = $fake.Gh
+        $noCount = {
+            param($Arguments, $TimeoutSeconds)
+            $result = & $inner $Arguments $TimeoutSeconds
+            if (@($Arguments)[1] -like '*releases?per_page=*') { $result.Stdout = $result.Stdout -replace ',"asset_count":\d+', '' }
+            return $result
+        }.GetNewClosure()
+        Assert-ThreePartFailure (Get-Failure { New-ReleaseDraft -Repo $Repo -Tag 'v1.9.0' -AssetDir (New-AssetFolder) -Gh $noCount })
+        Assert-Equal 0 @(Get-DeleteCalls $fake).Count 'deleted releases'
+    }
+
+    Invoke-Case 'draft: the notes of release-please''s draft are carried over, the fixed line follows once, also on a re-run' {
+        $changelog = "## [1.9.3](https://github.com/x/y/compare/v1.9.2...v1.9.3) (2026-11-04)`n`n### Bug Fixes`n`n* a fix with ""quotes"" ([#45](https://github.com/x/y/issues/45))"
+        $fake = New-FakeGh -Releases @((New-Release 36 'v1.9.0' -Body $changelog))
+        $dir = New-AssetFolder
+        [void](New-ReleaseDraft -Repo $Repo -Tag 'v1.9.0' -AssetDir $dir -Gh $fake.Gh)
+        [void](New-ReleaseDraft -Repo $Repo -Tag 'v1.9.0' -AssetDir $dir -Gh $fake.Gh)
+        foreach ($notes in $fake.State.Notes) {
+            Assert-True ($notes.StartsWith($changelog)) "the changelog comes first, intact: $notes"
+            Assert-Equal 1 ([regex]::Matches($notes, 'Built and verified by the release workflow').Count) 'the fixed line, once'
+        }
+        $plain = New-FakeGh
+        [void](New-ReleaseDraft -Repo $Repo -Tag 'v1.9.0' -AssetDir $dir -Gh $plain.Gh)
+        Assert-True ($plain.State.Notes[0].StartsWith('Built and verified by the release workflow')) 'without an earlier release only the fixed line'
+        Assert-True (@($fake.State.Creates[0]) -cnotcontains '--notes') 'the notes travel in a file, never on the command line'
     }
 
     Invoke-Case 'draft: a leftover draft on the SECOND page of the list (a page holding one release) is found' {
@@ -258,7 +300,7 @@ try {
         $fake = New-FakeGh
         [void](New-ReleaseDraft -Repo $Repo -Tag 'v1.9.0' -AssetDir (New-AssetFolder -Prefixes $both) -AssetPrefixes $both -Gh $fake.Gh)
         $create = @($fake.State.Creates[0])
-        foreach ($name in (Get-RequiredAssetNames -Version '1.9.0' -Prefixes $both)) { Assert-True (@($create | Where-Object { $_ -like "*\$name" }).Count -eq 1) "asset $name is not an argument of gh release create" }
+        foreach ($name in (Get-RequiredAssetNames -Version '1.9.0' -Prefixes $both)) { Assert-True (@($create | Where-Object { $_ -like "*[\/]$name" }).Count -eq 1) "asset $name is not an argument of gh release create" }
         $idle = New-FakeGh
         $failure = Get-Failure { New-ReleaseDraft -Repo $Repo -Tag 'v1.9.0' -AssetDir (New-AssetFolder -Prefixes $both -Without @('teststand-mcp-x64.sha256')) -AssetPrefixes $both -Gh $idle.Gh }
         Assert-ThreePartFailure $failure
@@ -315,7 +357,7 @@ try {
         Assert-Contains ([IO.File]::ReadAllText($outFile)) 'release_id=' 'the step output'
         $badTag = Invoke-Script $NewDraftPath @{ Repo = $Repo; Tag = 'V1.9.0'; AssetDir = (New-AssetFolder); Gh = $fake.Gh }
         Assert-Equal 1 $badTag.ExitCode 'exit code for a bad tag'
-        $published = New-FakeGh -Releases @((New-Release 41 'v1.9.0' $false))
+        $published = New-FakeGh -Releases @((New-Release 41 'v1.9.0' $false $OneAsset))
         $clash = Invoke-Script $NewDraftPath @{ Repo = $Repo; Tag = 'v1.9.0'; AssetDir = (New-AssetFolder); Gh = $published.Gh }
         Assert-Equal 1 $clash.ExitCode 'exit code for a published tag'
         $noFolder = Invoke-Script $NewDraftPath @{ Repo = $Repo; Tag = 'v1.9.0'; AssetDir = ''; Gh = $fake.Gh }

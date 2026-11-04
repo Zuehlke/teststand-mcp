@@ -78,8 +78,8 @@ Add-Mutation 'the release job no longer needs the package job' 'release.yml' 'th
 Add-Mutation 'a dotnet step in the job that holds the write token' 'release.yml' 'the two jobs are split' "      - name: Download the release assets built by the package job" "      - uses: $SetupDotnetPin`n      - name: Download the release assets built by the package job"
 Add-Mutation 'a release script in the package job, which has no token' 'release.yml' 'the two jobs are split' "      - name: Install .NET 8" "      - name: Publish early`n        run: |`n          & .\build\Publish-Release.ps1 -Repo `$env:REPO -ReleaseId 1`n      - name: Install .NET 8"
 Add-Mutation 'the tag filter narrowed to v*' 'release.yml' 'a pushed tag of any name starts it' "push:`n    tags: ['**']" "push:`n    tags: ['v*']"
-Add-Mutation 'tag pushes share one queue again' 'release.yml' 'queues per ref' 'group: release-${{ github.ref }}' "group: release-`${{ github.event_name == 'push' && 'publish' || github.ref }}"
-Add-Mutation 'a running release may be cancelled' 'release.yml' 'queues per ref' 'cancel-in-progress: false' 'cancel-in-progress: true'
+Add-Mutation 'tag pushes share one queue again' 'release.yml' 'queues per tag' 'group: release-${{ inputs.tag || github.ref }}' "group: release-`${{ github.event_name == 'push' && 'publish' || github.ref }}"
+Add-Mutation 'a running release may be cancelled' 'release.yml' 'queues per tag' 'cancel-in-progress: false' 'cancel-in-progress: true'
 Add-Mutation 'publishing by tag name' 'release.yml' 'publishing is by the verifier release id' '& .\build\Publish-Release.ps1 -Repo $env:REPO -ReleaseId $env:RELEASE_ID' '& .\build\Publish-Release.ps1 -Repo $env:REPO -ReleaseId $env:RELEASE_TAG'
 Add-Mutation 'publishing with a make_latest that is fixed in the workflow' 'release.yml' 'publishing is by the verifier release id' '& .\build\Publish-Release.ps1' 'gh api -X PATCH "repos/$env:REPO/releases/$env:RELEASE_ID" -F draft=false -f make_latest=true; & .\build\Publish-Release.ps1'
 Add-Mutation 'publishing without the asset recheck' 'release.yml' 'publishing is by the verifier release id' " && steps.verify.outcome == 'success' && steps.recheck.outcome == 'success'" " && steps.verify.outcome == 'success'"
@@ -133,6 +133,19 @@ Add-Mutation 'ci: a missing pwsh no longer fails the run' 'ci.yml' 'the script t
 Add-Mutation 'ci: triggered by pull_request_target' 'ci.yml' 'pull_request_target' "  pull_request:`n    branches: [main]" "  pull_request_target:`n    branches: [main]"
 Add-Mutation 'ci: the wrong test category' 'ci.yml' 'the unit tests run only' 'Category=EngineFree' 'Category=Integration'
 Add-Mutation 'ci: an x86 test host' 'ci.yml' 'the unit tests run only' ' -p:PlatformTarget=AnyCPU' ''
+Add-Mutation 'called releases share one queue' 'release.yml' 'queues per tag' 'group: release-${{ inputs.tag || github.ref }}' 'group: release-${{ github.ref }}'
+Add-Mutation 'a call that takes a dry-run input' 'release.yml' 'calls it with a tag' "  workflow_call:`n    inputs:`n      tag:" "  workflow_call:`n    inputs:`n      dry_run:`n        type: boolean`n      tag:"
+Add-Mutation 'the tag of a call ignored' 'release.yml' 'the tag is user input' 'TAG: ${{ inputs.tag || github.ref_name }}' "TAG: `${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}"
+
+# --- release-please.yml and pr-title.yml -----------------------------------------------------------------
+Add-Mutation 'ci: no longer dispatchable for the release PR' 'ci.yml' 'and by hand' "  workflow_dispatch:`n" ''
+Add-Mutation 'release-please: release.yml called without a release' 'release-please.yml' 'only when it created a release' "    if: needs.release-please.outputs.release_created == 'true'`n" ''
+Add-Mutation 'release-please: release.yml called with another tag' 'release-please.yml' 'only when it created a release' 'tag: ${{ needs.release-please.outputs.tag_name }}' 'tag: ${{ github.ref_name }}'
+Add-Mutation 'release-please: the third-party action may dispatch workflows' 'release-please.yml' 'contents and pull requests only' 'pull-requests: write' "pull-requests: write`n      actions: write"
+Add-Mutation 'release-please: a reusable workflow from elsewhere' 'release-please.yml' 'every action is pinned' 'uses: ./.github/workflows/release.yml' 'uses: someone/else/.github/workflows/release.yml@main'
+Add-Mutation 'release-please: the release PR misses the pr-title check' 'release-please.yml' 'required checks by dispatch' 'gh workflow run pr-title.yml' 'echo pr-title.yml'
+Add-Mutation 'pr-title: a title edit no longer re-runs the check' 'pr-title.yml' 'again when its title is edited' 'types: [opened, edited, synchronize, reopened]' 'types: [opened, synchronize, reopened]'
+Add-Mutation 'pr-title: runs without a pull request' 'pr-title.yml' 'runs only for one' "    if: github.event_name == 'pull_request'`n" ''
 
 try {
     Invoke-Case 'mutations: the table has at least 20 named defects and every one names the rule it breaks' {

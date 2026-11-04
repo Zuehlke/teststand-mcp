@@ -34,9 +34,9 @@
 #   * Only a commit on main is released: the tag gate refuses a tag on any other commit (a dry run
 #     may come from a branch and publishes nothing, so it skips that check).
 #   * Tag names, inputs and refs are user input: they reach `run:` only through env, never inline.
-#   * Every run queues per ref (`release-<ref>`) and a running release is never cancelled, so two runs of
-#     one tag never overlap (a dry run queues per BRANCH, so dry runs of one rehearsal tag started from
-#     two branches can overlap; nothing they do can publish). Different tags may overlap, and the one that finishes last would otherwise
+#   * Every run queues per tag (`release-<tag input or ref>`) and a running release is never cancelled, so two
+#     runs of one tag never overlap (a tag pushed by hand and the same tag called by release-please would sit
+#     in two queues, `refs/tags/vX.Y.Z` and `vX.Y.Z`: do not do both). Different tags may overlap, and the one that finishes last would otherwise
 #     take the label "latest": build\Publish-Release.ps1 therefore compares the version with the current
 #     latest release and publishes a LOWER version with make_latest=false (it prints which it chose, and the
 #     final check of releases/latest is skipped for such a release: latest rightly serves another one).
@@ -47,6 +47,10 @@
 # are intact (digest, manifest, versioned copy) and were uploaded with this repository's workflow
 # token. A compromised build step would produce a consistent, verified, malicious release. Build
 # provenance attestation is a follow-up and is deliberately not part of this workflow yet.
+#
+# release-please.yml cuts the regular release: when its release PR is merged it creates a DRAFT with the tag
+# and CALLS this workflow with that tag (workflow_call). The draft is release-please's, so the create step
+# takes its notes over into its own draft. Pushing a tag by hand still works the same way.
 #
 # A manual run is a DRY RUN: it packages, creates a draft under the rehearsal tag
 # v<X.Y.Z>-rehearsal, verifies it through the API, then deletes the draft it created (by its id) and
@@ -79,13 +83,22 @@ on:
           - corrupt-zip
           - corrupt-zip-x64
         default: none
+  # release-please.yml calls it with the tag it created (with the workflow token, which starts no `push: tags`
+  # run). github.event_name is then the caller's (push), so DRY_RUN stays false and the run is a real release.
+  workflow_call:
+    inputs:
+      tag:
+        description: 'The tag release-please created, vX.Y.Z'
+        required: true
+        type: string
 
 # Nothing by default; every job states what it needs.
 permissions: {}
 
-# One queue per ref, for tag pushes and dry runs alike; a running release is never cancelled half-way.
+# One queue per tag: the input of a dry run or a call, the pushed ref otherwise (a call runs on refs/heads/main,
+# so github.ref alone would put every called release in one queue). A running release is never cancelled half-way.
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.tag || github.ref }}
   cancel-in-progress: false
 
 env:
@@ -94,8 +107,8 @@ env:
   # 'true' only for a manual run that asked for it. A pushed tag is never a rehearsal, whatever its name.
   DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
   INJECT_FAULT: ${{ github.event_name == 'workflow_dispatch' && inputs.inject_fault || 'none' }}
-  # User input: the pushed ref name, or the rehearsal tag of a manual run. Only the gate trusts it.
-  TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  # User input: the rehearsal tag of a manual run, the tag of a call, or the pushed ref name. Only the gate trusts it.
+  TAG: ${{ inputs.tag || github.ref_name }}
   DOTNET_NOLOGO: 'true'
   DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
   OUT_DIR: artifacts/release

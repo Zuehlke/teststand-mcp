@@ -466,6 +466,12 @@ class OwnDownloadArtifacts(unittest.TestCase):
         self.run_collect(self.api(artifact(5), runs=runs, payloads={5: record}))
         self.assertEqual(self.own_rows(), [f"5,2026-08-20,{ZIP},1,0"])
 
+    def test_a_release_please_run_that_called_release_yml_is_accepted(self):
+        runs = {5: {"path": ".github/workflows/release-please.yml", "event": "push"}}
+        record = artifact_zip({"run_id": "5", "counts": {"2026-08-20": {ZIP: {"draft": 1, "published": 0}}}})
+        self.run_collect(self.api(artifact(5), runs=runs, payloads={5: record}))
+        self.assertEqual(self.own_rows(), [f"5,2026-08-20,{ZIP},1,0"])
+
     def test_a_tag_push_run_is_accepted_whatever_its_branch_name(self):
         item = artifact(5, head_branch="v1.9.0")
         record = artifact_zip({"run_id": "5", "counts": {"2026-08-20": {ZIP: {"draft": 1, "published": 0}}}})

@@ -1,9 +1,10 @@
 # ============================================================================
 #  ReleaseDraft.psm1 - the GitHub release operations of the release workflow that are not verification
 #  (that is Assert-PublishedRelease.ps1): everything that creates, publishes or deletes a release.
-#    New-ReleaseDraft         creates the DRAFT of a tag: first it clears the leftovers of an earlier,
-#                             failed run of the same tag (drafts only; a PUBLISHED release of the tag is
-#                             a failure), then it creates the draft and returns ITS id;
+#    New-ReleaseDraft         creates the DRAFT of a tag: first it clears the leftovers of the same tag (the
+#                             draft release-please made, the draft of an earlier failed run, a published
+#                             release WITHOUT assets; a published release with assets is a failure), then it
+#                             creates the draft with their notes and returns ITS id;
 #    Publish-ReleaseById      publishes one release by its id and decides whether it becomes the latest
 #                             release (Get-MakeLatestDecision: never a lower version over a higher one);
 #    Remove-RehearsalRelease  the dry run's cleanup: deletes the draft THIS run created (by id) and the
@@ -84,21 +85,25 @@ function Assert-ReleaseId {
 # ----------------------------------------------------------------------------
 #  Reading releases
 # ----------------------------------------------------------------------------
-# { Id; Tag; Draft } of every release of the repository (newest first), read page by page. A draft is listed only for
-# a token that may write the repository contents.
+# { Id; Tag; Draft; Body; AssetCount } of every release of the repository (newest first), read page by page. A draft
+# is listed only for a token that may write the repository contents. AssetCount is -1 when the listing did not say.
 function Get-ReleaseRecords {
     [CmdletBinding()]
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Repo, [scriptblock]$Gh)
     $records = @()
     for ($page = 1; $page -le $script:MaxListPages; $page++) {
-        $result = Invoke-Gh $Gh @('api', "repos/$Repo/releases?per_page=$($script:ListPageSize)&page=$page", '--jq', '.[] | {id, tag_name, draft} | tojson')
+        $result = Invoke-Gh $Gh @('api', "repos/$Repo/releases?per_page=$($script:ListPageSize)&page=$page", '--jq', '.[] | {id, tag_name, draft, body, asset_count: (.assets | length)} | tojson')
         Assert-GhSucceeded $result "Could not list the releases of $Repo" `
             'The list shows the earlier releases of a tag; without it a leftover draft or a published release of the same tag cannot be told apart. Running it again may help if the cause is transient (network, rate limit); it will not help for a token that may not write the repository contents.' `
             'Check the network and that the token has contents: write, then re-run the failed job.'
         $lines = @($result.Stdout -split '\r?\n' | Where-Object { $_.Trim().Length -gt 0 })
         foreach ($line in $lines) {
             $item = $line | ConvertFrom-Json
-            $records += [pscustomobject]@{ Id = [string](Get-JsonProperty $item 'id'); Tag = [string](Get-JsonProperty $item 'tag_name'); Draft = ((Get-JsonProperty $item 'draft') -eq $true) }
+            $count = Get-JsonProperty $item 'asset_count'
+            $records += [pscustomobject]@{
+                Id = [string](Get-JsonProperty $item 'id'); Tag = [string](Get-JsonProperty $item 'tag_name'); Draft = ((Get-JsonProperty $item 'draft') -eq $true)
+                Body = [string](Get-JsonProperty $item 'body'); AssetCount = $(if ($null -eq $count) { -1 } else { [int]$count })
+            }
         }
         if ($lines.Count -lt $script:ListPageSize) { return $records }
     }
@@ -123,20 +128,23 @@ function Get-ReleaseBody {
 # ----------------------------------------------------------------------------
 #  Creating the draft
 # ----------------------------------------------------------------------------
-# Deletes every DRAFT that carries exactly this tag (the leftover of a failed run: "Re-run failed jobs" would
-# otherwise create a second draft with the same tag, which the verifier refuses). A PUBLISHED release with the
-# tag is a failure and nothing is deleted. Returns the ids of the deleted drafts.
+# Deletes every DRAFT that carries exactly this tag: the draft release-please created with the tag, or the leftover
+# of a failed run ("Re-run failed jobs" would otherwise create a second draft with the same tag, which the verifier
+# refuses). A PUBLISHED release of the tag with NO asset is deleted too: one made by hand in the web UI takes
+# releases/latest and breaks every marketplace install until it has assets, and nobody can have downloaded anything
+# from it. A published release with any asset is a failure and nothing is deleted.
+# Returns the notes to carry over: the first non-empty body of the deleted releases (release-please's changelog).
 function Clear-StaleDrafts {
     [CmdletBinding()]
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Repo, [Parameter(Mandatory)][AllowEmptyString()][string]$Tag, [scriptblock]$Gh)
     $same = @(Get-ReleaseRecords -Repo $Repo -Gh $Gh | Where-Object { $_.Tag -ceq $Tag })
-    $published = @($same | Where-Object { -not $_.Draft })
+    $published = @($same | Where-Object { -not $_.Draft -and $_.AssetCount -ne 0 })
     if ($published.Count -gt 0) {
         Write-BuildFailure -What "A published release of $Repo already carries the tag $Tag (id $($published[0].Id))." `
             -Why 'A tag names exactly one release. A second release under it would make verifying and publishing ambiguous, and a published release must never be replaced. Running it again will not help.' `
             -Fix 'Fix forward: release the next patch version (see CONTRIBUTING). Never reuse a published tag.'
     }
-    $deleted = @()
+    $notes = ''
     foreach ($draft in $same) {
         if ($draft.Id -cnotmatch $script:ReleaseIdPattern) {
             Write-BuildFailure -What "The leftover draft of $Tag has the unusable id '$($draft.Id)'." -Why 'It cannot be deleted through the API without its numeric id.' -Fix "Delete the draft by hand (gh release delete $Tag, or in the web UI) and re-run the failed job."
@@ -145,10 +153,11 @@ function Clear-StaleDrafts {
         Assert-GhSucceeded $result "Could not delete the leftover draft $($draft.Id) of $Tag" `
             'The new draft would carry the same tag as the old one, and the verifier refuses two releases for one tag. Running it again may help if the cause is transient.' `
             "Delete the draft by hand (gh release delete $Tag, or in the web UI) and re-run the failed job."
-        Write-Host "Deleted the leftover draft $($draft.Id) of $Tag."
-        $deleted += $draft.Id
+        if ($draft.Draft) { Write-Host "Deleted the leftover draft $($draft.Id) of $Tag." }
+        else { Write-Host "Deleted the published release $($draft.Id) of ${Tag}: it had no assets, so it was not made by this workflow and nobody can have downloaded it." }
+        if (-not $notes -and $draft.Body.Trim()) { $notes = $draft.Body.Trim() }
     }
-    return $deleted
+    return $notes
 }
 
 # Creates the DRAFT release of $Tag with every file of $AssetDir and returns its id (also written as the step
@@ -176,12 +185,16 @@ function New-ReleaseDraft {
     }
     Assert-ReleaseAssetFiles -Directory $AssetDir -Version $parsed.Version -Prefixes $AssetPrefixes
 
-    [void](Clear-StaleDrafts -Repo $Repo -Tag $Tag -Gh $Gh)
+    $notes = Clear-StaleDrafts -Repo $Repo -Tag $Tag -Gh $Gh
+    if (-not $notes.Contains($script:ReleaseNotes)) { $notes = (@($notes, $script:ReleaseNotes) | Where-Object { $_ }) -join "`n`n" }
+    # A file, not --notes: a changelog has lines and quotes that do not survive a command line intact.
+    $notesFile = Join-Path ([IO.Path]::GetTempPath()) "release-notes-$([guid]::NewGuid().ToString('N')).md"
+    [IO.File]::WriteAllText($notesFile, $notes, (Get-Utf8NoBomEncoding))
 
     $assets = @(Get-ChildItem -LiteralPath (Resolve-BuildPath $AssetDir) -File | Sort-Object Name | ForEach-Object { $_.FullName })
-    $arguments = @('release', 'create', $Tag) + $assets + @('--repo', $Repo, '--draft', '--title', $Tag, '--notes', $script:ReleaseNotes)
+    $arguments = @('release', 'create', $Tag) + $assets + @('--repo', $Repo, '--draft', '--title', $Tag, '--notes-file', $notesFile)
     if ($DryRun) { $arguments += @('--target', $Target) } else { $arguments += '--verify-tag' }
-    $create = Invoke-Gh $Gh $arguments $script:UploadTimeoutSeconds
+    try { $create = Invoke-Gh $Gh $arguments $script:UploadTimeoutSeconds } finally { Remove-Item -LiteralPath $notesFile -Force -ErrorAction SilentlyContinue }
 
     # After the clean-up above, a draft with this tag can only be the one this call made, whether or not it finished.
     $mine = @()
