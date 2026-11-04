@@ -241,9 +241,16 @@ Never in the flat `Module.Parameters` container — `get_module_parameters` ther
 
 ### Enumeration internals (`T22`)
 The tools and their rules are in `tool-contracts.md`.
-- **An enum is a real named TypeDef, NOT a file-root subproperty.** `NewSubProperty(PropValType_Enum)` is rejected ("Unrecognized value") and `UpdateEnumerators` on a plain Number throws ("Expected Enumeration, found Number"). Create via `Engine.NewDataType(PropValType_Enum)` → set `Name` → `TypeUsageList.InsertType(type, 0, CustomDataTypes)` → `SetIsTypeAttachedToFile(idx, true)` (so it persists embedded) → `UpdateEnumerators`. Because enums live in the **TypeUsageList** they do not appear in `get_data_types`, which lists file-root subproperties.
+- **An enum is a real named TypeDef, NOT a file-root subproperty.** `NewSubProperty(PropValType_Enum)` is rejected ("Unrecognized value") and `UpdateEnumerators` on a plain Number throws ("Expected Enumeration, found Number"). Create via `Engine.NewDataType(PropValType_Enum)` → set `Name` → `TypeUsageList.InsertType(type, 0, CustomDataTypes)` → `SetIsTypeAttachedToFile(idx, true)` (so it persists embedded) → `UpdateEnumerators`.
 - **Write vs read formats differ.** `UpdateEnumerators` takes an ARRAY of containers, each with `EnumeratorName`/`EnumeratorValue` (+`OldEnumeratorName` for renames; it REPLACES the whole list). But the `Enumerators` getter returns enum-TYPED values — read each one's name with `GetValString("", PropOption_CoerceToString=128)` and number with `GetValNumber("", PropOption_CoerceToNumber=64)`, else "Expected type String/Number. Found type <Enum>."
 - **Use typed interop, never `dynamic`, for `TypeUsageList`/`PropertyObject` here.** The C# dynamic-COM binder throws `TargetParameterCountException` on `GetTypeDefinition` and mis-binds others. A `var tul = ...` off a `dynamic sf` silently re-poisons the chain.
+
+### Custom data type internals (`T17`, 2026-11-04, issue #43)
+The tools and their rules are in `tool-contracts.md`.
+- The data-type tools used to address a file-ROOT subproperty: real types failed with "Unknown variable or property name", and a created "type" could not be instantiated and vanished on save. They now work on the **TypeUsageList**. Create = `Engine.NewDataType` → `InsertType(…, NumTypes, TypeCategory_CustomDataTypes)` → `SetIsTypeAttachedToFile` → `TypeVersion = 1.0.0.0` + `IsModifiedType = false`. Edits change the definition object in place, and existing instances in the file follow immediately.
+- Every field edit bumps the version and clears `IsModifiedType`; a definition left modified with an unchanged version is what `audit_type_consistency` reports as `W_MODIFIED_TYPE`.
+- **Do not rely on `ContainsTypeInstance` on the file root for the in-use check.** It missed a FileGlobal instance in the full suite (order-dependent, never in isolation). `delete_data_type` walks FileGlobals, every sequence's Locals/Parameters and the other types by `PropertyObject.Type.TypeName` (+ array `ElementType`); `ContainsTypeInstance` is only the fallback for step properties.
+- A container with no members fails every value probe in `InferValueKind`; it falls back to `Type.ValueType` so it reports `Container`, not `Unknown`.
 
 ### Step-editing internals (`T31`/`T32`)
 The tools and their rules are in `tool-contracts.md`.

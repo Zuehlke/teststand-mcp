@@ -173,6 +173,7 @@
     "remove_enum_value",
     "remove_search_directory",
     "remove_watch_expression",
+    "rename_data_type_field",
     "rename_enum_value",
     "rename_sequence",
     "rename_step",

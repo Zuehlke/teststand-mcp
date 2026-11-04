@@ -11,9 +11,17 @@ How the write tools behave, where the tool descriptions leave room for a wrong g
 ## Enumerations
 
 - Tools: `create_enum`, `get_enum_values`, `set_enum_values` (replaces the whole list), `add_enum_value`, `remove_enum_value`, `rename_enum_value`, `delete_enum`.
-- An enum is a named numeric type stored in the sequence file. It is one of the file's type definitions, NOT a file-root subproperty, so it does not appear in `get_data_types`. Use `get_enum_values`.
+- An enum is a named numeric type stored in the sequence file. It is one of the file's type definitions, NOT a file-root subproperty. `get_data_types` lists it by name; read its values with `get_enum_values`.
 - Values are `{name, value?}`. An omitted `value` is assigned C-style, previous value plus 1 starting at 0. `add_enum_value` uses the current maximum plus 1.
 - To give a container member or a step subproperty an enum type, create it with `value_type='enum'`, `type_name` and `ordinal` (see Property nodes below), not with a plain number.
+
+## Custom data types
+
+- Tools: `create_data_type`, `add_data_type_field`, `rename_data_type_field`, `remove_data_type_field`, `delete_data_type`, `get_data_type_fields`, `get_data_types`. They work on the file's type definitions, the same ones the Sequence Editor's Types view, `copy_typedefs` and `list_file_typedefs` use, so a type made in the editor or copied from another file can be edited too.
+- `create_data_type` makes a type that is attached to the file, starts at version `1.0.0.0` and can be used at once as the `data_type` of a local, parameter or file global. `base_type` is `Container` (default), `Number`, `String` or `Boolean`. It is refused when the name already exists in the file or is already known to the engine (a type palette or another open file); use `copy_typedefs` for that.
+- `add_data_type_field` takes a dotted `field_name` (`Setup.Inner.Flag`) and creates the missing parent containers. `field_type` is a builtin or the name of another type; append `[]` (or pass `is_array`) for an array. Variables that already use the type get the new field at once.
+- Every field change raises the last part of the type version by one, or sets `type_version`.
+- `delete_data_type` is refused while anything still uses the type, and the error names each user (`FileGlobals.gInst`, `MainSequence.Locals.X`, `type 'Other'.Field`). `force=true` deletes it anyway.
 
 ## Editing step properties
 

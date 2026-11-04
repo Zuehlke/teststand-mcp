@@ -810,11 +810,12 @@ public interface ITestStandService : IDisposable
         string variableName, int newSize);
 
     // Data Type Operations
-    /// <summary>Creates a new custom data type in the specified sequence file.</summary>
+    /// <summary>Creates a new custom data type in the file's TypeUsageList (attached, versioned).</summary>
     Task<DataTypeInfo> CreateDataTypeAsync(string filePath, string typeName,
-        string baseType = "Object");
-    /// <summary>Deletes the named custom data type from the specified sequence file.</summary>
-    Task DeleteDataTypeAsync(string filePath, string typeName);
+        string baseType = "Object", string? typeVersion = null, bool save = true);
+    /// <summary>Removes the named custom data type from the file's TypeUsageList. Refuses a type that
+    /// is still instantiated unless <paramref name="force"/> is set.</summary>
+    Task DeleteDataTypeAsync(string filePath, string typeName, bool force = false, bool save = true);
 
     // ── Enumeration Data Types ───────────────────────────────────────────────
     /// <summary>Creates a new enumeration data type with the given name→value constants.</summary>
@@ -1038,14 +1039,17 @@ public interface ITestStandService : IDisposable
     Task RemoveSearchDirectoryAsync(string path);
 
     // ── Data-Type Field Editing ──────────────────────────────────────────────
-    /// <summary>Adds a field of the given type to the named custom data type.</summary>
-    Task AddDataTypeFieldAsync(string filePath, string typeName, string fieldName,
-        string fieldType, bool save = true);
+    /// <summary>Adds a field (dotted path allowed) to the named custom data type; returns its fields.</summary>
+    Task<List<TypeFieldInfo>> AddDataTypeFieldAsync(string filePath, string typeName, string fieldName,
+        string fieldType, bool save = true, bool isArray = false, string? typeVersion = null);
     /// <summary>Returns all fields defined on the named custom data type.</summary>
     Task<List<TypeFieldInfo>> GetDataTypeFieldsAsync(string filePath, string typeName);
-    /// <summary>Removes the named field from the specified custom data type.</summary>
-    Task RemoveDataTypeFieldAsync(string filePath, string typeName, string fieldName,
-        bool save = true);
+    /// <summary>Removes the named field from the specified custom data type; returns its fields.</summary>
+    Task<List<TypeFieldInfo>> RemoveDataTypeFieldAsync(string filePath, string typeName, string fieldName,
+        bool save = true, string? typeVersion = null);
+    /// <summary>Renames a field of the specified custom data type; returns its fields.</summary>
+    Task<List<TypeFieldInfo>> RenameDataTypeFieldAsync(string filePath, string typeName, string fieldName,
+        string newName, bool save = true, string? typeVersion = null);
 
     // ── CSV Record Streams ───────────────────────────────────────────────────
     /// <summary>Writes lines to a CSV file using the TestStand CSV stream API.</summary>
@@ -3266,6 +3270,13 @@ public sealed class TestStandService : ITestStandService
         try { _ = (double)prop.GetValNumber("", PropOption_CoerceToNumber);
               _ = (string)prop.GetValString("", PropOption_CoerceToString); return "Enum"; }
         catch (Exception) { /* not an enum */ }
+        // A container with no members yet (a freshly created type) fails every probe above.
+        try
+        {
+            if (((NiPropertyObject)(object)prop).Type.ValueType == NiPropValueTypes.PropValType_Container)
+                return "Container";
+        }
+        catch (Exception) { /* not a typed PropertyObject */ }
         return "Unknown";
     }
 
@@ -6516,11 +6527,6 @@ public sealed class TestStandService : ITestStandService
         });
     }
 
-    // The PropertyObjectFile root carries these system entries alongside any user-created
-    // data types; they must be filtered out when listing a file's custom data types.
-    private static readonly HashSet<string> _fileRootSystemProps =
-        new(StringComparer.OrdinalIgnoreCase) { "ChangeCount", "LastSavedChangeCount", "Path", "Data" };
-
     /// <inheritdoc/>
     public async Task<List<DataTypeInfo>> GetDataTypesAsync(string? sequenceFilePath = null)
     {
@@ -6530,32 +6536,22 @@ public sealed class TestStandService : ITestStandService
             var result = new List<DataTypeInfo>();
             try
             {
-                // File context: a file's custom data types are stored as named subproperties on
-                // the file's root PropertyObject — the same store CreateDataTypeAsync writes to and
-                // DeleteDataTypeAsync removes from. Enumerate those (minus the file's own system
-                // entries) so create → list → delete is coherent.
+                // File context: a file's custom data types live in its TypeUsageList — the store
+                // create_data_type / delete_data_type / the field editors write (issue #43). Step types
+                // share that list and are skipped.
                 if (!string.IsNullOrEmpty(sequenceFilePath))
                 {
                     var sf = GetOrLoadSeqFile(sequenceFilePath);
-                    dynamic sfPo = sf.AsPropertyObjectFile();
-                    int cnt = Convert.ToInt32((object)sfPo.GetNumSubProperties((object)""));
-                    for (int i = 0; i < cnt; i++)
+                    foreach (var (name, attached, kind, def) in EnumerateFileTypeDefs((NiTypeUsageList)GetTypeUsageList(sf)))
                     {
-                        string name;
-                        try { name = (string)sfPo.GetNthSubPropertyName((object)"", (object)i, (object)0); }
-                        catch { continue; }
-                        if (_fileRootSystemProps.Contains(name)) continue;
-
-                        string kind = "Container";
-                        bool isArr = false;
-                        int  numEl = 0;
-                        try
+                        try { if (def.TypeCategory == NiTypeCategories.TypeCategory_StepTypes) continue; }
+                        catch (Exception ex) { _logger.LogDebug(ex, "TypeCategory unreadable for '{Name}'.", name); }
+                        result.Add(new DataTypeInfo
                         {
-                            dynamic prop = sfPo.GetPropertyObject((object)name, (object)0);
-                            kind = InferValueKind(prop, out isArr, out numEl);
-                        }
-                        catch (Exception ex) { _logger.LogDebug(ex, "Failed to infer value kind for data type '{Name}'.", name); }
-                        result.Add(new DataTypeInfo { Name = name, BaseType = kind, IsArray = isArr });
+                            Name        = name,
+                            BaseType    = kind,
+                            Description = attached ? "attached-to-file" : "not-attached",
+                        });
                     }
                     return result;
                 }
@@ -10386,31 +10382,148 @@ public sealed class TestStandService : ITestStandService
     }
 
     // ── Data-Type Field Editing ───────────────────────────────────────────────
+    //
+    // A real custom data type lives in the file's TypeUsageList — that is where the Sequence Editor's
+    // Types view, copy_typedefs and insert_file_global/insert_local_variable all look. These writers
+    // used to address a SUBPROPERTY of the file root instead (issue #43): every real type failed with
+    // "Unknown variable or property name", and the "types" create_data_type made there could not be
+    // instantiated and vanished on save. Edits go to the TypeUsageList definition, which updates the
+    // file's existing instances immediately.
+
+    /// <summary>Resolves an EDITABLE custom data type: its TypeUsageList index and definition. Refuses a
+    /// step type (fields of a step type are not data-type fields) and names list_file_typedefs when the
+    /// type is missing.</summary>
+    private (int Index, NiPropertyObject Def) ResolveFileDataType(object sf, string typeName, string filePath)
+    {
+        NiTypeUsageList tul = GetTypeUsageList(sf);
+        int idx = -1;
+        try { idx = tul.GetTypeIndex(typeName); }
+        catch (Exception ex) { _logger.LogDebug(ex, "GetTypeIndex failed for type '{Type}'.", typeName); }
+        if (idx < 0)
+            throw new ArgumentException(
+                $"Data type '{typeName}' not found in the TypeUsageList of '{Path.GetFileName(filePath)}'. " +
+                "Use list_file_typedefs to see the file's custom types, create_data_type to create one, or " +
+                "copy_typedefs to bring one in from another file.");
+
+        NiPropertyObject def = tul.GetTypeDefinition(idx);
+        NiTypeCategories cat = NiTypeCategories.TypeCategory_CustomDataTypes;
+        try { cat = def.TypeCategory; }
+        catch (Exception ex) { _logger.LogDebug(ex, "TypeCategory unreadable for '{Type}'.", typeName); }
+        if (cat == NiTypeCategories.TypeCategory_StepTypes)
+            throw new ArgumentException($"'{typeName}' is a step type, not a data type.");
+        return (idx, def);
+    }
+
+    /// <summary>Maps a field/type keyword to a TestStand value type. Anything that is not a builtin
+    /// keyword is the NAME of another type (a named-type field); a trailing <c>[]</c> makes it an array.</summary>
+    public static (NiPropValueTypes ValType, string TypeName, bool IsArray) ParseDataTypeFieldType(
+        string fieldType, bool isArray = false)
+    {
+        string t = (fieldType ?? "").Trim();
+        if (t.EndsWith("[]", StringComparison.Ordinal)) { isArray = true; t = t[..^2].Trim(); }
+        if (t.Length == 0) throw new ArgumentException("field_type must not be empty.");
+        return t.ToLowerInvariant() switch
+        {
+            "number" or "double"              => (NiPropValueTypes.PropValType_Number,    "", isArray),
+            "string"                          => (NiPropValueTypes.PropValType_String,    "", isArray),
+            "boolean" or "bool"               => (NiPropValueTypes.PropValType_Boolean,   "", isArray),
+            "container"                       => (NiPropValueTypes.PropValType_Container, "", isArray),
+            "reference" or "object reference" => (NiPropValueTypes.PropValType_Reference, "", isArray),
+            _                                 => (NiPropValueTypes.PropValType_NamedType, t,  isArray),
+        };
+    }
+
+    /// <summary>Increments the LAST component of a dotted type version ("1.0.0.0" → "1.0.0.1"). An empty
+    /// or unparsable version starts over at "1.0.0.1".</summary>
+    public static string BumpTypeVersion(string? version)
+    {
+        var parts = (version ?? "").Split('.');
+        if (parts.Length == 0 || parts.Length > 4 || parts.Any(p => !int.TryParse(p, out _)))
+            return "1.0.0.1";
+        var nums = parts.Select(int.Parse).ToList();
+        while (nums.Count < 4) nums.Add(0);
+        nums[^1]++;
+        return string.Join(".", nums);
+    }
+
+    /// <summary>Stamps a just-edited type definition: an explicit <paramref name="typeVersion"/> or the
+    /// bumped current one, and IsModifiedType cleared — a definition left "modified" with an unchanged
+    /// version is what audit_type_consistency reports as W_MODIFIED_TYPE.</summary>
+    private void StampEditedType(NiPropertyObject def, string? typeVersion, dynamic sf)
+    {
+        string current = "";
+        try { current = def.TypeVersion; } catch { }
+        try { def.TypeVersion = string.IsNullOrWhiteSpace(typeVersion) ? BumpTypeVersion(current) : typeVersion!.Trim(); }
+        catch (Exception ex) { _logger.LogDebug(ex, "Could not set TypeVersion on '{Type}'.", def.Name); }
+        try { def.IsModifiedType = false; }
+        catch (Exception ex) { _logger.LogDebug(ex, "Could not clear IsModifiedType on '{Type}'.", def.Name); }
+        ((PropertyObjectFile)(object)sf.AsPropertyObjectFile()).IncChangeCount();
+    }
 
     /// <inheritdoc/>
-    public async Task AddDataTypeFieldAsync(string filePath, string typeName,
-        string fieldName, string fieldType, bool save = true)
+    public async Task<List<TypeFieldInfo>> AddDataTypeFieldAsync(string filePath, string typeName,
+        string fieldName, string fieldType, bool save = true, bool isArray = false,
+        string? typeVersion = null)
     {
         EnsureConnected();
-        await Task.Run(() =>
+        return await Task.Run(() =>
         {
-            var sf       = GetOrLoadSeqFile(filePath);
-            dynamic sfPo = sf.AsPropertyObjectFile();
-            dynamic typePo = sfPo.GetPropertyObject((object)typeName, (object)0);
+            var sf = GetOrLoadSeqFile(filePath);
+            var (_, def) = ResolveFileDataType((object)sf, typeName, filePath);
+            var (valType, namedType, asArray) = ParseDataTypeFieldType(fieldType, isArray);
 
-            int valType; string typeParam;
-            switch (fieldType.ToLowerInvariant())
+            if (def.Exists(fieldName, 0))
+                throw new InvalidOperationException($"Field '{fieldName}' already exists on type '{typeName}'.");
+
+            // A dotted path ('Setup.Inner.Flag') creates its missing parent containers first.
+            var segments = fieldName.Split('.');
+            for (int i = 1; i < segments.Length; i++)
             {
-                case "number": case "double": valType = (int)NiPropValueTypes.PropValType_Number;  typeParam = ""; break;
-                case "string":               valType = (int)NiPropValueTypes.PropValType_String;  typeParam = ""; break;
-                case "boolean": case "bool": valType = (int)NiPropValueTypes.PropValType_Boolean; typeParam = ""; break;
-                default:                     valType = (int)NiPropValueTypes.PropValType_NamedType; typeParam = fieldType; break;
+                string parent = string.Join(".", segments.Take(i));
+                if (!def.Exists(parent, 0))
+                    def.NewSubProperty(parent, NiPropValueTypes.PropValType_Container, false, "", 0);
             }
 
-            typePo.NewSubProperty((object)fieldName, (object)valType, (object)false,
-                (object)typeParam, (object)0);
+            if (valType == NiPropValueTypes.PropValType_NamedType)
+            {
+                // Fail with the type's name rather than the engine's bare "Could not find type".
+                try { _engine!.NewPropertyObject(NiPropValueTypes.PropValType_NamedType, false, namedType, 0); }
+                catch (Exception ex)
+                {
+                    throw new ArgumentException(
+                        $"Field type '{namedType}' is neither a builtin (Number, String, Boolean, Container, " +
+                        "Reference) nor a type known to the engine. Create or copy that type first.", ex);
+                }
+            }
+
+            def.NewSubProperty(fieldName, valType, asArray, namedType, 0);
+            StampEditedType(def, typeVersion, sf);
 
             if (save) { SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath); _loadedSequenceFiles[filePath] = sf; }
+            return ReadTypeFields(def);
+        });
+    }
+
+    /// <inheritdoc/>
+    public async Task<List<TypeFieldInfo>> RenameDataTypeFieldAsync(string filePath, string typeName,
+        string fieldName, string newName, bool save = true, string? typeVersion = null)
+    {
+        EnsureConnected();
+        return await Task.Run(() =>
+        {
+            var sf = GetOrLoadSeqFile(filePath);
+            var (_, def) = ResolveFileDataType((object)sf, typeName, filePath);
+            if (!def.Exists(fieldName, 0))
+                throw new ArgumentException($"Field '{fieldName}' not found on type '{typeName}'.");
+            if (string.IsNullOrWhiteSpace(newName) || newName.Contains('.'))
+                throw new ArgumentException("new_name must be a plain field name (no dots).");
+
+            NiPropertyObject field = def.GetPropertyObject(fieldName, 0);
+            field.Name = newName;
+            StampEditedType(def, typeVersion, sf);
+
+            if (save) { SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath); _loadedSequenceFiles[filePath] = sf; }
+            return ReadTypeFields(def);
         });
     }
 
@@ -10431,17 +10544,22 @@ public sealed class TestStandService : ITestStandService
     }
 
     /// <inheritdoc/>
-    public async Task RemoveDataTypeFieldAsync(string filePath, string typeName,
-        string fieldName, bool save = true)
+    public async Task<List<TypeFieldInfo>> RemoveDataTypeFieldAsync(string filePath, string typeName,
+        string fieldName, bool save = true, string? typeVersion = null)
     {
         EnsureConnected();
-        await Task.Run(() =>
+        return await Task.Run(() =>
         {
-            var sf       = GetOrLoadSeqFile(filePath);
-            dynamic sfPo = sf.AsPropertyObjectFile();
-            dynamic typePo = sfPo.GetPropertyObject((object)typeName, (object)0);
-            typePo.DeleteSubProperty((object)fieldName, (object)0);
+            var sf = GetOrLoadSeqFile(filePath);
+            var (_, def) = ResolveFileDataType((object)sf, typeName, filePath);
+            if (!def.Exists(fieldName, 0))
+                throw new ArgumentException($"Field '{fieldName}' not found on type '{typeName}'.");
+
+            def.DeleteSubProperty(fieldName, 0);
+            StampEditedType(def, typeVersion, sf);
+
             if (save) { SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath); _loadedSequenceFiles[filePath] = sf; }
+            return ReadTypeFields(def);
         });
     }
 
@@ -12597,57 +12715,157 @@ public sealed class TestStandService : ITestStandService
 
     /// <inheritdoc/>
     public async Task<DataTypeInfo> CreateDataTypeAsync(string filePath, string typeName,
-        string baseType = "Object")
+        string baseType = "Object", string? typeVersion = null, bool save = true)
     {
         EnsureConnected();
         return await Task.Run(() =>
         {
-            var sf   = GetOrLoadSeqFile(filePath);
-            // AsPropertyObjectFile() gives the root PropertyObject of the sequence file.
-            // PropValType_Container (0) creates a container/struct type (no base-type lookup).
-            // PropValType_NamedType (4) requires an existing named type as a base.
-            dynamic sfPo = sf.AsPropertyObjectFile();
+            var sf = GetOrLoadSeqFile(filePath);
+            NiTypeUsageList tul = GetTypeUsageList(sf);
 
-            bool useNamedType = !string.IsNullOrEmpty(baseType)
-                             && !baseType.Equals("Object", StringComparison.OrdinalIgnoreCase);
-            int valType = useNamedType
-                ? (int)NiPropValueTypes.PropValType_NamedType
-                : (int)NiPropValueTypes.PropValType_Container;
-            string typeParam = useNamedType ? baseType : "";
+            // A type is a container (the usual case: fields are added afterwards) or a named leaf. It
+            // cannot "derive" from another named type — model that as a field of that type instead.
+            NiPropValueTypes valType = (baseType ?? "").Trim().ToLowerInvariant() switch
+            {
+                "" or "object" or "container" => NiPropValueTypes.PropValType_Container,
+                "number" or "double"          => NiPropValueTypes.PropValType_Number,
+                "string"                      => NiPropValueTypes.PropValType_String,
+                "boolean" or "bool"           => NiPropValueTypes.PropValType_Boolean,
+                _ => throw new ArgumentException(
+                    $"base_type '{baseType}' is not supported. Use Container (default), Number, String or " +
+                    "Boolean; to embed another type, add a field of that type with add_data_type_field."),
+            };
 
-            sfPo.NewSubProperty(
-                (object)typeName,
-                (object)valType,
-                (object)false,
-                (object)typeParam,
-                (object)0);
+            int existing = -1;
+            try { existing = tul.GetTypeIndex(typeName); }
+            catch (Exception ex) { _logger.LogDebug(ex, "GetTypeIndex failed for '{Type}'.", typeName); }
+            if (existing >= 0)
+                throw new InvalidOperationException(
+                    $"Type '{typeName}' already exists in '{Path.GetFileName(filePath)}'.");
 
-            SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
-            _loadedSequenceFiles[filePath] = sf;
+            // A same-named type already loaded elsewhere (a palette, another open file) would make this
+            // file open with a type-conflict dialog — refuse rather than register a second definition.
+            bool knownElsewhere = false;
+            try { _engine!.NewPropertyObject(NiPropValueTypes.PropValType_NamedType, false, typeName, 0); knownElsewhere = true; }
+            catch { /* unknown type name → free to create */ }
+            if (knownElsewhere)
+                throw new InvalidOperationException(
+                    $"A type named '{typeName}' is already known to the engine (type palette or another loaded " +
+                    "file). Use copy_typedefs to bring that definition in, or pick another name.");
 
-            return new DataTypeInfo { Name = typeName, BaseType = baseType };
+            NiPropertyObject created = _engine!.NewDataType(valType, false, "", 0);
+            created.Name = typeName;
+            tul.InsertType(created, tul.NumTypes, NiTypeCategories.TypeCategory_CustomDataTypes);
+            int idx = tul.GetTypeIndex(typeName);
+            if (idx < 0)
+                throw new InvalidOperationException($"Type '{typeName}' did not register in the TypeUsageList.");
+            tul.SetIsTypeAttachedToFile(idx, true);
+
+            NiPropertyObject stored = tul.GetTypeDefinition(idx);
+            stored.TypeVersion    = string.IsNullOrWhiteSpace(typeVersion) ? "1.0.0.0" : typeVersion!.Trim();
+            stored.IsModifiedType = false;
+            ((PropertyObjectFile)(object)sf.AsPropertyObjectFile()).IncChangeCount();
+
+            if (save) { SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath); _loadedSequenceFiles[filePath] = sf; }
+            return new DataTypeInfo
+            {
+                Name        = typeName,
+                BaseType    = InferValueKind(stored, out _, out _),
+                Description = "attached-to-file",
+            };
         });
     }
 
+    /// <summary>Collects the dotted paths below <paramref name="po"/> whose type — or array element type —
+    /// is <paramref name="typeName"/>. Does not descend into a match; bounded depth.</summary>
+    private static void CollectTypeUsages(NiPropertyObject po, string path, string typeName,
+        List<string> users, int depth)
+    {
+        if (po == null || depth > 32) return;
+        int n;
+        try { n = po.GetNumSubProperties(""); } catch { return; }
+        for (int i = 0; i < n; i++)
+        {
+            NiPropertyObject child; string childName;
+            try
+            {
+                childName = po.GetNthSubPropertyName("", i, 0);
+                child = (NiPropertyObject)(object)po.GetNthSubProperty("", i, 0);
+            }
+            catch { continue; }
+            string childPath = $"{path}.{childName}";
+
+            bool match = false;
+            try
+            {
+                var t = child.Type;
+                match = string.Equals(t.TypeName, typeName, StringComparison.OrdinalIgnoreCase)
+                     || (t.ValueType == NiPropValueTypes.PropValType_Array &&
+                         string.Equals(t.ElementType?.TypeName, typeName, StringComparison.OrdinalIgnoreCase));
+            }
+            catch { /* untyped node — keep walking */ }
+
+            if (match) users.Add(childPath);
+            else CollectTypeUsages(child, childPath, typeName, users, depth + 1);
+        }
+    }
+
     /// <inheritdoc/>
-    public async Task DeleteDataTypeAsync(string filePath, string typeName)
+    public async Task DeleteDataTypeAsync(string filePath, string typeName, bool force = false,
+        bool save = true)
     {
         EnsureConnected();
         await Task.Run(() =>
         {
-            var sf   = GetOrLoadSeqFile(filePath);
-            dynamic sfPo = sf.AsPropertyObjectFile();
+            var sf = GetOrLoadSeqFile(filePath);
+            var (idx, _) = ResolveFileDataType((object)sf, typeName, filePath);
+            NiTypeUsageList tul = GetTypeUsageList(sf);
 
-            // Check existence first to give a meaningful error
-            bool exists = false;
-            try { exists = (bool)sfPo.Exists((object)typeName, (object)0); } catch (Exception ex) { _logger.LogDebug(ex, "Failed to check existence of data type '{TypeName}'.", typeName); }
-            if (!exists)
-                throw new InvalidOperationException(
-                    $"Data type '{typeName}' not found in '{Path.GetFileName(filePath)}'.");
+            if (!force)
+            {
+                // Removing a type that is still instantiated leaves those instances without a definition.
+                // The variables and the other types are walked explicitly: ContainsTypeInstance on the
+                // file root alone missed a FileGlobal instance depending on what ran before (measured in
+                // the full suite, never in isolation), so it is only the fallback for step properties.
+                var users = new List<string>();
+                var walkRoots = new List<(string Path, NiPropertyObject Po)>();
+                try { walkRoots.Add(("FileGlobals", GetFileGlobals(sf))); }
+                catch (Exception ex) { _logger.LogDebug(ex, "FileGlobals unreadable while checking '{Type}'.", typeName); }
+                var nsf = (NiSequenceFile)(object)sf;
+                for (int i = 0; i < nsf.NumSequences; i++)
+                {
+                    try
+                    {
+                        var seq = nsf.GetSequence(i);
+                        walkRoots.Add(($"{seq.Name}.Locals",     seq.Locals));
+                        walkRoots.Add(($"{seq.Name}.Parameters", seq.Parameters));
+                    }
+                    catch (Exception ex) { _logger.LogDebug(ex, "Sequence {Index} unreadable while checking '{Type}'.", i, typeName); }
+                }
+                foreach (var (name, _, _, def) in EnumerateFileTypeDefs(tul))
+                    if (!string.Equals(name, typeName, StringComparison.OrdinalIgnoreCase))
+                        walkRoots.Add(($"type '{name}'", def));
+                foreach (var (path, po) in walkRoots)
+                    CollectTypeUsages(po, path, typeName, users, depth: 0);
 
-            sfPo.DeleteSubProperty((object)typeName, (object)0);
-            SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
-            _loadedSequenceFiles[filePath] = sf;
+                if (users.Count == 0)
+                {
+                    try
+                    {
+                        var root = (NiPropertyObject)(object)sf.AsPropertyObject();
+                        if (root.ContainsTypeInstance("", 0, typeName)) users.Add("a step of the sequence file");
+                    }
+                    catch (Exception ex) { _logger.LogDebug(ex, "ContainsTypeInstance failed on the file for '{Type}'.", typeName); }
+                }
+                if (users.Count > 0)
+                    throw new InvalidOperationException(
+                        $"Type '{typeName}' is still used by {string.Join(", ", users)}. Remove those " +
+                        "instances first, or pass force=true to remove the definition anyway.");
+            }
+
+            tul.RemoveType(idx);
+            ((PropertyObjectFile)(object)sf.AsPropertyObjectFile()).IncChangeCount();
+            if (save) { SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath); _loadedSequenceFiles[filePath] = sf; }
         });
     }
 
