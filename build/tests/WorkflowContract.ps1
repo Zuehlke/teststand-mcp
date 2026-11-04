@@ -186,7 +186,8 @@ $ExpectedWorkflows = @('ci.yml', 'pages.yml', 'pr-title.yml', 'release-please.ym
     #  Every workflow
     # ============================================================================================
     Invoke-Case 'all workflows: the known workflows exist and nothing else was added unseen' {
-        Assert-Equal ($ExpectedWorkflows -join ',') ($AllWorkflows -join ',') 'workflow files'
+        # Both sides through the same Sort-Object: 5.1 and 7 order 'release-please.yml' and 'release.yml' differently.
+        Assert-Equal (@($ExpectedWorkflows | Sort-Object) -join ',') ($AllWorkflows -join ',') 'workflow files'
     }
 
     foreach ($file in $AllWorkflows) {
