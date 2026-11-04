@@ -45,7 +45,8 @@ commit cannot land after release-please starts counting.
 - `types: [opened, edited, synchronize, reopened]` on `pull_request`, so a title edit re-runs it, plus
   `workflow_dispatch` for the release PR. `ci.yml` gets `workflow_dispatch` too.
 - The job needs `pull-requests: read` only.
-- A skipped job reports success, so a run without a PR (push, dispatch) does not block a required check.
+- A skipped job is expected to report success, so a run without a PR (push, dispatch) is expected not to block
+  a required check. To be confirmed on the first release PR (see Risks).
 - The rules live in `build/tests/WorkflowContract.ps1`, each proven to fail by a row in
   `build/tests/WorkflowMutations.Tests.ps1`.
 

@@ -273,14 +273,14 @@ try {
         $fake = New-FakeGh -Releases @((New-Release 35 'v1.9.0' $false)) -OmitAssetCount
         $failure = Get-Failure { New-ReleaseDraft -Repo $Repo -Tag 'v1.9.0' -AssetDir (New-AssetFolder) -Gh $fake.Gh }
         Assert-ThreePartFailure $failure
-        Assert-Contains $failure 'with assets already carries the tag v1.9.0 (id 35)' 'the refusal, not some other failure'
+        Assert-Contains $failure 'with an unknown number of assets already carries the tag v1.9.0 (id 35)' 'the refusal, not some other failure'
         Assert-Equal 0 @(Get-DeleteCalls $fake).Count 'deleted releases'
     }
 
     Invoke-Case 'draft: the listing filter, run by real jq over a GitHub-shaped response, gives the bodies and asset counts the decision needs' {
         $jq = Get-Command jq -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($null -eq $jq) {
-            # gh's --jq is jq -r (strings come out raw); the runners have jq, so only a maintainer's machine may lack it.
+            # gh's --jq (gojq) prints strings raw like jq -r; the runners have jq, so only a maintainer's machine may lack it.
             Assert-True ($env:CI -ne 'true') 'jq is missing on a CI runner, so the filter that decides a deletion was not run'
             Write-Host 'SKIP  jq is not on the PATH; the listing filter was not run.'
             return
@@ -334,7 +334,7 @@ try {
         Assert-True (-not ($bytes.Length -ge 3 -and $bytes[0] -eq $Utf8Bom[0] -and $bytes[1] -eq $Utf8Bom[1] -and $bytes[2] -eq $Utf8Bom[2])) 'the notes file has no BOM'
         Assert-True (-not (Test-Path -LiteralPath $fake.State.NotesFiles[0])) 'the notes file is removed after a successful create'
         $failing = New-FakeGh -Fail @{ '\Arelease create' = 'gh: upload failed' }
-        [void](Get-Failure { New-ReleaseDraft -Repo $Repo -Tag 'v1.9.0' -AssetDir (New-AssetFolder) -Gh $failing.Gh })
+        Assert-True ($null -ne (Get-Failure { New-ReleaseDraft -Repo $Repo -Tag 'v1.9.0' -AssetDir (New-AssetFolder) -Gh $failing.Gh })) 'the create failed'
         Assert-Equal 1 $failing.State.NotesFiles.Count 'the failing create was given a notes file'
         Assert-True (-not (Test-Path -LiteralPath $failing.State.NotesFiles[0])) 'the notes file is removed after a failed create'
     }

@@ -627,6 +627,7 @@ $ExpectedWorkflows = @('ci.yml', 'pages.yml', 'pr-title.yml', 'release-please.ym
         Assert-Contains $collector 'OWN_DOWNLOADS_FILE = "own-downloads.json"' 'the collector reads the file of this name'
         Assert-Contains $collector 'RELEASE_WORKFLOW_PATH = ".github/workflows/release.yml"' 'the collector accepts runs of this workflow file'
         Assert-Contains $collector 'RELEASE_PLEASE_WORKFLOW_PATH = ".github/workflows/release-please.yml"' 'the collector accepts runs of the caller too: a called workflow uploads into the run of its caller'
+        Assert-Contains $collector 'OWN_RUN_WORKFLOW_PATHS = (RELEASE_WORKFLOW_PATH, RELEASE_PLEASE_WORKFLOW_PATH)' 'both workflows are in the accepted set'
     }
 
     Invoke-Case 'release.yml: every step that calls GitHub or a build script has its own timeout' {
@@ -661,6 +662,7 @@ $ExpectedWorkflows = @('ci.yml', 'pages.yml', 'pr-title.yml', 'release-please.ym
         Assert-Contains $rpJob 'config-file: release-please-config.json' 'the config file'
         Assert-Contains $rpJob 'manifest-file: .release-please-manifest.json' 'the manifest file'
         $config = Read-JsonFile -Path (Join-Path $ConfigRoot 'release-please-config.json') -Why 'release-please reads it on every push to main.'
+        Assert-Equal 'simple' "$(Get-JsonProperty $config 'release-type')" 'release-type simple: the version lives only in the manifest, the build takes it from the tag'
         Assert-True ((Get-JsonProperty $config 'draft') -eq $true) 'draft: true, or releases/latest points at a release without assets until release.yml uploads them'
         Assert-True ((Get-JsonProperty $config 'force-tag-creation') -eq $true) 'force-tag-creation: true, or a draft has no tag and the gate and --verify-tag fail'
         Assert-True ((Get-JsonProperty $config 'include-component-in-tag') -eq $false) 'the tag must be vX.Y.Z, the only shape the gate accepts'

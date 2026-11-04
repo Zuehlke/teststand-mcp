@@ -29,7 +29,8 @@ $script:ReleaseIdPattern = '\A[0-9]+\z'
 $script:ReleaseNotes = 'Built and verified by the release workflow. Install it through the Claude Code plugin marketplace.'
 $script:NotFoundPattern = 'HTTP 404'
 $script:UnknownAssetCount = -1   # the listing did not say: such a published release is never replaceable
-# What one listed release is reduced to. A constant, so the tests can run it through real jq (gh's --jq is jq).
+# What one listed release is reduced to. A constant, so the tests can run it through real jq (gh evaluates --jq
+# with gojq, a jq-compatible implementation; both agree on this filter).
 $script:ReleaseListFilter = '.[] | {id, tag_name, draft, body, asset_count: (.assets | length)} | tojson'
 
 # ----------------------------------------------------------------------------
@@ -137,6 +138,7 @@ function Get-ReleaseBody {
 # create a second draft, which the verifier refuses) and a PUBLISHED release with NO asset (one made by hand in the
 # web UI takes releases/latest and serves no file, so every marketplace install fails until it has assets).
 function Test-ReplaceableRelease {
+    [CmdletBinding()]
     param($Release)
     return ($Release.Draft -or $Release.AssetCount -eq 0)
 }
@@ -146,9 +148,10 @@ function Test-ReplaceableRelease {
 function Remove-ReplaceableReleases {
     [CmdletBinding()]
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Repo, [Parameter(Mandatory)][AllowEmptyString()][string]$Tag, [object[]]$Releases = @(), [scriptblock]$Gh)
-    $kept = @($Releases | Where-Object { -not (Test-ReplaceableRelease $_) })
-    if ($kept.Count -gt 0) {
-        Write-BuildFailure -What "A published release of $Repo with assets already carries the tag $Tag (id $($kept[0].Id))." `
+    $blocking = @($Releases | Where-Object { -not (Test-ReplaceableRelease $_) })
+    if ($blocking.Count -gt 0) {
+        $which = if ($blocking[0].AssetCount -eq $script:UnknownAssetCount) { 'with an unknown number of assets' } else { 'with assets' }
+        Write-BuildFailure -What "A published release of $Repo $which already carries the tag $Tag (id $($blocking[0].Id))." `
             -Why 'A tag names exactly one release. A second release under it would make verifying and publishing ambiguous, and a published release that users may have downloaded must never be replaced. Running it again will not help.' `
             -Fix 'Fix forward: release the next patch version (see CONTRIBUTING). Never reuse a published tag.'
     }
@@ -168,6 +171,7 @@ function Remove-ReplaceableReleases {
 # The notes a new draft takes over from the releases it replaces: the first non-empty body among $Releases (newest
 # first; release-please's draft carries the changelog), trimmed, or '' when none has one.
 function Get-CarriedOverNotes {
+    [CmdletBinding()]
     param([object[]]$Releases = @())
     foreach ($release in $Releases) { if ($release.Body.Trim()) { return $release.Body.Trim() } }
     return ''
@@ -176,7 +180,8 @@ function Get-CarriedOverNotes {
 # The notes of a new draft: the carried-over notes, then the workflow's fixed line, which is appended only once (a
 # re-run carries over the notes of its own earlier draft, which already end with it).
 function Join-ReleaseNotes {
-    param([string]$Carried)
+    [CmdletBinding()]
+    param([AllowEmptyString()][string]$Carried)
     if ($Carried.Contains($script:ReleaseNotes)) { return $Carried }
     return ((@($Carried, $script:ReleaseNotes) | Where-Object { $_ }) -join "`n`n")
 }

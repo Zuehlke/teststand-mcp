@@ -305,6 +305,14 @@ try {
         Assert-Contains $missing.Output 'fetch-depth: 0' 'the fix'
     }
 
+    Invoke-Case 'gate: an ANNOTATED tag is resolved to its commit, not to the tag object' {
+        $repo = New-MainFixture
+        [void](& $repo.Git @('tag', '-a', 'v1.9.0', '-m', 'release', $repo.OnMain))
+        $run = Invoke-Script $TagGatePath @{ Tag = 'v1.9.0'; Commit = $repo.OnMain; MainRef = 'refs/heads/main'; RepoRoot = $repo.Dir }
+        Assert-Equal 0 $run.ExitCode "exit code. Output was:`n$($run.Output)"
+        Assert-Contains $run.Output "Tag v1.9.0 points at $($repo.OnMain)" 'the tag check says it ran'
+    }
+
     Invoke-Case 'gate: -MainRef naming a branch the clone does not have fails and says to fetch the full history' {
         $repo = New-MainFixture
         $run = Invoke-Script $TagGatePath @{ Tag = 'v1.9.0'; Commit = $repo.OnMain; MainRef = 'refs/remotes/origin/main'; RepoRoot = $repo.Dir }

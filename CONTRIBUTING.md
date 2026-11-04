@@ -87,9 +87,11 @@ What the workflow does, in order:
 
 A failed verification leaves a draft. `releases/latest` never moves until the whole check has passed. To run it
 again, use Re-run failed jobs on the run: the leftover draft of the tag is deleted first, so the second run
-does not collide with the first. If a PUBLISHED release with assets already carries the tag, the run stops with:
+does not collide with the first. If the first run failed after it had already replaced release-please's draft, the
+re-run's notes hold only the workflow's fixed line: paste the version's section of `CHANGELOG.md` into the release
+notes after it is published. If a PUBLISHED release with assets already carries the tag, the run stops with:
 
-> A published release of <...> with assets already carries the tag <...> (id <...>).
+> A published release of <...> already carries the tag <...> (id <...>).
 
 That tag is spent. Fix forward with the next patch version.
 
@@ -142,19 +144,18 @@ nothing:
 Merge the change into `main`, then move the tag to the merged commit with the same four commands.
 
 The gate also checks that the tag points at the commit the run builds. A run called by release-please builds the
-commit of the push that started it, which is the tagged commit unless release-please created the release late
-(its run for the merge was cancelled or failed, and a later push caught up). The gate then stops with:
+commit of the push that started it, which is the tagged commit. That changes only when release-please created the
+release late: its run for the merge was cancelled or failed, and a later push caught up. The gate then stops with:
 
 > The tag <...> points at <...>, but this run builds <...>.
 
-Release the tagged commit: delete the remote tag and push it again at the commit the message names first, while
-no published release names the tag. The push starts a run on that commit, which also replaces release-please's
-draft of the tag:
+To release the tagged commit, first confirm that no published release names the tag. Then delete the remote tag
+and push it again at the commit the message names first (`<tagged sha>` below). Push the sha, not your local tag,
+which may point elsewhere. The push starts a run on that commit, which also replaces release-please's draft:
 
 ```powershell
-git fetch --tags
 git push origin --delete refs/tags/v1.9.3
-git push origin v1.9.3
+git push origin <tagged sha>:refs/tags/v1.9.3
 ```
 
 A dry run skips both checks: it may run from any branch and publishes nothing. To check locally before you push, add

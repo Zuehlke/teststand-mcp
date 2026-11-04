@@ -108,13 +108,14 @@ bin/CLAUDE.md                   the user rules of the skill, generated; no READM
 ### Release workflow
 
 - **AC-1 Tag gate.** The release workflow triggers on **every** tag push, so the gate sees each
-  mistake. Amended (2026-11-04): it is also called by `release-please.yml` with the tag release-please
-  created, and for a real release the gate also requires the tag to point at the commit the run builds. GitHub's `v*` filter is case-sensitive, which means a `V1.9.0` tag would otherwise start
+  mistake. GitHub's `v*` filter is case-sensitive, which means a `V1.9.0` tag would otherwise start
   nothing and give the maintainer no answer. A tag that is not exactly `v<major>.<minor>.<patch>`
   (lower-case `v`, three numeric parts) fails the workflow at its first step, before any build. The
   output names the problem and gives the retag commands in a safe order (delete the remote tag,
   delete the local tag, create the new tag, push). No asset is published.
   `build/Assert-ReleaseTag.ps1` gives the same verdict when run locally.
+  Amended (2026-11-04): it is also called by `release-please.yml` with the tag release-please
+  created, and for a real release the gate also requires the tag to point at the commit the run builds.
 - **AC-2 Packaging layout spike (one-time, before the packaging is built).** On a TestStand station,
   three layouts are each driven through the four flows below:
   - self-contained single-file;

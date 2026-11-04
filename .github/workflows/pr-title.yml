@@ -6,7 +6,7 @@
 # Its own workflow, so a title edit re-runs this check only, never the 30-minute ci.yml. The release PR is
 # opened with the workflow token, which starts no pull_request run: release-please.yml dispatches this
 # workflow on that branch, and the job is then skipped, which a required check is expected to count as passed
-# (confirmed on the first release PR, see plans/release-please.md).
+# (to be confirmed on the first release PR, see Risks in plans/release-please.md).
 name: pr-title
 
 on:

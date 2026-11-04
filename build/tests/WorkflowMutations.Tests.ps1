@@ -37,9 +37,9 @@ $ConfigFiles = @('release-please-config.json', '.release-please-manifest.json', 
 
 # The text of one file with the mutation applied when it names that file.
 function Get-MutatedText {
-    param([string]$Path, [string]$Name, $Mutation)
+    param([string]$Path, [string]$RelativePath, $Mutation)
     $text = [IO.File]::ReadAllText($Path).Replace("`r`n", "`n")
-    if ($null -eq $Mutation -or $Name -cne $Mutation.File) { return $text }
+    if ($null -eq $Mutation -or $RelativePath -cne $Mutation.File) { return $text }
     $at = $text.IndexOf($Mutation.Old, [StringComparison]::Ordinal)
     if ($at -lt 0) { throw "the mutation '$($Mutation.Name)' does not apply: its text is not in $($Mutation.File):`n$($Mutation.Old)" }
     return $text.Substring(0, $at) + $Mutation.New + $text.Substring($at + $Mutation.Old.Length)
@@ -186,6 +186,8 @@ Add-Mutation 'config: a component in the tag' 'release-please-config.json' 'crea
 Add-Mutation 'config: no GitHub release at all' 'release-please-config.json' 'creates a DRAFT with its tag' '"draft": true,' "`"draft`": true,`n  `"skip-github-release`": true,"
 Add-Mutation 'manifest: not a plain version' '.release-please-manifest.json' 'creates a DRAFT with its tag' '"1.9.2"' '"v1.9.2"'
 Add-Mutation 'collector: release-please runs no longer accepted' '.github/stats/collect.py' 'own-downloads is uploaded' 'RELEASE_PLEASE_WORKFLOW_PATH = ".github/workflows/release-please.yml"' 'RELEASE_PLEASE_WORKFLOW_PATH = ".github/workflows/other.yml"'
+Add-Mutation 'collector: release-please dropped from the accepted set' '.github/stats/collect.py' 'own-downloads is uploaded' 'OWN_RUN_WORKFLOW_PATHS = (RELEASE_WORKFLOW_PATH, RELEASE_PLEASE_WORKFLOW_PATH)' 'OWN_RUN_WORKFLOW_PATHS = (RELEASE_WORKFLOW_PATH,)'
+Add-Mutation 'config: another release type' 'release-please-config.json' 'creates a DRAFT with its tag' '"release-type": "simple"' '"release-type": "node"'
 
 try {
     Invoke-Case 'mutations: the table has at least 20 named defects and every one names the rule it breaks' {
