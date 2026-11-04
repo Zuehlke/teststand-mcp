@@ -2,9 +2,10 @@
 #  New-ReleaseDraft.ps1 - creates the DRAFT release of a tag with the release assets of a folder.
 #  The release workflow runs it; the work is New-ReleaseDraft in ReleaseDraft.psm1. In this order:
 #    - the folder holds exactly the required assets of the tag's version (no missing, no extra file);
-#    - every earlier DRAFT of exactly this tag is deleted (the leftover of a failed run: "Re-run failed
-#      jobs" would otherwise create a second draft, which the verifier refuses); a PUBLISHED release of
-#      the tag is a failure, and nothing is deleted;
+#    - every DRAFT of exactly this tag is deleted (release-please's, or the leftover of a failed run: "Re-run
+#      failed jobs" would otherwise create a second draft, which the verifier refuses), and so is a PUBLISHED
+#      release of the tag WITHOUT assets; a published release of the tag WITH assets is a failure, and
+#      nothing is deleted. The first non-empty body of what was deleted becomes the new draft's notes;
 #    - the draft is created and ITS id is written as the step output release_id (also when the creation
 #      failed half-way), so the dry run's cleanup deletes exactly that draft.
 #    -Repo owner/name   -Tag vX.Y.Z (or v<X.Y.Z>-rehearsal with -DryRun)   -AssetDir <folder>

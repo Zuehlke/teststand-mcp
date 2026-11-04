@@ -34,7 +34,7 @@ overwrite a published release. Earlier tags `V1.7.x`/`V1.8.0` show the same manu
 
 ### 0. Repository settings (UI, maintainer)
 
-See "UI instructions" below. Required before slice 1 is merged, so the first non-conventional squash
+See `CONTRIBUTING.md`, "One-time setup", steps 1, 3 and 4. Required before slice 1 is merged, so the first non-conventional squash
 commit cannot land after release-please starts counting.
 
 ### 1. PR-title check
@@ -46,7 +46,8 @@ commit cannot land after release-please starts counting.
   `workflow_dispatch` for the release PR. `ci.yml` gets `workflow_dispatch` too.
 - The job needs `pull-requests: read` only.
 - A skipped job reports success, so a run without a PR (push, dispatch) does not block a required check.
-- Update `build/tests/Workflows.Tests.ps1` / `WorkflowMutations.Tests.ps1` for the new job.
+- The rules live in `build/tests/WorkflowContract.ps1`, each proven to fail by a row in
+  `build/tests/WorkflowMutations.Tests.ps1`.
 
 ### 2. release-please config
 
@@ -62,12 +63,12 @@ commit cannot land after release-please starts counting.
 New `.github/workflows/release-please.yml` on `push: branches: [main]`:
 
 - Job `release-please`: `googleapis/release-please-action` (pinned SHA), `permissions: contents: write,
-  pull-requests: write`. Outputs `release_created` and `tag_name`.
+  pull-requests: write`. Outputs `release_created`, `tag_name`, `prs_created` and `pr`.
 - Job `release`: `needs: release-please`, `if: needs.release-please.outputs.release_created == 'true'`,
   `uses: ./.github/workflows/release.yml` with `tag: ${{ needs.release-please.outputs.tag_name }}`,
   `permissions: contents: write`.
-- Job `ci-on-release-pr`: when release-please opened or updated its PR, `gh workflow run ci.yml --ref
-  <release branch>` (`actions: write`). A PR opened with `GITHUB_TOKEN` starts no `pull_request` run, so
+- Job `ci-on-release-pr`: when release-please opened or updated its PR, `gh workflow run ci.yml` and
+  `gh workflow run pr-title.yml`, each `--ref <release branch>` taken from the `pr` output (`actions: write`). A PR opened with `GITHUB_TOKEN` starts no `pull_request` run, so
   without this the release PR never gets its required checks. `workflow_dispatch` is the documented exception.
 
 ### 4. `release.yml` accepts the call
@@ -76,18 +77,26 @@ New `.github/workflows/release-please.yml` on `push: branches: [main]`:
 - `TAG` reads the call input first: `inputs.tag || github.ref_name` (both `workflow_dispatch` and
   `workflow_call` fill `inputs`). Under `workflow_call` `github.event_name` is the CALLER's (`push`), so
   `DRY_RUN` stays false and `EVENT_NAME` stays `push`: check that the gate and its tests accept that.
-- `concurrency.group` keys on the tag, not `github.ref`, because the call runs with `refs/heads/main`.
-  The group must stay per tag.
-- The tag gate's "commit on main" check is unchanged: the tag points at the merge commit on `main`.
-- Update `Workflows.Tests.ps1` / `WorkflowMutations.Tests.ps1` for the new trigger, `TAG` and concurrency.
+- `concurrency.group` is `release-${{ inputs.tag || github.ref_name }}`, the same name as `TAG`, so one
+  tag maps to one queue however its run was started (the call runs with `refs/heads/main`).
+- The tag gate (`build/Assert-ReleaseTag.ps1`) also requires, for a real release, that the tag resolves to
+  the commit the run builds: a call builds the caller's `github.sha`, which is the tagged merge commit unless
+  release-please created the release late (code review, 2026-11-04).
+- Update `WorkflowContract.ps1` / `WorkflowMutations.Tests.ps1` for the new trigger, `TAG` and concurrency.
+
+### 4b. Stats provenance (found while building)
+
+- `.github/stats/collect.py` accepts `own-downloads` artifacts from runs of `release-please.yml` too: a
+  called workflow uploads its artifacts into the caller's run. Tests in `.github/stats/test_collect.py`.
 
 ### 5. Keep release-please's notes, recover from a hand-made empty release
 
 In `build/ReleaseDraft.psm1`:
 
-- `Clear-StaleDrafts` returns the body of the draft it deletes. `New-ReleaseDraft` uses it as the notes of
-  its own draft, followed by the fixed `$ReleaseNotes` line; with no earlier draft, only the fixed line.
-- A PUBLISHED release of the tag with ZERO assets is removed like a stale draft (and its body kept).
+- `Test-ReplaceableRelease`: every draft of the tag, and a PUBLISHED release of it with ZERO assets.
+  `Remove-ReplaceableReleases` deletes them (refusing first if any release of the tag is not replaceable).
+- `Get-CarriedOverNotes` takes the first non-empty body; `Join-ReleaseNotes` appends the fixed
+  `$ReleaseNotes` line once (a re-run carries its own earlier draft's notes, which already end with it).
   A published release with any asset still stops the run with the current message. This is the run
   41810103378 case: it would have recovered in minutes.
 - Tests in `build/tests/ReleaseDraft.Tests.ps1` for: body carried over, empty published release removed,

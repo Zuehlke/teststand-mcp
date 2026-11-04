@@ -1,4 +1,5 @@
-# The release workflow: a pushed tag becomes a published release, but only after the DRAFT of that
+# The release workflow: a tag (created by release-please.yml, which calls this workflow, or pushed by hand)
+# becomes a published release, but only after the DRAFT of that
 # release has been downloaded back and verified the way a user would download it.
 #
 #   job `package` (read-only token):  tag gate -> build and package -> keep the release assets as an artifact
@@ -19,7 +20,8 @@
 #     fails at the tag gate with the retag commands instead of being silently ignored by a filter.
 #   * A DRAFT first: a failed verification leaves a draft, so releases/latest never moves.
 #   * Re-running is safe: before it creates a draft, build\New-ReleaseDraft.ps1 deletes every earlier DRAFT
-#     of exactly this tag (the leftover of a failed run), and refuses when a PUBLISHED release already
+#     of exactly this tag (release-please's, or the leftover of a failed run) and a PUBLISHED release of it
+#     WITHOUT assets, keeping their notes, and refuses when a published release WITH assets already
 #     carries the tag (fix forward with the next patch version).
 #   * Publishing is by the verifier's release id, never by tag name: a stale draft with the same tag
 #     can then never be the one that goes live (the verifier refuses two releases for one tag). The
@@ -31,12 +33,13 @@
 #     (teststand-mcp for x86, teststand-mcp-x64 for x64), and each plugin's four assets are verified on
 #     their own. The fixed names teststand-mcp.zip and teststand-mcp-x64.zip are what users fetch from
 #     releases/latest/download/.
-#   * Only a commit on main is released: the tag gate refuses a tag on any other commit (a dry run
-#     may come from a branch and publishes nothing, so it skips that check).
+#   * Only a commit on main is released: the tag gate refuses a tag on any other commit, and a tag that does
+#     not point at the commit this run builds (a call builds the caller's github.sha, so only the gate ties
+#     it to the tag). A dry run may come from a branch and publishes nothing, so it skips both checks.
 #   * Tag names, inputs and refs are user input: they reach `run:` only through env, never inline.
-#   * Every run queues per tag (`release-<tag input or ref>`) and a running release is never cancelled, so two
-#     runs of one tag never overlap (a tag pushed by hand and the same tag called by release-please would sit
-#     in two queues, `refs/tags/vX.Y.Z` and `vX.Y.Z`: do not do both). Different tags may overlap, and the one that finishes last would otherwise
+#   * Every run queues per tag (`release-vX.Y.Z`, from the input of a call or dry run, or the name of the
+#     pushed tag) and a running release is never cancelled, so two runs of one tag never overlap, however
+#     each was started. Different tags may overlap, and the one that finishes last would otherwise
 #     take the label "latest": build\Publish-Release.ps1 therefore compares the version with the current
 #     latest release and publishes a LOWER version with make_latest=false (it prints which it chose, and the
 #     final check of releases/latest is skipped for such a release: latest rightly serves another one).
@@ -70,7 +73,7 @@ on:
         required: true
         type: string
       dry_run:
-        description: 'Dry run: package, create the draft, verify it, delete it. A release is cut by pushing a tag, so this must stay ticked.'
+        description: 'Dry run: package, create the draft, verify it, delete it. A release is cut by merging the release PR (or pushing a tag), so this must stay ticked.'
         required: true
         type: boolean
         default: true
@@ -95,10 +98,10 @@ on:
 # Nothing by default; every job states what it needs.
 permissions: {}
 
-# One queue per tag: the input of a dry run or a call, the pushed ref otherwise (a call runs on refs/heads/main,
-# so github.ref alone would put every called release in one queue). A running release is never cancelled half-way.
+# One queue per tag, named like TAG: the input of a dry run or a call, the pushed tag's name otherwise (a call runs
+# on refs/heads/main, so github.ref would put every called release in one queue). Never cancelled half-way.
 concurrency:
-  group: release-${{ inputs.tag || github.ref }}
+  group: release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 env:
@@ -140,7 +143,7 @@ jobs:
       - name: Refuse a manual run that is not a dry run
         if: env.EVENT_NAME == 'workflow_dispatch' && env.DRY_RUN != 'true'
         run: |
-          Write-Host '::error::A release is cut by pushing a tag vX.Y.Z. A manual run is only a dry run: tick dry_run.'
+          Write-Host '::error::A release is cut by merging the release PR, or by pushing a tag vX.Y.Z. A manual run is only a dry run: tick dry_run.'
           exit 1
 
       - name: Check the tag (the gate)
@@ -222,7 +225,8 @@ jobs:
           TARGET_SHA: ${{ github.sha }}
         timeout-minutes: 20
         run: |
-          # Deletes a leftover draft of this tag first, refuses a published release of it, and writes the id
+          # Deletes every draft of this tag and a published one without assets first (keeping their notes),
+          # refuses a published release of it with assets, and writes the id
           # of the draft it creates to the step output release_id (the dry run's cleanup deletes that id only).
           $dryRun = ($env:DRY_RUN -eq 'true')
           & .\build\New-ReleaseDraft.ps1 -Repo $env:REPO -Tag $env:RELEASE_TAG -AssetDir $env:OUT_DIR -AssetPrefixes $env:ASSET_PREFIXES -Target $env:TARGET_SHA -DryRun:$dryRun

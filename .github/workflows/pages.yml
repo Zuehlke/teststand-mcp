@@ -18,8 +18,8 @@
 # snapshot commits nothing. The token is never stored in .git/config: it is handed to the
 # git commands that need it through a single-use http.extraheader.
 #
-# The own-downloads records come from the `own-downloads` artifacts of release.yml runs
-# (file own-downloads.json, schema in docs/specs/plugin-install-and-release-workflow.md, AC-18).
+# The own-downloads records come from the `own-downloads` artifacts of release.yml runs, also those that
+# release-please.yml calls, which upload into the caller's run (file own-downloads.json, schema in docs/specs/plugin-install-and-release-workflow.md, AC-18).
 name: pages
 
 on:

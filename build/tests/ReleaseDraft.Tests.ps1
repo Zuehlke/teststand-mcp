@@ -32,12 +32,13 @@ $script:TempDirPrefix = 'ReleaseDraftTests_'
 # file of every gh release create, read while the call runs: the file is deleted afterwards). -Fail maps a regex over the
 # joined arguments to the stderr text of a failed call; -PageSize is what one listing page holds.
 function New-FakeGh {
-    param([object[]]$Releases = @(), [string[]]$Tags = @(), [string]$Latest = $null, [hashtable]$Fail = @{}, [int]$PageSize = 100, [string]$PatchedDraft = 'false')
+    param([object[]]$Releases = @(), [string[]]$Tags = @(), [string]$Latest = $null, [hashtable]$Fail = @{}, [int]$PageSize = 100, [string]$PatchedDraft = 'false', [switch]$OmitAssetCount)
     $notFoundText = $NotFound   # a closure sees this function's variables, not the script's
     $state = @{
         Releases = (New-Object System.Collections.ArrayList); Tags = (New-Object System.Collections.ArrayList)
         Latest = $Latest; Calls = (New-Object System.Collections.ArrayList); Patches = (New-Object System.Collections.ArrayList)
         NextId = $BigId; Creates = (New-Object System.Collections.ArrayList); Notes = (New-Object System.Collections.ArrayList)
+        NotesFiles = (New-Object System.Collections.ArrayList); NotesBytes = (New-Object System.Collections.ArrayList)
     }
     foreach ($release in $Releases) { [void]$state.Releases.Add($release) }
     foreach ($tag in $Tags) { [void]$state.Tags.Add($tag) }
@@ -46,13 +47,19 @@ function New-FakeGh {
         $Arguments = @($Arguments)
         [void]$state.Calls.Add($Arguments)
         $joined = $Arguments -join ' '
+        $notesAt = $Arguments.IndexOf('--notes-file')
+        if ($notesAt -ge 0) {
+            $path = $Arguments[$notesAt + 1]
+            [void]$state.NotesFiles.Add($path)
+            [void]$state.NotesBytes.Add([IO.File]::ReadAllBytes($path))
+        }
         foreach ($pattern in $Fail.Keys) {
             if ($joined -match $pattern) { return (New-GhResult -ExitCode 1 -Stderr $Fail[$pattern]) }
         }
         if ($Arguments[0] -ceq 'release' -and $Arguments[1] -ceq 'create') {
             $tag = $Arguments[2]
             [void]$state.Creates.Add($Arguments)
-            $notes = [IO.File]::ReadAllText($Arguments[($Arguments.IndexOf('--notes-file') + 1)])
+            $notes = [IO.File]::ReadAllText($Arguments[($Arguments.IndexOf('--notes-file') + 1)], (New-Object System.Text.UTF8Encoding($false)))
             [void]$state.Notes.Add($notes)
             $state.NextId++
             [void]$state.Releases.Insert(0, @{ Id = $state.NextId; Tag = $tag; Draft = $true; Assets = @(); Body = $notes })
@@ -67,7 +74,11 @@ function New-FakeGh {
             $page = [int]$Matches[2]
             $all = @($state.Releases | ForEach-Object { $_ })
             $slice = @($all | Select-Object -Skip (($page - 1) * $PageSize) -First $PageSize)
-            $lines = @($slice | ForEach-Object { ConvertTo-Json -InputObject ([ordered]@{ id = $_.Id; tag_name = $_.Tag; draft = $_.Draft; body = $_.Body; asset_count = @($_.Assets).Count }) -Compress })
+            $lines = @($slice | ForEach-Object {
+                $item = [ordered]@{ id = $_.Id; tag_name = $_.Tag; draft = $_.Draft; body = $_.Body }
+                if (-not $OmitAssetCount) { $item.asset_count = @($_.Assets).Count }
+                ConvertTo-Json -InputObject $item -Compress
+            })
             return (New-GhResult -Stdout ($lines -join "`n"))
         }
         if ($method -ceq 'GET' -and $path -match '/releases/latest\z') {
@@ -108,6 +119,7 @@ function New-Release {
     return @{ Id = $Id; Tag = $Tag; Draft = $Draft; Assets = $Assets; Body = $Body }
 }
 $OneAsset = @(@{ id = 9; name = 'teststand-mcp.zip' })   # what makes a published release one users may have downloaded
+$Utf8Bom = [byte[]](0xEF, 0xBB, 0xBF)
 
 # A folder with the four assets of a version (any bytes: the draft code only needs the names).
 function New-AssetFolder {
@@ -235,7 +247,7 @@ try {
         $fake = New-FakeGh -Releases @((New-Release 31 'v1.9.0'), (New-Release 32 'v1.9.0' $false $OneAsset))
         $failure = Get-Failure { New-ReleaseDraft -Repo $Repo -Tag 'v1.9.0' -AssetDir (New-AssetFolder) -Gh $fake.Gh }
         Assert-ThreePartFailure $failure
-        Assert-Contains $failure 'A published release of Zuehlke/teststand-mcp already carries the tag v1.9.0 (id 32)' 'what'
+        Assert-Contains $failure 'A published release of Zuehlke/teststand-mcp with assets already carries the tag v1.9.0 (id 32)' 'what'
         Assert-Contains $failure 'next patch version' 'the fix'
         Assert-Equal 0 @(Get-DeleteCalls $fake).Count 'deleted releases (a draft must not be deleted on the way to a refusal)'
         Assert-Equal 0 $fake.State.Creates.Count 'created releases'
@@ -250,33 +262,81 @@ try {
         Assert-True ($fake.State.Notes[0].StartsWith('Hand-written notes')) "the notes are carried over: $($fake.State.Notes[0])"
     }
 
-    Invoke-Case 'draft: a listing that does not say how many assets a published release has refuses it, as one with assets' {
-        $fake = New-FakeGh -Releases @((New-Release 35 'v1.9.0' $false))
-        $inner = $fake.Gh
-        $noCount = {
-            param($Arguments, $TimeoutSeconds)
-            $result = & $inner $Arguments $TimeoutSeconds
-            if (@($Arguments)[1] -like '*releases?per_page=*') { $result.Stdout = $result.Stdout -replace ',"asset_count":\d+', '' }
-            return $result
-        }.GetNewClosure()
-        Assert-ThreePartFailure (Get-Failure { New-ReleaseDraft -Repo $Repo -Tag 'v1.9.0' -AssetDir (New-AssetFolder) -Gh $noCount })
+    Invoke-Case 'draft: an empty published release next to one WITH assets is still refused, and nothing is deleted' {
+        $fake = New-FakeGh -Releases @((New-Release 37 'v1.9.0' $false), (New-Release 38 'v1.9.0' $false $OneAsset))
+        $failure = Get-Failure { New-ReleaseDraft -Repo $Repo -Tag 'v1.9.0' -AssetDir (New-AssetFolder) -Gh $fake.Gh }
+        Assert-Contains $failure 'with assets already carries the tag v1.9.0 (id 38)' 'what'
         Assert-Equal 0 @(Get-DeleteCalls $fake).Count 'deleted releases'
     }
 
-    Invoke-Case 'draft: the notes of release-please''s draft are carried over, the fixed line follows once, also on a re-run' {
-        $changelog = "## [1.9.3](https://github.com/x/y/compare/v1.9.2...v1.9.3) (2026-11-04)`n`n### Bug Fixes`n`n* a fix with ""quotes"" ([#45](https://github.com/x/y/issues/45))"
+    Invoke-Case 'draft: a listing that does not say how many assets a published release has refuses it, as one with assets' {
+        $fake = New-FakeGh -Releases @((New-Release 35 'v1.9.0' $false)) -OmitAssetCount
+        $failure = Get-Failure { New-ReleaseDraft -Repo $Repo -Tag 'v1.9.0' -AssetDir (New-AssetFolder) -Gh $fake.Gh }
+        Assert-ThreePartFailure $failure
+        Assert-Contains $failure 'with assets already carries the tag v1.9.0 (id 35)' 'the refusal, not some other failure'
+        Assert-Equal 0 @(Get-DeleteCalls $fake).Count 'deleted releases'
+    }
+
+    Invoke-Case 'draft: the listing filter, run by real jq over a GitHub-shaped response, gives the bodies and asset counts the decision needs' {
+        $jq = Get-Command jq -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($null -eq $jq) {
+            # gh's --jq is jq -r (strings come out raw); the runners have jq, so only a maintainer's machine may lack it.
+            Assert-True ($env:CI -ne 'true') 'jq is missing on a CI runner, so the filter that decides a deletion was not run'
+            Write-Host 'SKIP  jq is not on the PATH; the listing filter was not run.'
+            return
+        }
+        $filter = & (Get-Module ReleaseDraft) { $script:ReleaseListFilter }
+        $response = '[{"id":1,"tag_name":"v1.9.0","draft":false,"body":null,"assets":[]},{"id":2,"tag_name":"v1.8.0","draft":false,"body":"notes","assets":[{"id":7}]},{"id":3,"tag_name":"v1.9.1","draft":true,"body":"","assets":[]}]'
+        $run = Invoke-ChildProcess -FilePath $jq.Source -ArgumentList @('-r', $filter) -StdinText $response -TimeoutSeconds 60
+        Assert-Equal 0 $run.ExitCode "jq said: $($run.Stderr)"
+        $jqOutput = $run.Stdout
+        $listing = { param($Arguments, $TimeoutSeconds) return (New-GhResult -Stdout $jqOutput) }.GetNewClosure()
+        $records = @(Get-ReleaseRecords -Repo $Repo -Gh $listing)
+        Assert-Equal '1:0:False:|2:1:False:notes|3:0:True:' (@($records | ForEach-Object { "$($_.Id):$($_.AssetCount):$($_.Draft):$($_.Body)" }) -join '|') 'id, asset count, draft and body of each record'
+        Assert-True (Test-ReplaceableRelease $records[0]) 'a published release with no assets and a null body is replaceable'
+        Assert-True (-not (Test-ReplaceableRelease $records[1])) 'one with an asset is not'
+    }
+
+    Invoke-Case 'notes: the first NON-EMPTY body of the replaced releases is carried over, newest first' {
+        $releases = @(
+            [pscustomobject]@{ Body = '' }, [pscustomobject]@{ Body = "  `n " }, [pscustomobject]@{ Body = ' older notes ' }, [pscustomobject]@{ Body = 'oldest notes' }
+        )
+        Assert-Equal 'older notes' (Get-CarriedOverNotes -Releases $releases) 'the first non-empty body, trimmed'
+        Assert-Equal '' (Get-CarriedOverNotes -Releases @()) 'nothing to carry over'
+    }
+
+    Invoke-Case 'notes: release-please''s changelog is carried over intact and the fixed line follows it once, also on a re-run' {
+        $fixed = & (Get-Module ReleaseDraft) { $script:ReleaseNotes }
+        $changelog = "## [1.9.3](https://github.com/x/y/compare/v1.9.2...v1.9.3) (2026-11-04)`n`n### Bug Fixes`n`n* a fix with ""quotes"" and $([char]0xE9) ([#45](https://github.com/x/y/issues/45))"
         $fake = New-FakeGh -Releases @((New-Release 36 'v1.9.0' -Body $changelog))
         $dir = New-AssetFolder
         [void](New-ReleaseDraft -Repo $Repo -Tag 'v1.9.0' -AssetDir $dir -Gh $fake.Gh)
         [void](New-ReleaseDraft -Repo $Repo -Tag 'v1.9.0' -AssetDir $dir -Gh $fake.Gh)
+        Assert-Equal 2 $fake.State.Notes.Count 'two drafts were created'
         foreach ($notes in $fake.State.Notes) {
-            Assert-True ($notes.StartsWith($changelog)) "the changelog comes first, intact: $notes"
-            Assert-Equal 1 ([regex]::Matches($notes, 'Built and verified by the release workflow').Count) 'the fixed line, once'
+            Assert-True ($notes.StartsWith($changelog)) "the changelog comes first, intact (non-ASCII included): $notes"
+            Assert-Equal 1 ([regex]::Matches($notes, [regex]::Escape($fixed)).Count) 'the fixed line, once'
         }
-        $plain = New-FakeGh
-        [void](New-ReleaseDraft -Repo $Repo -Tag 'v1.9.0' -AssetDir $dir -Gh $plain.Gh)
-        Assert-True ($plain.State.Notes[0].StartsWith('Built and verified by the release workflow')) 'without an earlier release only the fixed line'
-        Assert-True (@($fake.State.Creates[0]) -cnotcontains '--notes') 'the notes travel in a file, never on the command line'
+    }
+
+    Invoke-Case 'notes: without an earlier release of the tag the notes are only the fixed line' {
+        $fixed = & (Get-Module ReleaseDraft) { $script:ReleaseNotes }
+        $fake = New-FakeGh
+        [void](New-ReleaseDraft -Repo $Repo -Tag 'v1.9.0' -AssetDir (New-AssetFolder) -Gh $fake.Gh)
+        Assert-Equal $fixed $fake.State.Notes[0] 'the notes'
+    }
+
+    Invoke-Case 'notes: they travel in a UTF-8 file without a BOM, never on the command line, and the file is gone afterwards, also after a failed create' {
+        $fake = New-FakeGh
+        [void](New-ReleaseDraft -Repo $Repo -Tag 'v1.9.0' -AssetDir (New-AssetFolder) -Gh $fake.Gh)
+        Assert-True (@($fake.State.Creates[0]) -cnotcontains '--notes') 'no --notes argument'
+        $bytes = [byte[]]$fake.State.NotesBytes[0]
+        Assert-True (-not ($bytes.Length -ge 3 -and $bytes[0] -eq $Utf8Bom[0] -and $bytes[1] -eq $Utf8Bom[1] -and $bytes[2] -eq $Utf8Bom[2])) 'the notes file has no BOM'
+        Assert-True (-not (Test-Path -LiteralPath $fake.State.NotesFiles[0])) 'the notes file is removed after a successful create'
+        $failing = New-FakeGh -Fail @{ '\Arelease create' = 'gh: upload failed' }
+        [void](Get-Failure { New-ReleaseDraft -Repo $Repo -Tag 'v1.9.0' -AssetDir (New-AssetFolder) -Gh $failing.Gh })
+        Assert-Equal 1 $failing.State.NotesFiles.Count 'the failing create was given a notes file'
+        Assert-True (-not (Test-Path -LiteralPath $failing.State.NotesFiles[0])) 'the notes file is removed after a failed create'
     }
 
     Invoke-Case 'draft: a leftover draft on the SECOND page of the list (a page holding one release) is found' {

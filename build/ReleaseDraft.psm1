@@ -1,10 +1,10 @@
 # ============================================================================
 #  ReleaseDraft.psm1 - the GitHub release operations of the release workflow that are not verification
 #  (that is Assert-PublishedRelease.ps1): everything that creates, publishes or deletes a release.
-#    New-ReleaseDraft         creates the DRAFT of a tag: first it clears the leftovers of the same tag (the
-#                             draft release-please made, the draft of an earlier failed run, a published
+#    New-ReleaseDraft         creates the DRAFT of a tag: first it deletes the replaceable releases of the tag
+#                             (Remove-ReplaceableReleases: every draft, also release-please's, and a published
 #                             release WITHOUT assets; a published release with assets is a failure), then it
-#                             creates the draft with their notes and returns ITS id;
+#                             creates the draft with their notes (Get-CarriedOverNotes) and returns ITS id;
 #    Publish-ReleaseById      publishes one release by its id and decides whether it becomes the latest
 #                             release (Get-MakeLatestDecision: never a lower version over a higher one);
 #    Remove-RehearsalRelease  the dry run's cleanup: deletes the draft THIS run created (by id) and the
@@ -28,6 +28,9 @@ $script:MaxListPages = 10
 $script:ReleaseIdPattern = '\A[0-9]+\z'
 $script:ReleaseNotes = 'Built and verified by the release workflow. Install it through the Claude Code plugin marketplace.'
 $script:NotFoundPattern = 'HTTP 404'
+$script:UnknownAssetCount = -1   # the listing did not say: such a published release is never replaceable
+# What one listed release is reduced to. A constant, so the tests can run it through real jq (gh's --jq is jq).
+$script:ReleaseListFilter = '.[] | {id, tag_name, draft, body, asset_count: (.assets | length)} | tojson'
 
 # ----------------------------------------------------------------------------
 #  The gh boundary
@@ -86,23 +89,24 @@ function Assert-ReleaseId {
 #  Reading releases
 # ----------------------------------------------------------------------------
 # { Id; Tag; Draft; Body; AssetCount } of every release of the repository (newest first), read page by page. A draft
-# is listed only for a token that may write the repository contents. AssetCount is -1 when the listing did not say.
+# is listed only for a token that may write the repository contents. AssetCount is $script:UnknownAssetCount when the
+# listing did not say.
 function Get-ReleaseRecords {
     [CmdletBinding()]
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Repo, [scriptblock]$Gh)
     $records = @()
     for ($page = 1; $page -le $script:MaxListPages; $page++) {
-        $result = Invoke-Gh $Gh @('api', "repos/$Repo/releases?per_page=$($script:ListPageSize)&page=$page", '--jq', '.[] | {id, tag_name, draft, body, asset_count: (.assets | length)} | tojson')
+        $result = Invoke-Gh $Gh @('api', "repos/$Repo/releases?per_page=$($script:ListPageSize)&page=$page", '--jq', $script:ReleaseListFilter)
         Assert-GhSucceeded $result "Could not list the releases of $Repo" `
             'The list shows the earlier releases of a tag; without it a leftover draft or a published release of the same tag cannot be told apart. Running it again may help if the cause is transient (network, rate limit); it will not help for a token that may not write the repository contents.' `
             'Check the network and that the token has contents: write, then re-run the failed job.'
         $lines = @($result.Stdout -split '\r?\n' | Where-Object { $_.Trim().Length -gt 0 })
         foreach ($line in $lines) {
             $item = $line | ConvertFrom-Json
-            $count = Get-JsonProperty $item 'asset_count'
+            $assetCount = Get-JsonProperty $item 'asset_count'
             $records += [pscustomobject]@{
                 Id = [string](Get-JsonProperty $item 'id'); Tag = [string](Get-JsonProperty $item 'tag_name'); Draft = ((Get-JsonProperty $item 'draft') -eq $true)
-                Body = [string](Get-JsonProperty $item 'body'); AssetCount = $(if ($null -eq $count) { -1 } else { [int]$count })
+                Body = [string](Get-JsonProperty $item 'body'); AssetCount = $(if ($null -eq $assetCount) { $script:UnknownAssetCount } else { [int]$assetCount })
             }
         }
         if ($lines.Count -lt $script:ListPageSize) { return $records }
@@ -128,36 +132,53 @@ function Get-ReleaseBody {
 # ----------------------------------------------------------------------------
 #  Creating the draft
 # ----------------------------------------------------------------------------
-# Deletes every DRAFT that carries exactly this tag: the draft release-please created with the tag, or the leftover
-# of a failed run ("Re-run failed jobs" would otherwise create a second draft with the same tag, which the verifier
-# refuses). A PUBLISHED release of the tag with NO asset is deleted too: one made by hand in the web UI takes
-# releases/latest and breaks every marketplace install until it has assets, and nobody can have downloaded anything
-# from it. A published release with any asset is a failure and nothing is deleted.
-# Returns the notes to carry over: the first non-empty body of the deleted releases (release-please's changelog).
-function Clear-StaleDrafts {
+# True for a release New-ReleaseDraft may delete before it creates its own draft of the same tag: every DRAFT (the
+# one release-please created with the tag, or the leftover of a failed run: "Re-run failed jobs" would otherwise
+# create a second draft, which the verifier refuses) and a PUBLISHED release with NO asset (one made by hand in the
+# web UI takes releases/latest and serves no file, so every marketplace install fails until it has assets).
+function Test-ReplaceableRelease {
+    param($Release)
+    return ($Release.Draft -or $Release.AssetCount -eq 0)
+}
+
+# Deletes the replaceable releases among $Releases (all of one tag). A release that is not replaceable (published
+# with assets, or with an unknown asset count) is a failure, checked before anything is deleted.
+function Remove-ReplaceableReleases {
     [CmdletBinding()]
-    param([Parameter(Mandatory)][AllowEmptyString()][string]$Repo, [Parameter(Mandatory)][AllowEmptyString()][string]$Tag, [scriptblock]$Gh)
-    $same = @(Get-ReleaseRecords -Repo $Repo -Gh $Gh | Where-Object { $_.Tag -ceq $Tag })
-    $published = @($same | Where-Object { -not $_.Draft -and $_.AssetCount -ne 0 })
-    if ($published.Count -gt 0) {
-        Write-BuildFailure -What "A published release of $Repo already carries the tag $Tag (id $($published[0].Id))." `
-            -Why 'A tag names exactly one release. A second release under it would make verifying and publishing ambiguous, and a published release must never be replaced. Running it again will not help.' `
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Repo, [Parameter(Mandatory)][AllowEmptyString()][string]$Tag, [object[]]$Releases = @(), [scriptblock]$Gh)
+    $kept = @($Releases | Where-Object { -not (Test-ReplaceableRelease $_) })
+    if ($kept.Count -gt 0) {
+        Write-BuildFailure -What "A published release of $Repo with assets already carries the tag $Tag (id $($kept[0].Id))." `
+            -Why 'A tag names exactly one release. A second release under it would make verifying and publishing ambiguous, and a published release that users may have downloaded must never be replaced. Running it again will not help.' `
             -Fix 'Fix forward: release the next patch version (see CONTRIBUTING). Never reuse a published tag.'
     }
-    $notes = ''
-    foreach ($draft in $same) {
-        if ($draft.Id -cnotmatch $script:ReleaseIdPattern) {
-            Write-BuildFailure -What "The leftover draft of $Tag has the unusable id '$($draft.Id)'." -Why 'It cannot be deleted through the API without its numeric id.' -Fix "Delete the draft by hand (gh release delete $Tag, or in the web UI) and re-run the failed job."
+    foreach ($release in $Releases) {
+        $kind = if ($release.Draft) { 'draft' } else { 'published release without assets' }
+        if ($release.Id -cnotmatch $script:ReleaseIdPattern) {
+            Write-BuildFailure -What "The $kind of $Tag has the unusable id '$($release.Id)'." -Why 'It cannot be deleted through the API without its numeric id.' -Fix "Delete the release by hand (gh release delete $Tag, or in the web UI) and re-run the failed job."
         }
-        $result = Invoke-Gh $Gh @('api', '-X', 'DELETE', "repos/$Repo/releases/$($draft.Id)")
-        Assert-GhSucceeded $result "Could not delete the leftover draft $($draft.Id) of $Tag" `
-            'The new draft would carry the same tag as the old one, and the verifier refuses two releases for one tag. Running it again may help if the cause is transient.' `
-            "Delete the draft by hand (gh release delete $Tag, or in the web UI) and re-run the failed job."
-        if ($draft.Draft) { Write-Host "Deleted the leftover draft $($draft.Id) of $Tag." }
-        else { Write-Host "Deleted the published release $($draft.Id) of ${Tag}: it had no assets, so it was not made by this workflow and nobody can have downloaded it." }
-        if (-not $notes -and $draft.Body.Trim()) { $notes = $draft.Body.Trim() }
+        $result = Invoke-Gh $Gh @('api', '-X', 'DELETE', "repos/$Repo/releases/$($release.Id)")
+        Assert-GhSucceeded $result "Could not delete the $kind $($release.Id) of $Tag" `
+            'The new draft would carry the same tag, and the verifier refuses two releases for one tag. Running it again may help if the cause is transient.' `
+            "Delete the release by hand (gh release delete $Tag, or in the web UI) and re-run the failed job."
+        Write-Host "Deleted the $kind $($release.Id) of $Tag."
     }
-    return $notes
+}
+
+# The notes a new draft takes over from the releases it replaces: the first non-empty body among $Releases (newest
+# first; release-please's draft carries the changelog), trimmed, or '' when none has one.
+function Get-CarriedOverNotes {
+    param([object[]]$Releases = @())
+    foreach ($release in $Releases) { if ($release.Body.Trim()) { return $release.Body.Trim() } }
+    return ''
+}
+
+# The notes of a new draft: the carried-over notes, then the workflow's fixed line, which is appended only once (a
+# re-run carries over the notes of its own earlier draft, which already end with it).
+function Join-ReleaseNotes {
+    param([string]$Carried)
+    if ($Carried.Contains($script:ReleaseNotes)) { return $Carried }
+    return ((@($Carried, $script:ReleaseNotes) | Where-Object { $_ }) -join "`n`n")
 }
 
 # Creates the DRAFT release of $Tag with every file of $AssetDir and returns its id (also written as the step
@@ -185,8 +206,9 @@ function New-ReleaseDraft {
     }
     Assert-ReleaseAssetFiles -Directory $AssetDir -Version $parsed.Version -Prefixes $AssetPrefixes
 
-    $notes = Clear-StaleDrafts -Repo $Repo -Tag $Tag -Gh $Gh
-    if (-not $notes.Contains($script:ReleaseNotes)) { $notes = (@($notes, $script:ReleaseNotes) | Where-Object { $_ }) -join "`n`n" }
+    $sameTag = @(Get-ReleaseRecords -Repo $Repo -Gh $Gh | Where-Object { $_.Tag -ceq $Tag })
+    Remove-ReplaceableReleases -Repo $Repo -Tag $Tag -Releases $sameTag -Gh $Gh
+    $notes = Join-ReleaseNotes -Carried (Get-CarriedOverNotes -Releases $sameTag)
     # A file, not --notes: a changelog has lines and quotes that do not survive a command line intact.
     $notesFile = Join-Path ([IO.Path]::GetTempPath()) "release-notes-$([guid]::NewGuid().ToString('N')).md"
     [IO.File]::WriteAllText($notesFile, $notes, (Get-Utf8NoBomEncoding))
@@ -359,5 +381,5 @@ function Remove-RehearsalRelease {
     }
 }
 
-Export-ModuleMember -Function New-GhResult, Get-ReleaseRecords, Get-ReleaseBody, Clear-StaleDrafts, New-ReleaseDraft,
+Export-ModuleMember -Function New-GhResult, Get-ReleaseRecords, Get-ReleaseBody, Test-ReplaceableRelease, Remove-ReplaceableReleases, Get-CarriedOverNotes, Join-ReleaseNotes, New-ReleaseDraft,
     Get-MakeLatestDecision, Get-LatestReleaseTag, Publish-ReleaseById, Remove-RehearsalRelease, Assert-ReleaseId

@@ -442,6 +442,8 @@ class OwnDownloadArtifacts(unittest.TestCase):
             "a look-alike path": (artifact(5), {5: {"path": "x.github/workflows/release.yml", "event": "push"}}),
             "a pull request": (artifact(5), {5: {"path": ".github/workflows/release.yml", "event": "pull_request"}}),
             "a schedule": (artifact(5), {5: {"path": ".github/workflows/release.yml", "event": "schedule"}}),
+            "a release-please look-alike path": (artifact(5), {5: {"path": "x.github/workflows/release-please.yml", "event": "push"}}),
+            "a release-please run from a pull request": (artifact(5), {5: {"path": ".github/workflows/release-please.yml", "event": "pull_request"}}),
             "an unreadable run": (artifact(5), {5: ["not", "a", "run"]}),
         }
         for name, (item, runs) in cases.items():
@@ -460,17 +462,17 @@ class OwnDownloadArtifacts(unittest.TestCase):
         self.assertEqual(len(result.warnings), 2)
         self.assertEqual(api.requested.count(f"/repos/{REPO}/actions/runs/5"), 1)
 
-    def test_a_run_path_with_a_ref_suffix_and_a_manual_start_are_accepted(self):
-        runs = {5: {"path": ".github/workflows/release.yml@refs/tags/v1.9.0", "event": "workflow_dispatch"}}
+    def test_each_accepted_run_of_the_release_workflows_is_read(self):
+        cases = {
+            "release.yml with a ref suffix, started by hand": {"path": ".github/workflows/release.yml@refs/tags/v1.9.0", "event": "workflow_dispatch"},
+            "release-please.yml, which calls release.yml": {"path": ".github/workflows/release-please.yml", "event": "push"},
+        }
         record = artifact_zip({"run_id": "5", "counts": {"2026-08-20": {ZIP: {"draft": 1, "published": 0}}}})
-        self.run_collect(self.api(artifact(5), runs=runs, payloads={5: record}))
-        self.assertEqual(self.own_rows(), [f"5,2026-08-20,{ZIP},1,0"])
-
-    def test_a_release_please_run_that_called_release_yml_is_accepted(self):
-        runs = {5: {"path": ".github/workflows/release-please.yml", "event": "push"}}
-        record = artifact_zip({"run_id": "5", "counts": {"2026-08-20": {ZIP: {"draft": 1, "published": 0}}}})
-        self.run_collect(self.api(artifact(5), runs=runs, payloads={5: record}))
-        self.assertEqual(self.own_rows(), [f"5,2026-08-20,{ZIP},1,0"])
+        for name, run in cases.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as directory:
+                self.stats = Path(directory) / "stats"
+                self.run_collect(self.api(artifact(5), runs={5: run}, payloads={5: record}))
+                self.assertEqual(self.own_rows(), [f"5,2026-08-20,{ZIP},1,0"], name)
 
     def test_a_tag_push_run_is_accepted_whatever_its_branch_name(self):
         item = artifact(5, head_branch="v1.9.0")

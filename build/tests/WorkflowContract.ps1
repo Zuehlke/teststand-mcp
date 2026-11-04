@@ -21,6 +21,8 @@
 #  The asset names and their common prefix come from build\ReleaseAssets.psm1, never from a literal.
 #  The first real run of these workflows is the fork rehearsal (see the plan): this file cannot prove
 #  that GitHub accepts them, only that they keep the shape that was designed.
+#  -ConfigRoot (default -RepoRoot) is where release-please-config.json, .release-please-manifest.json and
+#  .github\stats\collect.py are read, so the mutation tests can hand it edited copies of those files too.
 #  Invoke-WorkflowContract reports every case through -Case (default: Invoke-Case of TestHarness.ps1), a
 #  scriptblock `param([string]$Name, [scriptblock]$Body)` that runs the body and records a throw as a failure.
 #  ASCII only on purpose: 5.1 reads a BOM-less script as ANSI.
@@ -29,7 +31,8 @@ Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'BuildCommon.psm1') 
 Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'ReleaseAssets.psm1') -Force
 
 function Invoke-WorkflowContract {
-    param([Parameter(Mandatory)][string]$WorkflowDir, [Parameter(Mandatory)][string]$RepoRoot, [scriptblock]$Case)
+    param([Parameter(Mandatory)][string]$WorkflowDir, [Parameter(Mandatory)][string]$RepoRoot, [string]$ConfigRoot, [scriptblock]$Case)
+    if (-not $ConfigRoot) { $ConfigRoot = $RepoRoot }
 
     $report = if ($null -ne $Case) { $Case } else { ${function:Invoke-Case} }
     function Invoke-Case {
@@ -391,7 +394,7 @@ $ExpectedWorkflows = @('ci.yml', 'pages.yml', 'pr-title.yml', 'release-please.ym
 
     Invoke-Case 'release.yml: every run queues per tag (never in one shared queue, where a third run would cancel the pending one), and a running release is never cancelled' {
         $concurrency = Get-TopLevelBlock $releaseCode 'concurrency'
-        Assert-True ($concurrency -cmatch '(?m)^  group:\s*release-\$\{\{ inputs\.tag \|\| github\.ref \}\}\s*$') 'the group must be exactly release-<tag input or ref>: a call runs on refs/heads/main, so github.ref alone would put every called release in one queue'
+        Assert-True ($concurrency -cmatch '(?m)^  group:\s*release-\$\{\{ inputs\.tag \|\| github\.ref_name \}\}\s*$') 'the group must be exactly release-<tag input or tag name>, the same name as TAG: a call runs on refs/heads/main (github.ref would put every called release in one queue), and github.ref would give a pushed tag a second queue name (refs/tags/vX.Y.Z)'
         Assert-NotContains $concurrency 'event_name' 'the concurrency group (a shared queue for tag pushes would drop a pending tag when a third arrives)'
         Assert-True ($concurrency -cmatch 'cancel-in-progress:\s*false') 'a release in progress must not be cancelled'
     }
@@ -454,7 +457,7 @@ $ExpectedWorkflows = @('ci.yml', 'pages.yml', 'pr-title.yml', 'release-please.ym
     Invoke-Case 'release.yml: the package job runs in the designed order and the release job in its own, each step exactly once' {
         $packageOrder = @(
             @{ Pattern = 'actions/checkout@'; What = 'checkout' }
-            @{ Pattern = '::error::A release is cut by pushing a tag'; What = 'refuse a manual real release' }
+            @{ Pattern = '::error::A release is cut by merging the release PR'; What = 'refuse a manual real release' }
             @{ Pattern = 'Assert-ReleaseTag\.ps1'; What = 'tag gate' }
             @{ Pattern = 'A dry run needs a rehearsal tag'; What = 'require a rehearsal tag' }
             @{ Pattern = 'actions/setup-dotnet@'; What = 'setup-dotnet' }
@@ -499,7 +502,7 @@ $ExpectedWorkflows = @('ci.yml', 'pages.yml', 'pr-title.yml', 'release-please.ym
     }
 
     Invoke-Case 'release.yml: a manual run that is not a dry run is refused before anything else, and a dry run needs a rehearsal tag' {
-        $refuse = Get-PackageStep '::error::A release is cut by pushing a tag' 'refusal'
+        $refuse = Get-PackageStep '::error::A release is cut by merging the release PR' 'refusal'
         Assert-True ((Get-StepField $refuse 'if') -cmatch "env\.EVENT_NAME == 'workflow_dispatch' && env\.DRY_RUN != 'true'") 'the refusal applies to a manual run without dry_run'
         $rehearsal = Get-PackageStep 'A dry run needs a rehearsal tag' 'rehearsal tag requirement'
         $condition = Get-StepField $rehearsal 'if'
@@ -619,7 +622,7 @@ $ExpectedWorkflows = @('ci.yml', 'pages.yml', 'pr-title.yml', 'release-please.ym
         Assert-True ($upload.Text -cmatch 'path:\s*\$\{\{ env\.OWN_DOWNLOADS_FILE \}\}') 'the artifact holds the record file'
         Assert-True ($releaseEnv -cmatch '(?m)^  OWN_DOWNLOADS_FILE:\s*\S*[/\\]own-downloads\.json\s*$') 'the file is called own-downloads.json and sits outside the release assets folder'
         Assert-True ($releaseEnv -cnotmatch 'OWN_DOWNLOADS_FILE:\s*\$\{\{') 'a literal path, so the verifier and the upload cannot disagree'
-        $collector = [IO.File]::ReadAllText((Join-Path $RepoRoot '.github\stats\collect.py'))
+        $collector = [IO.File]::ReadAllText((Join-Path $ConfigRoot '.github\stats\collect.py'))
         Assert-Contains $collector 'OWN_DOWNLOADS_ARTIFACT = "own-downloads"' 'the collector reads the artifact of this name'
         Assert-Contains $collector 'OWN_DOWNLOADS_FILE = "own-downloads.json"' 'the collector reads the file of this name'
         Assert-Contains $collector 'RELEASE_WORKFLOW_PATH = ".github/workflows/release.yml"' 'the collector accepts runs of this workflow file'
@@ -657,12 +660,12 @@ $ExpectedWorkflows = @('ci.yml', 'pages.yml', 'pr-title.yml', 'release-please.ym
         Assert-True ($rpJob -cmatch 'googleapis/release-please-action@') 'the job runs release-please'
         Assert-Contains $rpJob 'config-file: release-please-config.json' 'the config file'
         Assert-Contains $rpJob 'manifest-file: .release-please-manifest.json' 'the manifest file'
-        $config = Read-JsonFile -Path (Join-Path $RepoRoot 'release-please-config.json') -Why 'release-please reads it on every push to main.'
+        $config = Read-JsonFile -Path (Join-Path $ConfigRoot 'release-please-config.json') -Why 'release-please reads it on every push to main.'
         Assert-True ((Get-JsonProperty $config 'draft') -eq $true) 'draft: true, or releases/latest points at a release without assets until release.yml uploads them'
         Assert-True ((Get-JsonProperty $config 'force-tag-creation') -eq $true) 'force-tag-creation: true, or a draft has no tag and the gate and --verify-tag fail'
         Assert-True ((Get-JsonProperty $config 'include-component-in-tag') -eq $false) 'the tag must be vX.Y.Z, the only shape the gate accepts'
         Assert-True ((Get-JsonProperty $config 'skip-github-release') -ne $true) 'release-please must create the draft and the tag'
-        $manifest = Read-JsonFile -Path (Join-Path $RepoRoot '.release-please-manifest.json') -Why 'release-please takes the current version from it.'
+        $manifest = Read-JsonFile -Path (Join-Path $ConfigRoot '.release-please-manifest.json') -Why 'release-please takes the current version from it.'
         Assert-True ("$(Get-JsonProperty $manifest '.')" -cmatch '\A[0-9]+\.[0-9]+\.[0-9]+\z') 'the manifest holds the current version X.Y.Z of the root package'
     }
 
@@ -680,7 +683,11 @@ $ExpectedWorkflows = @('ci.yml', 'pages.yml', 'pr-title.yml', 'release-please.ym
         Assert-Equal 'actions: write' ((Get-GrantedPermissions $rpDispatch) -join '|') 'the permissions of the dispatching job'
         Assert-True ($rpDispatch -cmatch "(?m)^    if: needs\.release-please\.outputs\.prs_created == 'true'\s*$") 'only when the release PR was created or updated'
         $run = (@(Get-RunValues $rpDispatch) -join "`n")
-        foreach ($workflow in @('ci.yml', 'pr-title.yml')) { Assert-Contains $run "gh workflow run $workflow" "the release PR needs the checks of $workflow" }
+        foreach ($workflow in @('ci.yml', 'pr-title.yml')) {
+            Assert-True ($run -cmatch ('(?m)^\s*gh workflow run ' + [regex]::Escape($workflow) + ' .*--ref "\$branch"\s*$')) "the release PR needs the checks of $workflow, on ITS branch (without --ref the run is on main)"
+        }
+        Assert-Contains $run "jq -r '.headBranchName // empty'" 'the branch is the head branch of the PR release-please reported'
+        Assert-True ($run -cmatch '(?s)if \[ -z "\$branch" \]; then.*?exit 1') 'an empty branch fails the job instead of dispatching on the default branch'
         Assert-True ($rpDispatch -cmatch 'PR_JSON:\s*\$\{\{ needs\.release-please\.outputs\.pr \}\}') 'the branch comes from the PR release-please reported, through env'
     }
 
