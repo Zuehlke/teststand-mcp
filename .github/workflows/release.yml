@@ -1,0 +1,322 @@
+# The release workflow: a pushed tag becomes a published release, but only after the DRAFT of that
+# release has been downloaded back and verified the way a user would download it.
+#
+#   job `package` (read-only token):  tag gate -> build and package -> keep the release assets as an artifact
+#   job `release` (write token):      create a DRAFT with them -> verify the draft through the API -> check
+#                                     that the draft still holds the verified asset ids -> publish by the
+#                                     release id the verifier returned -> check the live asset ids again
+#                                     -> fetch releases/latest like a user and compare it with the
+#                                     verified archive.
+#
+# Why two jobs: everything that RUNS BUILD CODE (dotnet restore and publish execute NuGet packages and
+# MSBuild targets) has only a read-only token. The job that holds `contents: write` runs no dotnet and
+# no build: it only checks out the repository at the tagged commit (for the verifier scripts), takes the
+# files from the artifact and talks to the releases API. If `package` fails, `release` is skipped and
+# creates nothing, not even a draft. What the release assets are is decided once, in build\ReleaseAssets.psm1.
+#
+# Load-bearing choices (do not "simplify" them away):
+#   * `tags: ['**']`: a tag of any name starts the run, so a malformed tag (V1.9.0, v1.9, v1.9.0-rc)
+#     fails at the tag gate with the retag commands instead of being silently ignored by a filter.
+#   * A DRAFT first: a failed verification leaves a draft, so releases/latest never moves.
+#   * Re-running is safe: before it creates a draft, build\New-ReleaseDraft.ps1 deletes every earlier DRAFT
+#     of exactly this tag (the leftover of a failed run), and refuses when a PUBLISHED release already
+#     carries the tag (fix forward with the next patch version).
+#   * Publishing is by the verifier's release id, never by tag name: a stale draft with the same tag
+#     can then never be the one that goes live (the verifier refuses two releases for one tag). The
+#     asset ids are compared again just before the publish call, and again just after it. An asset that
+#     was added, replaced or removed between the verification and the recheck stops the release before it
+#     goes live. One that changes AFTER that recheck is only noticed once the release is live: the
+#     AfterPublish check then fails the run and prints the rollback, it cannot prevent it.
+#   * One tag releases BOTH plugins: the package job builds every architecture of build\PluginIdentity.psm1
+#     (teststand-mcp for x86, teststand-mcp-x64 for x64), and each plugin's four assets are verified on
+#     their own. The fixed names teststand-mcp.zip and teststand-mcp-x64.zip are what users fetch from
+#     releases/latest/download/.
+#   * Only a commit on main is released: the tag gate refuses a tag on any other commit (a dry run
+#     may come from a branch and publishes nothing, so it skips that check).
+#   * Tag names, inputs and refs are user input: they reach `run:` only through env, never inline.
+#   * Every run queues per ref (`release-<ref>`) and a running release is never cancelled, so two runs of
+#     one tag never overlap (a dry run queues per BRANCH, so dry runs of one rehearsal tag started from
+#     two branches can overlap; nothing they do can publish). Different tags may overlap, and the one that finishes last would otherwise
+#     take the label "latest": build\Publish-Release.ps1 therefore compares the version with the current
+#     latest release and publishes a LOWER version with make_latest=false (it prints which it chose, and the
+#     final check of releases/latest is skipped for such a release: latest rightly serves another one).
+#     A shared queue is deliberately not used: GitHub keeps one running and one pending run per queue and
+#     cancels the pending one when a third arrives, so a tag could silently never be published.
+#
+# What the verification does NOT prove: that the build is genuine. It proves that the uploaded files
+# are intact (digest, manifest, versioned copy) and were uploaded with this repository's workflow
+# token. A compromised build step would produce a consistent, verified, malicious release. Build
+# provenance attestation is a follow-up and is deliberately not part of this workflow yet.
+#
+# A manual run is a DRY RUN: it packages, creates a draft under the rehearsal tag
+# v<X.Y.Z>-rehearsal, verifies it through the API, then deletes the draft it created (by its id) and
+# the rehearsal tag. It never publishes. `inject_fault: corrupt-zip` replaces the uploaded x86 zip with
+# corrupt bytes (`corrupt-zip-x64` the x64 zip): the run must fail at the verification, publish nothing,
+# and still clean up. This is
+# also how the fork rehearsal exercises the whole path before the first real tag.
+name: release
+
+on:
+  push:
+    tags: ['**']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Rehearsal tag, v<X.Y.Z>-rehearsal (the draft is created under it and deleted again)'
+        required: true
+        type: string
+      dry_run:
+        description: 'Dry run: package, create the draft, verify it, delete it. A release is cut by pushing a tag, so this must stay ticked.'
+        required: true
+        type: boolean
+        default: true
+      inject_fault:
+        description: 'Fault to inject after the upload, to prove that a bad draft is never published'
+        required: true
+        type: choice
+        options:
+          - none
+          - corrupt-zip
+          - corrupt-zip-x64
+        default: none
+
+# Nothing by default; every job states what it needs.
+permissions: {}
+
+# One queue per ref, for tag pushes and dry runs alike; a running release is never cancelled half-way.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REPO: ${{ github.repository }}
+  EVENT_NAME: ${{ github.event_name }}
+  # 'true' only for a manual run that asked for it. A pushed tag is never a rehearsal, whatever its name.
+  DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+  INJECT_FAULT: ${{ github.event_name == 'workflow_dispatch' && inputs.inject_fault || 'none' }}
+  # User input: the pushed ref name, or the rehearsal tag of a manual run. Only the gate trusts it.
+  TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  DOTNET_NOLOGO: 'true'
+  DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+  OUT_DIR: artifacts/release
+  # Outside OUT_DIR, so it is never uploaded as a release asset.
+  OWN_DOWNLOADS_FILE: artifacts/own-downloads.json
+
+defaults:
+  run:
+    shell: powershell   # Windows PowerShell 5.1, the host the maintainers package with
+
+jobs:
+  package:
+    runs-on: windows-latest
+    timeout-minutes: 75
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.gate.outputs.tag }}
+      version: ${{ steps.gate.outputs.version }}
+      rehearsal: ${{ steps.gate.outputs.rehearsal }}
+      asset_prefixes: ${{ steps.package.outputs.asset_prefixes }}
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # the gate checks that the tagged commit is on refs/remotes/origin/main
+
+      - name: Refuse a manual run that is not a dry run
+        if: env.EVENT_NAME == 'workflow_dispatch' && env.DRY_RUN != 'true'
+        run: |
+          Write-Host '::error::A release is cut by pushing a tag vX.Y.Z. A manual run is only a dry run: tick dry_run.'
+          exit 1
+
+      - name: Check the tag (the gate)
+        id: gate
+        timeout-minutes: 5
+        run: |
+          $rehearsal = ($env:DRY_RUN -eq 'true')
+          $mainRef = if ($rehearsal) { '' } else { 'refs/remotes/origin/main' }
+          & .\build\Assert-ReleaseTag.ps1 -Tag $env:TAG -Rehearsal:$rehearsal -MainRef $mainRef
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Require a rehearsal tag for a dry run
+        if: env.DRY_RUN == 'true' && steps.gate.outputs.rehearsal != 'true'
+        run: |
+          Write-Host '::error::A dry run needs a rehearsal tag v<X.Y.Z>-rehearsal, so that its draft and tag can never collide with a real release.'
+          exit 1
+
+      - name: Install .NET 8
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Package the plugin archive of every architecture
+        id: package
+        env:
+          RELEASE_VERSION: ${{ steps.gate.outputs.version }}
+          RELEASE_TAG: ${{ steps.gate.outputs.tag }}
+        timeout-minutes: 55
+        run: |
+          # Each architecture into its own folder, then every plugin's assets side by side in OUT_DIR, the
+          # one folder the draft is created from. asset_prefixes tells the release job which plugins they are.
+          Import-Module .\build\BuildCommon.psm1 -Force
+          Import-Module .\build\PluginIdentity.psm1 -Force
+          foreach ($architecture in (Get-PluginArchitectures)) {
+            $dir = Join-Path $env:OUT_DIR $architecture
+            & .\build\Build-PluginArchive.ps1 -Version $env:RELEASE_VERSION -Tag $env:RELEASE_TAG -Architecture $architecture -OutDir $dir
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            Get-ChildItem -LiteralPath $dir -File -Filter 'teststand-mcp*' | Copy-Item -Destination $env:OUT_DIR
+          }
+          Add-GitHubOutput -Name 'asset_prefixes' -Value ((Get-PluginAssetPrefixes) -join ',')
+
+      # The files are already compressed archives: store them as they are.
+      - name: Keep the release assets for the release job
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-assets
+          path: ${{ env.OUT_DIR }}/teststand-mcp*
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  release:
+    needs: package
+    runs-on: windows-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write   # create, edit and delete releases, upload their assets, delete the rehearsal tag
+    env:
+      RELEASE_TAG: ${{ needs.package.outputs.tag }}
+      ASSET_PREFIXES: ${{ needs.package.outputs.asset_prefixes }}
+    steps:
+      # The repository at the tagged commit: only the verifier and gate scripts are used from it.
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Download the release assets built by the package job
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-assets
+          path: ${{ env.OUT_DIR }}
+
+      - name: Create the draft release with the release assets
+        id: create
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_SHA: ${{ github.sha }}
+        timeout-minutes: 20
+        run: |
+          # Deletes a leftover draft of this tag first, refuses a published release of it, and writes the id
+          # of the draft it creates to the step output release_id (the dry run's cleanup deletes that id only).
+          $dryRun = ($env:DRY_RUN -eq 'true')
+          & .\build\New-ReleaseDraft.ps1 -Repo $env:REPO -Tag $env:RELEASE_TAG -AssetDir $env:OUT_DIR -AssetPrefixes $env:ASSET_PREFIXES -Target $env:TARGET_SHA -DryRun:$dryRun
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Corrupt an uploaded zip (dry run only, to prove a bad draft is never published)
+        if: env.DRY_RUN == 'true' && (env.INJECT_FAULT == 'corrupt-zip' || env.INJECT_FAULT == 'corrupt-zip-x64')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        timeout-minutes: 10
+        run: |
+          Import-Module .\build\ReleaseAssets.psm1 -Force
+          Import-Module .\build\PluginIdentity.psm1 -Force
+          $archive = $ReleaseArchiveName
+          if ($env:INJECT_FAULT -eq 'corrupt-zip-x64') { $archive = (Get-PluginAssetNames -Prefix (Get-PluginIdentity -Architecture 'x64').assetPrefix -Version '0.0.0').Archive }
+          $folder = Join-Path $env:RUNNER_TEMP 'corrupt-zip'
+          [void](New-Item -ItemType Directory -Path $folder -Force)
+          $corrupt = Join-Path $folder $archive
+          [IO.File]::WriteAllBytes($corrupt, [byte[]](80, 75, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0, 255, 254, 253))
+          gh release upload $env:RELEASE_TAG $corrupt --clobber --repo $env:REPO
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Verify the draft the way a user would download it
+        id: verify
+        env:
+          GH_TOKEN: ${{ github.token }}
+        timeout-minutes: 30
+        run: |
+          $rehearsal = ($env:DRY_RUN -eq 'true')
+          & .\build\Assert-PublishedRelease.ps1 -Repo $env:REPO -Tag $env:RELEASE_TAG -Token $env:GH_TOKEN -AssetPrefixes $env:ASSET_PREFIXES -OwnDownloadsPath $env:OWN_DOWNLOADS_FILE -Rehearsal:$rehearsal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Check that the draft still holds exactly the verified assets
+        id: recheck
+        if: env.DRY_RUN != 'true' && steps.verify.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.verify.outputs.release_id }}
+          ASSET_IDS: ${{ steps.verify.outputs.asset_ids }}
+        timeout-minutes: 5
+        run: |
+          # The script refuses an id that is not a number before any API call, then reads the release by that id.
+          & .\build\Assert-ReleaseAssetSet.ps1 -Repo $env:REPO -ExpectedAssetIds $env:ASSET_IDS -ReleaseId $env:RELEASE_ID -Stage BeforePublish
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Publish the verified release as the latest release
+        id: publish
+        if: env.DRY_RUN != 'true' && steps.verify.outcome == 'success' && steps.recheck.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.verify.outputs.release_id }}
+        timeout-minutes: 5
+        run: |
+          # By id, never by tag name. A release of a lower version than the current latest one is published
+          # with make_latest=false; the script prints which value it chose.
+          & .\build\Publish-Release.ps1 -Repo $env:REPO -ReleaseId $env:RELEASE_ID
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Check that the published release holds exactly the verified assets
+        id: recheck_after
+        if: env.DRY_RUN != 'true' && steps.publish.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.verify.outputs.release_id }}
+          ASSET_IDS: ${{ steps.verify.outputs.asset_ids }}
+        timeout-minutes: 5
+        run: |
+          & .\build\Assert-ReleaseAssetSet.ps1 -Repo $env:REPO -ExpectedAssetIds $env:ASSET_IDS -ReleaseId $env:RELEASE_ID -Stage AfterPublish
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Fetch releases/latest as users do and compare it with the verified archives
+        id: latest
+        if: env.DRY_RUN != 'true' && steps.publish.outcome == 'success' && steps.recheck_after.outcome == 'success' && steps.publish.outputs.make_latest == 'true'
+        env:
+          ARCHIVE_HASHES: ${{ steps.verify.outputs.archive_hashes }}
+        timeout-minutes: 15
+        run: |
+          # An unset output must stop here: without the hashes the check would be the weaker one that
+          # accepts the previous release too. The verifier refuses a map that lacks a plugin's 64-digit hash.
+          if ([string]::IsNullOrWhiteSpace($env:ARCHIVE_HASHES)) {
+            Write-Host '::error::The verification did not report the SHA-256 of the archives it verified, so releases/latest cannot be compared with them.'
+            exit 1
+          }
+          & .\build\Assert-PublishedRelease.ps1 -Latest -Repo $env:REPO -AssetPrefixes $env:ASSET_PREFIXES -ExpectedArchiveHashes $env:ARCHIVE_HASHES -OwnDownloadsPath $env:OWN_DOWNLOADS_FILE
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Delete the rehearsal draft and its tag (dry run only)
+        if: always() && env.DRY_RUN == 'true' && needs.package.outputs.rehearsal == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CREATED_RELEASE_ID: ${{ steps.create.outputs.release_id }}
+        timeout-minutes: 5
+        run: |
+          # Deletes the draft THIS run created (by that id; empty means none was created) and the rehearsal tag.
+          # Every step is tried, and the script ends with an explicit exit code.
+          & .\build\Remove-RehearsalRelease.ps1 -Repo $env:REPO -Tag $env:RELEASE_TAG -ReleaseId $env:CREATED_RELEASE_ID
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # The stats collector reads this artifact (name, file name and schema are its contract). It is
+      # uploaded even when the run failed: the downloads that happened still count. Not for a dry run:
+      # its draft is deleted, so its downloads never reach a snapshot and must not be subtracted.
+      # overwrite: a re-run of this job uploads the same name into the same run.
+      - name: Report this run's own downloads to the stats collector
+        if: always() && env.DRY_RUN != 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: own-downloads
+          path: ${{ env.OWN_DOWNLOADS_FILE }}
+          if-no-files-found: warn
+          overwrite: true

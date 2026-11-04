@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "teststand": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/TestStandMCP.exe",
+      "args": [],
+      "env": {
+        "TESTSTAND_MCP_TestStand__PluginEnvironmentPath": "${user_config.tsenv_path}"
+      }
+    }
+  }
+}

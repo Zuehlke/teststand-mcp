@@ -49,7 +49,7 @@ public class McpServer
     /// <summary>Runs the stdio JSON-RPC read/dispatch/write loop until cancelled or EOF.</summary>
     public async Task RunAsync(CancellationToken ct = default)
     {
-        _logger.LogInformation("TestStand MCP Server starting (stdio transport)...");
+        _logger.LogInformation("{Product} starting (stdio transport)...", VersionInfo.ProductName);
 
         // Use UTF-8 without BOM for stdio
         Console.InputEncoding  = new UTF8Encoding(false);
@@ -119,7 +119,7 @@ public class McpServer
             await stdout.WriteLineAsync(responseJson);
         }
 
-        _logger.LogInformation("TestStand MCP Server stopped.");
+        _logger.LogInformation("{Product} stopped.", VersionInfo.ProductName);
     }
 
     // ── Dispatcher ────────────────────────────────────────────────────────────
@@ -196,11 +196,7 @@ public class McpServer
         return new InitializeResult
         {
             ProtocolVersion = negotiated,
-            ServerInfo      = new McpServerInfo
-            {
-                Name    = "TestStand MCP Server",
-                Version = "1.0.0"
-            },
+            ServerInfo      = VersionInfo.Current.ToServerInfo(),
             Capabilities = new McpCapabilities
             {
                 Tools     = new ToolsCapability     { ListChanged = false },

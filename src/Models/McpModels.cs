@@ -48,10 +48,10 @@ public class JsonRpcError
 /// <summary>Identifies the MCP server to the client during initialization.</summary>
 public class McpServerInfo
 {
-    /// <summary>Display name of the server.</summary>
-    [JsonPropertyName("name")]    public string Name { get; set; } = "TestStand MCP Server";
-    /// <summary>Server version string.</summary>
-    [JsonPropertyName("version")] public string Version { get; set; } = "1.0.0";
+    /// <summary>Display name of the server. Filled from <c>VersionInfo.ToServerInfo()</c>.</summary>
+    [JsonPropertyName("name")]    public string Name { get; set; } = "";
+    /// <summary>Server version string. Filled from <c>VersionInfo.ToServerInfo()</c>.</summary>
+    [JsonPropertyName("version")] public string Version { get; set; } = "";
 }
 
 /// <summary>The capabilities the server advertises to the client.</summary>

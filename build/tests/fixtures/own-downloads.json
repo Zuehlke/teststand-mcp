@@ -1,0 +1,15 @@
+{
+  "run_id": "1234567890",
+  "counts": {
+    "2026-08-20": {
+      "teststand-mcp.zip": { "draft": 2, "published": 0 },
+      "teststand-mcp.sha256": { "draft": 1, "published": 0 },
+      "teststand-mcp.manifest.sha256": { "draft": 1, "published": 0 },
+      "teststand-mcp-v1.9.0.zip": { "draft": 1, "published": 0 }
+    },
+    "2026-08-21": {
+      "teststand-mcp.zip": { "draft": 0, "published": 1 },
+      "teststand-mcp.sha256": { "draft": 0, "published": 1 }
+    }
+  }
+}

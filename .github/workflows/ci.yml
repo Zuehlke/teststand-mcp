@@ -1,0 +1,100 @@
+# Pull-request check. It runs the same scripts a maintainer runs and publishes nothing.
+#
+#   1. the engine-free unit tests (they need no TestStand: they live in a namespace without the
+#      [SetUpFixture] that connects the engine, see Test/TestExecution/Unit);
+#   2. every script test, the PowerShell ones under Windows PowerShell 5.1 AND PowerShell 7
+#      (build/Invoke-ScriptTests.ps1; a missing pwsh fails the run here);
+#   3. the stats tests (Python);
+#   4. the packaging script with version 0.0.0-ci, once per architecture (the x86 and the x64 plugin),
+#      which smoke-tests the staged exe and verifies its own output the way the release is verified;
+#   5. the archives, kept as a workflow artifact only. No release exists afterwards.
+#
+# The TestStand engine is NOT installed on a GitHub runner. Nothing here needs it: the packaging
+# smoke tests only run `--version`, `--list-tools --json` and an MCP `initialize` round trip, none of
+# which connects the engine (see build/PluginSmoke.psm1).
+name: ci
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# The token can read the repository and nothing else.
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: 'true'
+  DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+  # A pre-release version: the packaging script names the versioned copy after its numeric core
+  # (teststand-mcp-v0.0.0.zip), the name its local verification checks.
+  PACKAGE_VERSION: 0.0.0-ci
+  # Relative to the checkout, which is a fresh folder: assets of another version are never in it.
+  PACKAGE_OUT_DIR: artifacts/ci
+
+defaults:
+  run:
+    shell: powershell   # Windows PowerShell 5.1, the host the maintainers package with
+
+jobs:
+  check:
+    runs-on: windows-latest
+    # Arithmetic: the whole job takes about 30 minutes. Every step that can hang has its own cap, and the
+    # job must outlive the SUM of them (15 + 30 + 5 + 45 = 95 minutes) plus a margin for the steps without
+    # a cap (checkout, setup, upload), or a step's FAIL output would be lost to a bare cancellation of the
+    # job. Invoke-ScriptTests stops each script after 600 s and starts no script once less than 600 s of its
+    # 1500 s budget are left, so it prints its summary before its own 30-minute step cap.
+    timeout-minutes: 100
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install .NET 8
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Install Python 3.12
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+
+      # AnyCPU: the project builds for x86 or x64 to match the TestStand bitness, but these tests are
+      # pure logic and need neither, and an x86 test host would need an x86 .NET runtime the runner lacks.
+      - name: Run the engine-free unit tests
+        timeout-minutes: 15
+        run: dotnet test Test/TestExecution/TestStandMCP.IntegrationTests.csproj --filter "Category=EngineFree" -p:PlatformTarget=AnyCPU --nologo
+
+      - name: Run every script test under Windows PowerShell 5.1 and PowerShell 7
+        env:
+          TESTSTAND_MCP_REQUIRE_PWSH: '1' # a missing pwsh must fail here, not skip
+        timeout-minutes: 30
+        run: |
+          & .\build\Invoke-ScriptTests.ps1 -TimeoutSeconds 600 -TotalSeconds 1500
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run the stats tests
+        timeout-minutes: 5
+        run: python -m unittest discover -s .github/stats
+
+      - name: Package the plugin archive of every architecture at the CI version and verify it
+        timeout-minutes: 45
+        run: |
+          Import-Module .\build\PluginIdentity.psm1 -Force
+          foreach ($architecture in (Get-PluginArchitectures)) {
+            & .\build\Build-PluginArchive.ps1 -Version $env:PACKAGE_VERSION -Architecture $architecture -OutDir (Join-Path $env:PACKAGE_OUT_DIR $architecture)
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+      - name: Keep the archive as a workflow artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: plugin-archive
+          path: ${{ env.PACKAGE_OUT_DIR }}/*/teststand-mcp*
+          if-no-files-found: error
+          retention-days: 14
