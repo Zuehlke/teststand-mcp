@@ -45,6 +45,7 @@ public class T17_DataTypeFieldTests : TestBase
 
         var info = await Ts.CreateDataTypeAsync(TempSeqFile, typeName);
         Assert.That(info.Description, Is.EqualTo("attached-to-file"));
+        Assert.That(info.BaseType, Is.EqualTo("Container"), "an empty container used to report Unknown");
         await Ts.CreateDataTypeAsync(TempSeqFile, inner);
         await Ts.AddDataTypeFieldAsync(TempSeqFile, inner, "Flag", "Boolean");
 

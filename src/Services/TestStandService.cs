@@ -3269,6 +3269,13 @@ public sealed class TestStandService : ITestStandService
         try { _ = (double)prop.GetValNumber("", PropOption_CoerceToNumber);
               _ = (string)prop.GetValString("", PropOption_CoerceToString); return "Enum"; }
         catch (Exception) { /* not an enum */ }
+        // A container with no members yet (a freshly created type) fails every probe above.
+        try
+        {
+            if (((NiPropertyObject)(object)prop).Type.ValueType == NiPropValueTypes.PropValType_Container)
+                return "Container";
+        }
+        catch (Exception) { /* not a typed PropertyObject */ }
         return "Unknown";
     }
 
