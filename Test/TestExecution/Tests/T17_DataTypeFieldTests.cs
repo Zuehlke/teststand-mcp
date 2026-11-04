@@ -105,7 +105,7 @@ public class T17_DataTypeFieldTests : TestBase
             await Ts.InsertFileGlobalAsync(TempSeqFile, "gInst", typeName);
             var ex = Assert.ThrowsAsync<InvalidOperationException>(
                 () => Ts.DeleteDataTypeAsync(TempSeqFile, typeName));
-            Assert.That(ex!.Message, Does.Contain("still used"));
+            Assert.That(ex!.Message, Does.Contain("still used").And.Contain("FileGlobals.gInst"));
 
             await Ts.DeleteSubPropertyAsync(TempSeqFile, null, "gInst");
             await Ts.DeleteDataTypeAsync(TempSeqFile, typeName);

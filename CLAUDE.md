@@ -865,8 +865,12 @@ be instantiated and vanished on save.
 - Every field edit bumps the last version digit (or takes `type_version`) and clears `IsModifiedType` —
   otherwise `audit_type_consistency` reports `W_MODIFIED_TYPE`. Instances in the file update immediately.
 - Dotted field paths create missing parent containers; `'Name[]'` / `is_array` make an array field.
-- `delete_data_type` refuses a type still used (`PropertyObject.ContainsTypeInstance` on the file and on
-  every other type) unless `force:true`. Pinned by `T17`.
+- `delete_data_type` refuses a type still used unless `force:true`, naming each user
+  (`FileGlobals.gInst`, `MainSequence.Locals.X`, `type 'Other'.Field`). The check WALKS FileGlobals,
+  every sequence's Locals/Parameters and the other types by `PropertyObject.Type.TypeName` (+ array
+  `ElementType`). **Do not rely on `ContainsTypeInstance` on the file root** — it missed a FileGlobal
+  instance in the full suite (order-dependent, never in isolation); it is only the fallback for steps.
+  Pinned by `T17`.
 - New tool NAME `rename_data_type_field` + new params → need a FRESH MCP session.
 
 ### Pre-build validation

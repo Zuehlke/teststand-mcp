@@ -12762,6 +12762,40 @@ public sealed class TestStandService : ITestStandService
         });
     }
 
+    /// <summary>Collects the dotted paths below <paramref name="po"/> whose type — or array element type —
+    /// is <paramref name="typeName"/>. Does not descend into a match; bounded depth.</summary>
+    private static void CollectTypeUsages(NiPropertyObject po, string path, string typeName,
+        List<string> users, int depth)
+    {
+        if (po == null || depth > 32) return;
+        int n;
+        try { n = po.GetNumSubProperties(""); } catch { return; }
+        for (int i = 0; i < n; i++)
+        {
+            NiPropertyObject child; string childName;
+            try
+            {
+                childName = po.GetNthSubPropertyName("", i, 0);
+                child = (NiPropertyObject)(object)po.GetNthSubProperty("", i, 0);
+            }
+            catch { continue; }
+            string childPath = $"{path}.{childName}";
+
+            bool match = false;
+            try
+            {
+                var t = child.Type;
+                match = string.Equals(t.TypeName, typeName, StringComparison.OrdinalIgnoreCase)
+                     || (t.ValueType == NiPropValueTypes.PropValType_Array &&
+                         string.Equals(t.ElementType?.TypeName, typeName, StringComparison.OrdinalIgnoreCase));
+            }
+            catch { /* untyped node — keep walking */ }
+
+            if (match) users.Add(childPath);
+            else CollectTypeUsages(child, childPath, typeName, users, depth + 1);
+        }
+    }
+
     /// <inheritdoc/>
     public async Task DeleteDataTypeAsync(string filePath, string typeName, bool force = false,
         bool save = true)
@@ -12776,18 +12810,38 @@ public sealed class TestStandService : ITestStandService
             if (!force)
             {
                 // Removing a type that is still instantiated leaves those instances without a definition.
+                // The variables and the other types are walked explicitly: ContainsTypeInstance on the
+                // file root alone missed a FileGlobal instance depending on what ran before (measured in
+                // the full suite, never in isolation), so it is only the fallback for step properties.
                 var users = new List<string>();
-                try
+                var walkRoots = new List<(string Path, NiPropertyObject Po)>();
+                try { walkRoots.Add(("FileGlobals", GetFileGlobals(sf))); }
+                catch (Exception ex) { _logger.LogDebug(ex, "FileGlobals unreadable while checking '{Type}'.", typeName); }
+                var nsf = (NiSequenceFile)(object)sf;
+                for (int i = 0; i < nsf.NumSequences; i++)
                 {
-                    var root = (NiPropertyObject)(object)sf.AsPropertyObject();
-                    if (root.ContainsTypeInstance("", 0, typeName)) users.Add("the sequence file's variables/steps");
+                    try
+                    {
+                        var seq = nsf.GetSequence(i);
+                        walkRoots.Add(($"{seq.Name}.Locals",     seq.Locals));
+                        walkRoots.Add(($"{seq.Name}.Parameters", seq.Parameters));
+                    }
+                    catch (Exception ex) { _logger.LogDebug(ex, "Sequence {Index} unreadable while checking '{Type}'.", i, typeName); }
                 }
-                catch (Exception ex) { _logger.LogDebug(ex, "ContainsTypeInstance failed on the file for '{Type}'.", typeName); }
                 foreach (var (name, _, _, def) in EnumerateFileTypeDefs(tul))
+                    if (!string.Equals(name, typeName, StringComparison.OrdinalIgnoreCase))
+                        walkRoots.Add(($"type '{name}'", def));
+                foreach (var (path, po) in walkRoots)
+                    CollectTypeUsages(po, path, typeName, users, depth: 0);
+
+                if (users.Count == 0)
                 {
-                    if (string.Equals(name, typeName, StringComparison.OrdinalIgnoreCase)) continue;
-                    try { if (def.ContainsTypeInstance("", 0, typeName)) users.Add($"type '{name}'"); }
-                    catch (Exception ex) { _logger.LogDebug(ex, "ContainsTypeInstance failed on type '{Type}'.", name); }
+                    try
+                    {
+                        var root = (NiPropertyObject)(object)sf.AsPropertyObject();
+                        if (root.ContainsTypeInstance("", 0, typeName)) users.Add("a step of the sequence file");
+                    }
+                    catch (Exception ex) { _logger.LogDebug(ex, "ContainsTypeInstance failed on the file for '{Type}'.", typeName); }
                 }
                 if (users.Count > 0)
                     throw new InvalidOperationException(
