@@ -164,7 +164,8 @@ Add-Mutation 'pr-title: write-all by default' 'pr-title.yml' 'reads the pull req
 Add-Mutation 'pr-title: the action gets no token' 'pr-title.yml' 'reads the pull request only' "        env:`n          GITHUB_TOKEN: `${{ github.token }}`n" ''
 Add-Mutation 'pr-title: another action instead of the title check' 'pr-title.yml' 'reads the pull request only' 'amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1' $CheckoutPin
 Add-Mutation 'pr-title: an extra trigger' 'pr-title.yml' 'checks every pull request' "    types: [opened, edited, synchronize, reopened]`n" "    types: [opened, edited, synchronize, reopened]`n  workflow_dispatch:`n"
-Add-Mutation 'ci: an extra trigger' 'ci.yml' 'and for nothing else' "  push:`n    branches: [main]`n" "  push:`n    branches: [main]`n  workflow_dispatch:`n"
+Add-Mutation 'ci: runs again on main' 'ci.yml' 'and for nothing else' "  pull_request:`n    branches: [main]`n" "  pull_request:`n    branches: [main]`n  push:`n    branches: [main]`n"
+Add-Mutation 'ci: pull requests to any branch' 'ci.yml' 'and for nothing else' "  pull_request:`n    branches: [main]`n" "  pull_request:`n"
 Add-Mutation 'release-please: a job that starts the checks again' 'release-please.yml' 'runs for pushes to main only' "jobs:`n" "jobs:`n  ci-on-release-pr:`n    runs-on: ubuntu-latest`n    timeout-minutes: 5`n    steps:`n      - run: echo`n"
 Add-Mutation 'release-please: runs on every branch' 'release-please.yml' 'runs for pushes to main only' 'branches: [main]' "branches: ['**']"
 Add-Mutation 'release-please: a running release may be cancelled' 'release-please.yml' 'runs for pushes to main only' 'cancel-in-progress: false' 'cancel-in-progress: true'
