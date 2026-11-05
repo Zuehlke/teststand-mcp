@@ -7,6 +7,11 @@
 > one-plugin marketplace and AC-7's four assets now hold per plugin, for `teststand-mcp` (x86) and
 > `teststand-mcp-x64` (x64).
 
+> **Amended by [plans/release-please.md](../../plans/release-please.md) (2026-11-04):** a release is cut by
+> merging the release PR of `.github/workflows/release-please.yml`, which creates a draft with the tag and
+> calls `release.yml` with it. The tag push stays as the fallback. See the amended rows below and the
+> Ambiguity Log entries of 2026-11-04.
+
 ## Intent Description
 
 Today a TestStand MCP user installs the server by hand. They download a zip that someone built
@@ -37,7 +42,7 @@ bytes.
 | Plugin-flavour agents | staged `agents/*.md` (not committed) | Generated from `.claude/agents/*.md` while the archive is staged. The `mcp__teststand__` prefix becomes `mcp__plugin_teststand-mcp_teststand__`, and `CLAUDE.md` references become references to the `teststand-rules` skill. |
 | Rules skill | `plugin/skills/teststand-rules/SKILL.md` | The canonical home of the **user-facing** tool-usage rules from `CLAUDE.md`. `CLAUDE.md` imports it (`@…`) instead of keeping a copy. |
 | Hooks | `plugin/hooks/` | `hooks.json`, a PreToolUse read-only auto-allow hook, a SessionStart platform guard, and a SessionStart update-notify hook. |
-| Release workflow | `.github/workflows/release.yml` | Runs on every tag push (`tags: ['**']`), because the gate must see malformed tags. Steps: validate the tag, package (`build/Build-PluginArchive.ps1`), create a **draft** release, verify the draft, publish it. |
+| Release workflow | `.github/workflows/release.yml` | Runs on every tag push (`tags: ['**']`), because the gate must see malformed tags, and when `release-please.yml` calls it with the tag it created (`workflow_call`; amended 2026-11-04). Steps: validate the tag, package (`build/Build-PluginArchive.ps1`), create a **draft** release, verify the draft, publish it. |
 | PR build check | `.github/workflows/ci.yml` | Runs on pull requests to `main` and pushes to `main`. Same build, stage, assert and smoke-test steps as the release workflow. Publishes nothing. |
 | Download stats | `.github/workflows/pages.yml` + `.github/stats/`, `.github/site/` | Takes a daily snapshot of release-asset download counts on a `stats` branch and deploys a GitHub Pages page. |
 | Release scripts | `build/` (not shipped): `PluginIdentity.psm1`, `ReleaseAssets.psm1`, `Build-PluginArchive.ps1`, `Assert-ReleaseTag.ps1`, `Assert-PublishedRelease.ps1`, `Invoke-ScriptTests.ps1` | A shared module (asset names, plugin identity, manifest read and write, layout checks) plus thin entry points. They live outside `scripts/` because the csproj ships `scripts/**` next to the exe. Each one runs on a maintainer's machine too. |
@@ -109,6 +114,8 @@ bin/CLAUDE.md                   the user rules of the skill, generated; no READM
   output names the problem and gives the retag commands in a safe order (delete the remote tag,
   delete the local tag, create the new tag, push). No asset is published.
   `build/Assert-ReleaseTag.ps1` gives the same verdict when run locally.
+  Amended (2026-11-04): it is also called by `release-please.yml` with the tag release-please
+  created, and for a real release the gate also requires the tag to point at the commit the run builds.
 - **AC-2 Packaging layout spike (one-time, before the packaging is built).** On a TestStand station,
   three layouts are each driven through the four flows below:
   - self-contained single-file;
@@ -384,7 +391,8 @@ bin/CLAUDE.md                   the user rules of the skill, generated; no READM
   equals the recorded count. The record is
   `{ "run_id", "counts": { "<YYYY-MM-DD>": { "<asset>": { "draft": n, "published": m } } } }`, so
   each download carries its own date and phase. The collector accepts such an artifact only from
-  a run of `release.yml` of this repository (not a fork) started by a push or by hand, and only
+  a run of `release.yml`, or of `release-please.yml` which calls it (amended 2026-11-04), of this
+  repository (not a fork) started by a push or by hand, and only
   when the record's `run_id` names that run. Whether
   downloads of a *draft* raise `download_count` is measured on the first release, and the
   collector has a switch for both outcomes. If they count, the `draft` counts are subtracted with
@@ -414,7 +422,8 @@ bin/CLAUDE.md                   the user rules of the skill, generated; no READM
   "Moving from a manual install" note says to remove the old `teststand` registration before
   installing the plugin. The README no longer links to `/tags` for downloads.
 - **AC-20 CONTRIBUTING.** It describes how to cut a release:
-  - push a `vX.Y.Z` tag, which the workflow turns into a draft, verifies and then publishes;
+  - merge the release PR that release-please keeps open (amended 2026-11-04; pushing a `vX.Y.Z` tag
+    is the fallback), which the workflow turns into a draft, verifies and then publishes;
   - why a hand-uploaded asset is rejected;
   - the rollback;
   - how to package and test locally;
@@ -461,6 +470,10 @@ bin/CLAUDE.md                   the user rules of the skill, generated; no READM
 | Pre-release build asset name (slice 5, 2026-10-24) | `inferable` | inference | A local or pull-request build uses version `0.0.0-ci`. The release tag format and the release verifier know only `X.Y.Z`, so the versioned copy of such a build is named after its numeric core: `teststand-mcp-v0.0.0.zip`. A real release (`vX.Y.Z`) is unaffected. |
 | `bin/CLAUDE.md` content (slice 5 review, 2026-10-24) | `requires-stakeholder-input` | human | The direct route's `bin/CLAUDE.md` holds the user rules only (the skill and its reference files), not the repository's developer sections; `bin/README.md` is not shipped. |
 | Plan-review revision (2026-10-24) | `inferable` | inference (plan reviewers) | Five plan reviewers found defects in the original ACs. **AC-1**: the trigger was case-sensitive, so the gate was unreachable. **AC-2**: the spike now runs first, tests three layouts, and needs evidence that no installed runtime was loaded. **AC-3/6**: the `serverInfo` version was missing, and `--list-tools` wrote to a reallocated console. **AC-4/5**: the `bin/CLAUDE.md` import dangled, and the generated agents are now staged rather than committed. **AC-7/8**: draft, then verify, then publish, plus a rollback. **AC-13**: failures are now cached, there is an opt-out, the run is startup-only, and the redirect replaces the API. **AC-14**: literal names only, a consistent no-child-process rule, and a classification test. **AC-15/16**: startup-only, plus `additionalContext`, and an edited skill split into references. **AC-18**: the download count contract and accessibility. **AC-19**: the README lands in a second PR after the first release. None of these changes a stakeholder decision. |
+| release-please cuts releases (2026-11-04) | `requires-stakeholder-input` | human | A hand-published `v1.9.2` without assets took `releases/latest` and broke every marketplace install (run 41810103378). release-please now decides the version from conventional PR titles and creates a DRAFT with its tag; `release.yml` is called with that tag and still builds, verifies and publishes. `GITHUB_TOKEN`, not an App token, by the human's choice. Plan: `plans/release-please.md`. |
+| CRUD sweep, delete (2026-11-04) | `inferable` | inference + code review | Supersedes "delete = out of scope": `New-ReleaseDraft` deletes every draft of its tag (release-please's included) and a PUBLISHED release of the tag with NO assets, keeping their notes. A published release with assets, or with an unknown asset count, is still refused. |
+| Auth sweep, release-please (2026-11-04) | `inferable` | inference + code review | Amends "contents: write only in release": the third-party release-please action (pinned by SHA) holds `contents: write` and `pull-requests: write`, and a separate gh-only job holds `actions: write` to dispatch `ci.yml` and `pr-title.yml` on the release PR, which the workflow token opens without a `pull_request` run. |
+| Tag-commit check (2026-11-04) | `inferable` | code review | A called release builds the caller's `github.sha`, not the tag. The gate therefore refuses a real release whose tag does not resolve to that commit, so a late release-please release can never publish later code under an earlier tag. |
 
 ## Consistency Gate
 

@@ -9,10 +9,12 @@
 #    -Tag $env:TAG
 #  -Rehearsal also accepts v<X.Y.Z>-rehearsal (the dry-run tag); it adds "rehearsal=true" to the
 #  output, and "version" is still the plain X.Y.Z.
-#  -Commit is the commit the retag commands point at (default: GITHUB_SHA when set).
+#  -Commit is the commit the run builds: the one a malformed tag's retag commands point at and, with -MainRef,
+#  the commit the tag must resolve to (default: GITHUB_SHA when set).
 #  -MainRef refs/remotes/origin/main also requires -Commit to be on that branch (git merge-base
 #  --is-ancestor in -RepoRoot, default the repository of this script), so a tag on an unmerged commit
-#  publishes nothing. It must be a full ref: a short name such as origin/main can be shadowed by a pushed
+#  publishes nothing, and requires the tag to resolve to -Commit: release-please.yml CALLS the release
+#  workflow, which then builds GITHUB_SHA of the caller's push, and only this check ties that commit to the tag. It must be a full ref: a short name such as origin/main can be shadowed by a pushed
 #  TAG of that name, which git resolves first.
 #  Windows PowerShell 5.1 and PowerShell 7 compatible.
 # ============================================================================
@@ -60,6 +62,16 @@ try {
             Write-BuildFailure -What "git merge-base --is-ancestor could not check $Commit against $MainRef (exit $($ancestry.ExitCode), timed out: $($ancestry.TimedOut)): $($ancestry.Stderr.Trim())" -Why $why -Fix 'Run the gate again; the tag itself may be fine.'
         }
         Write-Host "Commit $Commit is on $MainRef."
+
+        $tagWhy = "The release is built from $Commit and published under $($result.Tag). They must be the same commit, or users would get code that is not the tagged code. No asset was built or published."
+        $tagged = Invoke-Git -RepoRoot $RepoRoot -Arguments @('rev-parse', '--verify', '--quiet', "refs/tags/$($result.Tag)^{commit}") -Why $tagWhy `
+            -Fix 'Fetch the tags first (in the workflow: actions/checkout with fetch-depth: 0 fetches them), then run the gate again.'
+        $taggedCommit = $tagged.Stdout.Trim()
+        if ($taggedCommit -cne $Commit) {
+            Write-BuildFailure -What "The tag $($result.Tag) points at $taggedCommit, but this run builds $Commit." -Why $tagWhy `
+                -Fix "Release the tagged commit: delete the remote tag and push it again at the same commit ($taggedCommit), which starts a run that builds it. Do this only while no published release names the tag. See CONTRIBUTING, 'A tag is not on main'."
+        }
+        Write-Host "Tag $($result.Tag) points at $Commit."
     }
 
     Add-GitHubOutput -Name 'version' -Value $result.Version

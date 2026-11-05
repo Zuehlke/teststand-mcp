@@ -10,14 +10,19 @@
 #                    a timeout on every job;
 #    ci.yml          triggers, read-only permissions, step order, the time budget (every step that can
 #                    hang is capped, the job outlives the sum), publishes nothing;
-#    release.yml     triggers, the per-ref concurrency group, the tag gate first, publish by release_id
+#    release.yml     triggers, the per-tag concurrency group, the tag gate first, publish by release_id
 #                    and only after the verify step, the final public fetch with the verified digest, the
-#                    own-downloads artifact, the dry run and its cleanup by the id it created.
+#                    own-downloads artifact, the dry run and its cleanup by the id it created;
+#    release-please.yml  a draft with its tag (the config), release.yml CALLED with that tag, the release PR's
+#                    checks dispatched, the least permissions per job;
+#    pr-title.yml    the conventional title check, re-run on a title edit, skipped (= passed) when dispatched.
 #  What the scripts do (delete a leftover draft, decide make_latest, delete only the own draft) is tested
 #  with a fake gh in ReleaseDraft.Tests.ps1; here only that the workflow calls them the way they expect.
 #  The asset names and their common prefix come from build\ReleaseAssets.psm1, never from a literal.
 #  The first real run of these workflows is the fork rehearsal (see the plan): this file cannot prove
 #  that GitHub accepts them, only that they keep the shape that was designed.
+#  -ConfigRoot (default -RepoRoot) is where release-please-config.json, .release-please-manifest.json and
+#  .github\stats\collect.py are read, so the mutation tests can hand it edited copies of those files too.
 #  Invoke-WorkflowContract reports every case through -Case (default: Invoke-Case of TestHarness.ps1), a
 #  scriptblock `param([string]$Name, [scriptblock]$Body)` that runs the body and records a throw as a failure.
 #  ASCII only on purpose: 5.1 reads a BOM-less script as ANSI.
@@ -26,7 +31,8 @@ Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'BuildCommon.psm1') 
 Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'ReleaseAssets.psm1') -Force
 
 function Invoke-WorkflowContract {
-    param([Parameter(Mandatory)][string]$WorkflowDir, [Parameter(Mandatory)][string]$RepoRoot, [scriptblock]$Case)
+    param([Parameter(Mandatory)][string]$WorkflowDir, [Parameter(Mandatory)][string]$RepoRoot, [string]$ConfigRoot, [scriptblock]$Case)
+    if (-not $ConfigRoot) { $ConfigRoot = $RepoRoot }
 
     $report = if ($null -ne $Case) { $Case } else { ${function:Invoke-Case} }
     function Invoke-Case {
@@ -37,6 +43,7 @@ function Invoke-WorkflowContract {
     $AssetGlob = "/$ReleaseAssetPrefix*"   # forward slash: a backslash is a glob escape
     $FullShaPattern = '[0-9a-f]{40}'
     $PinnedUsesPattern = '\Auses:\s+[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@' + $FullShaPattern + '\s+#\s+v[0-9]+(\.[0-9]+)*\s*\z'
+    $LocalWorkflowUsesPattern = '\Auses:\s+\./\.github/workflows/[A-Za-z0-9_-]+\.yml\s*\z'   # a workflow of this repository, at this commit
     $ExpressionOpen = '${{'
 
 # --- A deliberately small reader for the YAML these workflows use --------------------------------------
@@ -57,6 +64,13 @@ function Get-WorkflowFileNames {
 function Remove-CommentLines {
     param([string]$Text)
     return (@($Text -split "`n" | Where-Object { $_ -cnotmatch '\A\s*#' }) -join "`n")
+}
+
+# True for a job that calls a reusable workflow (`uses:` at job level): it has no steps and may not set a timeout,
+# so the called workflow's own jobs carry both.
+function Test-CallsWorkflow {
+    param([string]$JobText)
+    return ($JobText -cmatch '(?m)^    uses:')
 }
 
 # The text of a top-level block: from "<key>:" up to the next top-level key.
@@ -166,13 +180,14 @@ function Assert-Before {
 }
 
 $AllWorkflows = @(Get-WorkflowFileNames)
-$ExpectedWorkflows = @('ci.yml', 'pages.yml', 'release.yml')
+$ExpectedWorkflows = @('ci.yml', 'pages.yml', 'pr-title.yml', 'release-please.yml', 'release.yml')
 
     # ============================================================================================
     #  Every workflow
     # ============================================================================================
-    Invoke-Case 'all workflows: the three known workflows exist and nothing else was added unseen' {
-        Assert-Equal ($ExpectedWorkflows -join ',') ($AllWorkflows -join ',') 'workflow files'
+    Invoke-Case 'all workflows: the known workflows exist and nothing else was added unseen' {
+        # Both sides through the same Sort-Object: 5.1 and 7 order 'release-please.yml' and 'release.yml' differently.
+        Assert-Equal (@($ExpectedWorkflows | Sort-Object) -join ',') ($AllWorkflows -join ',') 'workflow files'
     }
 
     foreach ($file in $AllWorkflows) {
@@ -183,7 +198,8 @@ $ExpectedWorkflows = @('ci.yml', 'pages.yml', 'release.yml')
             Assert-True ($uses.Count -gt 0) 'no action used at all'
             foreach ($line in $uses) {
                 $bare = $line.Trim() -creplace '\A- ', ''
-                Assert-True ($bare -cmatch $PinnedUsesPattern) "not pinned to a SHA with a '# vX.Y.Z' comment: $bare"
+                $isLocalCall = ($line -cmatch '\A    uses:' -and $bare -cmatch $LocalWorkflowUsesPattern)
+                Assert-True ($isLocalCall -or $bare -cmatch $PinnedUsesPattern) "not pinned to a SHA with a '# vX.Y.Z' comment: $bare"
             }
         }
 
@@ -202,6 +218,7 @@ $ExpectedWorkflows = @('ci.yml', 'pages.yml', 'release.yml')
 
         Invoke-Case "$file : every job has a timeout" {
             foreach ($job in (Get-JobNames $text)) {
+                if (Test-CallsWorkflow (Get-JobText $text $job)) { continue }
                 Assert-True ((Get-JobText $text $job) -cmatch '(?m)^    timeout-minutes: [1-9][0-9]*\s*$') "job $job has no timeout-minutes"
             }
         }
@@ -214,6 +231,7 @@ $ExpectedWorkflows = @('ci.yml', 'pages.yml', 'release.yml')
         Invoke-Case "$file : follows the indentation convention the reader of this test relies on" {
             foreach ($job in (Get-JobNames $text)) {
                 $jobText = Get-JobText $text $job
+                if (Test-CallsWorkflow $jobText) { continue }
                 Assert-True (@(Get-Steps $jobText).Count -gt 0) "job $job has no steps at the expected indentation"
             }
         }
@@ -227,11 +245,12 @@ $ExpectedWorkflows = @('ci.yml', 'pages.yml', 'release.yml')
     $ciSteps = @(Get-Steps $ciJob)
     $ciCode = Remove-CommentLines $ci
 
-    Invoke-Case 'ci.yml: runs for pull requests to main and pushes to main, and for nothing else' {
+    Invoke-Case 'ci.yml: runs for pull requests to main, pushes to main and by hand (release-please.yml starts it on the release PR), and for nothing else' {
         $on = Get-TopLevelBlock $ci 'on'
         Assert-True ($on -cmatch '(?m)^  pull_request:') 'no pull_request trigger'
         Assert-True ($on -cmatch '(?m)^  push:') 'no push trigger'
-        Assert-Equal 2 @($on -split "`n" | Where-Object { $_ -cmatch '\A  [a-z_]+:' }).Count 'the number of triggers'
+        Assert-True ($on -cmatch '(?m)^  workflow_dispatch:') 'no workflow_dispatch trigger (the release PR, opened with the workflow token, gets its checks through it)'
+        Assert-Equal 3 @($on -split "`n" | Where-Object { $_ -cmatch '\A  [a-z_]+:' }).Count 'the number of triggers'
         Assert-Equal 2 @([regex]::Matches($on, 'branches:\s*\[main\]')).Count 'both triggers are limited to main'
     }
 
@@ -359,11 +378,13 @@ $ExpectedWorkflows = @('ci.yml', 'pages.yml', 'release.yml')
         return @($block -split "`n" | Where-Object { $_.Trim().Length -gt 0 } | ForEach-Object { ($_ -creplace '#.*\z', '').Trim() })
     }
 
-    Invoke-Case 'release.yml: a pushed tag of any name starts it (so a malformed tag is answered), and a manual run takes the dry-run inputs' {
+    Invoke-Case 'release.yml: a pushed tag of any name starts it (so a malformed tag is answered), a manual run takes the dry-run inputs, and release-please.yml calls it with a tag' {
         $on = Get-TopLevelBlock $releaseCode 'on'
         Assert-True ($on -cmatch "(?m)^  push:\s*\n    tags:\s*\[\s*'\*\*'\s*\]") "push must trigger on tags: ['**'] (a narrower filter would never answer V1.9.0)"
         Assert-NotContains $on 'branches' 'the push trigger'
-        Assert-Equal 2 @($on -split "`n" | Where-Object { $_ -cmatch '\A  [a-z_]+:' }).Count 'the number of triggers'
+        Assert-Equal 3 @($on -split "`n" | Where-Object { $_ -cmatch '\A  [a-z_]+:' }).Count 'the number of triggers'
+        Assert-True ($on -cmatch '(?m)^  workflow_call:\s*\n    inputs:\s*\n      tag:\s*\n(        .+\n)*?        required: true') 'workflow_call must take a required tag input, and nothing else'
+        Assert-True ((($on -split '(?m)^  workflow_call:')[1]) -cnotmatch '(?m)^      (dry_run|inject_fault):') 'a call is always a real release: it takes no dry-run inputs'
         Assert-True ($on -cmatch '(?m)^  workflow_dispatch:') 'no workflow_dispatch trigger'
         foreach ($input in @('tag', 'dry_run', 'inject_fault')) { Assert-True ($on -cmatch "(?m)^      ${input}:") "workflow_dispatch has no input $input" }
         Assert-True ($on -cmatch '(?s)dry_run:.*?type: boolean') 'dry_run must be a boolean'
@@ -372,9 +393,9 @@ $ExpectedWorkflows = @('ci.yml', 'pages.yml', 'release.yml')
         Assert-True ($on -cmatch '(?s)      tag:.*?required: true') 'the rehearsal tag is required'
     }
 
-    Invoke-Case 'release.yml: every run queues per ref (never in one shared queue, where a third run would cancel the pending one), and a running release is never cancelled' {
+    Invoke-Case 'release.yml: every run queues per tag (never in one shared queue, where a third run would cancel the pending one), and a running release is never cancelled' {
         $concurrency = Get-TopLevelBlock $releaseCode 'concurrency'
-        Assert-True ($concurrency -cmatch '(?m)^  group:\s*release-\$\{\{ github\.ref \}\}\s*$') 'the group must be exactly release-<ref>, for a tag push and a dry run alike'
+        Assert-True ($concurrency -cmatch '(?m)^  group:\s*release-\$\{\{ inputs\.tag \|\| github\.ref_name \}\}\s*$') 'the group must be exactly release-<tag input or tag name>, the same name as TAG: a call runs on refs/heads/main (github.ref would put every called release in one queue), and github.ref would give a pushed tag a second queue name (refs/tags/vX.Y.Z)'
         Assert-NotContains $concurrency 'event_name' 'the concurrency group (a shared queue for tag pushes would drop a pending tag when a third arrives)'
         Assert-True ($concurrency -cmatch 'cancel-in-progress:\s*false') 'a release in progress must not be cancelled'
     }
@@ -437,7 +458,7 @@ $ExpectedWorkflows = @('ci.yml', 'pages.yml', 'release.yml')
     Invoke-Case 'release.yml: the package job runs in the designed order and the release job in its own, each step exactly once' {
         $packageOrder = @(
             @{ Pattern = 'actions/checkout@'; What = 'checkout' }
-            @{ Pattern = '::error::A release is cut by pushing a tag'; What = 'refuse a manual real release' }
+            @{ Pattern = '::error::A release is cut by merging the release PR'; What = 'refuse a manual real release' }
             @{ Pattern = 'Assert-ReleaseTag\.ps1'; What = 'tag gate' }
             @{ Pattern = 'A dry run needs a rehearsal tag'; What = 'require a rehearsal tag' }
             @{ Pattern = 'actions/setup-dotnet@'; What = 'setup-dotnet' }
@@ -468,7 +489,7 @@ $ExpectedWorkflows = @('ci.yml', 'pages.yml', 'release.yml')
     }
 
     Invoke-Case 'release.yml: the tag is user input and reaches the gate only through env, the dry run only through a manual run' {
-        Assert-True ($releaseEnv -cmatch "TAG:\s*\$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.tag \|\| github\.ref_name \}\}") 'TAG must be the dispatch input or the pushed ref name'
+        Assert-True ($releaseEnv -cmatch "TAG:\s*\$\{\{ inputs\.tag \|\| github\.ref_name \}\}") 'TAG must be the dispatch or call input, or the pushed ref name'
         Assert-True ($releaseEnv -cmatch "DRY_RUN:\s*\$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.dry_run \}\}") 'DRY_RUN must be true only for a manual run that asked for it'
         Assert-True ($releaseEnv -cmatch "INJECT_FAULT:\s*\$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.inject_fault \|\| 'none' \}\}") 'INJECT_FAULT must be none for a push'
         $gate = (Get-PackageStep 'Assert-ReleaseTag\.ps1' 'tag gate').Text
@@ -482,7 +503,7 @@ $ExpectedWorkflows = @('ci.yml', 'pages.yml', 'release.yml')
     }
 
     Invoke-Case 'release.yml: a manual run that is not a dry run is refused before anything else, and a dry run needs a rehearsal tag' {
-        $refuse = Get-PackageStep '::error::A release is cut by pushing a tag' 'refusal'
+        $refuse = Get-PackageStep '::error::A release is cut by merging the release PR' 'refusal'
         Assert-True ((Get-StepField $refuse 'if') -cmatch "env\.EVENT_NAME == 'workflow_dispatch' && env\.DRY_RUN != 'true'") 'the refusal applies to a manual run without dry_run'
         $rehearsal = Get-PackageStep 'A dry run needs a rehearsal tag' 'rehearsal tag requirement'
         $condition = Get-StepField $rehearsal 'if'
@@ -602,10 +623,12 @@ $ExpectedWorkflows = @('ci.yml', 'pages.yml', 'release.yml')
         Assert-True ($upload.Text -cmatch 'path:\s*\$\{\{ env\.OWN_DOWNLOADS_FILE \}\}') 'the artifact holds the record file'
         Assert-True ($releaseEnv -cmatch '(?m)^  OWN_DOWNLOADS_FILE:\s*\S*[/\\]own-downloads\.json\s*$') 'the file is called own-downloads.json and sits outside the release assets folder'
         Assert-True ($releaseEnv -cnotmatch 'OWN_DOWNLOADS_FILE:\s*\$\{\{') 'a literal path, so the verifier and the upload cannot disagree'
-        $collector = [IO.File]::ReadAllText((Join-Path $RepoRoot '.github\stats\collect.py'))
+        $collector = [IO.File]::ReadAllText((Join-Path $ConfigRoot '.github\stats\collect.py'))
         Assert-Contains $collector 'OWN_DOWNLOADS_ARTIFACT = "own-downloads"' 'the collector reads the artifact of this name'
         Assert-Contains $collector 'OWN_DOWNLOADS_FILE = "own-downloads.json"' 'the collector reads the file of this name'
         Assert-Contains $collector 'RELEASE_WORKFLOW_PATH = ".github/workflows/release.yml"' 'the collector accepts runs of this workflow file'
+        Assert-Contains $collector 'RELEASE_PLEASE_WORKFLOW_PATH = ".github/workflows/release-please.yml"' 'the collector accepts runs of the caller too: a called workflow uploads into the run of its caller'
+        Assert-Contains $collector 'OWN_RUN_WORKFLOW_PATHS = (RELEASE_WORKFLOW_PATH, RELEASE_PLEASE_WORKFLOW_PATH)' 'both workflows are in the accepted set'
     }
 
     Invoke-Case 'release.yml: every step that calls GitHub or a build script has its own timeout' {
@@ -614,6 +637,85 @@ $ExpectedWorkflows = @('ci.yml', 'pages.yml', 'release.yml')
         foreach ($step in $calling) {
             Assert-True ($null -ne (Get-StepField $step 'timeout-minutes')) "step '$($step.Name)' has no timeout-minutes"
         }
+    }
+
+    # ============================================================================================
+    #  release-please.yml (release-please decides the version, release.yml publishes)
+    # ============================================================================================
+    $rp = Read-WorkflowText 'release-please.yml'
+    $rpCode = Remove-CommentLines $rp
+    $rpJob = Get-JobText $rpCode 'release-please'
+    $rpCall = Get-JobText $rpCode 'release'
+    $rpDispatch = Get-JobText $rpCode 'ci-on-release-pr'
+
+    Invoke-Case 'release-please.yml: runs for pushes to main only, in one queue that is never cancelled' {
+        $on = Get-TopLevelBlock $rpCode 'on'
+        Assert-True ($on -cmatch '(?m)^  push:\s*\n    branches:\s*\[main\]\s*$') 'push to main'
+        Assert-Equal 1 @($on -split "`n" | Where-Object { $_ -cmatch '\A  [a-z_]+:' }).Count 'the number of triggers'
+        $concurrency = Get-TopLevelBlock $rpCode 'concurrency'
+        Assert-True ($concurrency -cmatch 'cancel-in-progress:\s*false') 'a release in progress must not be cancelled'
+        Assert-True ((Get-TopLevelBlock $rpCode 'permissions') -cmatch '(?m)^permissions:\s*\{\}\s*$') 'top-level permissions must be {}'
+    }
+
+    Invoke-Case 'release-please.yml: the release-please job may write contents and pull requests only, and creates a DRAFT with its tag' {
+        Assert-Equal 'contents: write|pull-requests: write' ((Get-GrantedPermissions $rpJob) -join '|') 'the permissions of the release-please job (never actions: write for a third-party action)'
+        Assert-True ($rpJob -cmatch 'googleapis/release-please-action@') 'the job runs release-please'
+        Assert-Contains $rpJob 'config-file: release-please-config.json' 'the config file'
+        Assert-Contains $rpJob 'manifest-file: .release-please-manifest.json' 'the manifest file'
+        $config = Read-JsonFile -Path (Join-Path $ConfigRoot 'release-please-config.json') -Why 'release-please reads it on every push to main.'
+        Assert-Equal 'simple' "$(Get-JsonProperty $config 'release-type')" 'release-type simple: the version lives only in the manifest, the build takes it from the tag'
+        Assert-True ((Get-JsonProperty $config 'draft') -eq $true) 'draft: true, or releases/latest points at a release without assets until release.yml uploads them'
+        Assert-True ((Get-JsonProperty $config 'force-tag-creation') -eq $true) 'force-tag-creation: true, or a draft has no tag and the gate and --verify-tag fail'
+        Assert-True ((Get-JsonProperty $config 'include-component-in-tag') -eq $false) 'the tag must be vX.Y.Z, the only shape the gate accepts'
+        Assert-True ((Get-JsonProperty $config 'skip-github-release') -ne $true) 'release-please must create the draft and the tag'
+        $manifest = Read-JsonFile -Path (Join-Path $ConfigRoot '.release-please-manifest.json') -Why 'release-please takes the current version from it.'
+        Assert-True ("$(Get-JsonProperty $manifest '.')" -cmatch '\A[0-9]+\.[0-9]+\.[0-9]+\z') 'the manifest holds the current version X.Y.Z of the root package'
+    }
+
+    Invoke-Case 'release-please.yml: release.yml is CALLED with the tag release-please created, only when it created a release' {
+        Assert-True ($rpCall -cmatch '(?m)^    uses:\s*\./\.github/workflows/release\.yml\s*$') 'the release job calls release.yml of this commit'
+        Assert-True ($rpCall -cmatch '(?m)^    needs: release-please\s*$') 'after release-please'
+        Assert-True ($rpCall -cmatch "(?m)^    if: needs\.release-please\.outputs\.release_created == 'true'\s*$") 'only for a release release-please created'
+        Assert-True ($rpCall -cmatch '(?m)^      tag:\s*\$\{\{ needs\.release-please\.outputs\.tag_name \}\}\s*$') 'the tag is the one release-please created'
+        Assert-Equal 'contents: write' ((Get-GrantedPermissions $rpCall) -join '|') 'the most release.yml needs (its release job); its package job reduces it to read'
+        Assert-True ($rpJob -cmatch '(?m)^      release_created:\s*\$\{\{ steps\.release\.outputs\.release_created \}\}') 'release_created is passed on'
+        Assert-True ($rpJob -cmatch '(?m)^      tag_name:\s*\$\{\{ steps\.release\.outputs\.tag_name \}\}') 'tag_name is passed on'
+    }
+
+    Invoke-Case 'release-please.yml: the release PR gets its required checks by dispatch, from a job that may only dispatch' {
+        Assert-Equal 'actions: write' ((Get-GrantedPermissions $rpDispatch) -join '|') 'the permissions of the dispatching job'
+        Assert-True ($rpDispatch -cmatch "(?m)^    if: needs\.release-please\.outputs\.prs_created == 'true'\s*$") 'only when the release PR was created or updated'
+        $run = (@(Get-RunValues $rpDispatch) -join "`n")
+        foreach ($workflow in @('ci.yml', 'pr-title.yml')) {
+            Assert-True ($run -cmatch ('(?m)^\s*gh workflow run ' + [regex]::Escape($workflow) + ' .*--ref "\$branch"\s*$')) "the release PR needs the checks of $workflow, on ITS branch (without --ref the run is on main)"
+        }
+        Assert-Contains $run "jq -r '.headBranchName // empty'" 'the branch is the head branch of the PR release-please reported'
+        Assert-True ($run -cmatch '(?s)if \[ -z "\$branch" \]; then.*?exit 1') 'an empty branch fails the job instead of dispatching on the default branch'
+        Assert-True ($rpDispatch -cmatch 'PR_JSON:\s*\$\{\{ needs\.release-please\.outputs\.pr \}\}') 'the branch comes from the PR release-please reported, through env'
+    }
+
+    # ============================================================================================
+    #  pr-title.yml (release-please reads the squash commits, which are the PR titles)
+    # ============================================================================================
+    $prTitle = Read-WorkflowText 'pr-title.yml'
+    $prTitleCode = Remove-CommentLines $prTitle
+    $prTitleJob = Get-JobText $prTitleCode 'pr-title'
+
+    Invoke-Case 'pr-title.yml: checks every pull request to main again when its title is edited, and can be dispatched' {
+        $on = Get-TopLevelBlock $prTitleCode 'on'
+        Assert-True ($on -cmatch '(?m)^  pull_request:\s*\n    branches:\s*\[main\]') 'pull requests to main'
+        Assert-True ($on -cmatch '(?m)^    types:\s*\[[^\]]*\bedited\b[^\]]*\]') 'a title edit must re-run the check'
+        Assert-True ($on -cmatch '(?m)^    types:\s*\[[^\]]*\bsynchronize\b[^\]]*\]') 'a new push must re-run the check'
+        Assert-True ($on -cmatch '(?m)^  workflow_dispatch:') 'release-please.yml dispatches it on the release PR'
+        Assert-Equal 2 @($on -split "`n" | Where-Object { $_ -cmatch '\A  [a-z_]+:' }).Count 'the number of triggers'
+    }
+
+    Invoke-Case 'pr-title.yml: reads the pull request only, runs only for one, and checks it with the semantic PR title action' {
+        Assert-Equal 'pull-requests: read' ((Get-GrantedPermissions $prTitleJob) -join '|') 'the permissions of the job'
+        Assert-True ((Get-TopLevelBlock $prTitleCode 'permissions') -cmatch '(?m)^permissions:\s*\{\}\s*$') 'top-level permissions must be {}'
+        Assert-True ($prTitleJob -cmatch "(?m)^    if: github\.event_name == 'pull_request'\s*$") 'skipped when dispatched: a skipped job counts as passed, and there is no title to read'
+        Assert-True ($prTitleJob -cmatch 'amannn/action-semantic-pull-request@') 'the title check'
+        Assert-True ($prTitleJob -cmatch 'GITHUB_TOKEN:\s*\$\{\{ github\.token \}\}') 'the action reads the PR with the workflow token'
     }
 
     Invoke-Case 'workflows: every build script a workflow calls exists and takes every parameter the call passes' {

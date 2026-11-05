@@ -32,18 +32,31 @@ function Add-Mutation {
     $script:Mutations += [pscustomobject]@{ Name = $Name; File = $File; Expect = $Expect; Old = $Old.Replace("`r`n", "`n"); New = $New.Replace("`r`n", "`n") }
 }
 
-# A temp folder with LF copies of every workflow, one of them edited.
+# The files outside .github\workflows that the contract reads; a mutation names one by this relative path.
+$ConfigFiles = @('release-please-config.json', '.release-please-manifest.json', '.github/stats/collect.py')
+
+# The text of one file with the mutation applied when it names that file.
+function Get-MutatedText {
+    param([string]$Path, [string]$RelativePath, $Mutation)
+    $text = [IO.File]::ReadAllText($Path).Replace("`r`n", "`n")
+    if ($null -eq $Mutation -or $RelativePath -cne $Mutation.File) { return $text }
+    $at = $text.IndexOf($Mutation.Old, [StringComparison]::Ordinal)
+    if ($at -lt 0) { throw "the mutation '$($Mutation.Name)' does not apply: its text is not in $($Mutation.File):`n$($Mutation.Old)" }
+    return $text.Substring(0, $at) + $Mutation.New + $text.Substring($at + $Mutation.Old.Length)
+}
+
+# A temp folder with LF copies of every workflow, and below it a 'root' folder with copies of the $ConfigFiles
+# (the contract's -ConfigRoot), one of all these edited.
 function New-WorkflowCopy {
     param($Mutation)
     $dir = New-TempDir
     foreach ($file in (Get-ChildItem -LiteralPath $WorkflowDir -File -Filter '*.yml')) {
-        $text = [IO.File]::ReadAllText($file.FullName).Replace("`r`n", "`n")
-        if ($null -ne $Mutation -and $file.Name -ceq $Mutation.File) {
-            $at = $text.IndexOf($Mutation.Old, [StringComparison]::Ordinal)
-            if ($at -lt 0) { throw "the mutation '$($Mutation.Name)' does not apply: its text is not in $($Mutation.File):`n$($Mutation.Old)" }
-            $text = $text.Substring(0, $at) + $Mutation.New + $text.Substring($at + $Mutation.Old.Length)
-        }
-        [IO.File]::WriteAllText((Join-Path $dir $file.Name), $text, $Utf8NoBom)
+        [IO.File]::WriteAllText((Join-Path $dir $file.Name), (Get-MutatedText $file.FullName $file.Name $Mutation), $Utf8NoBom)
+    }
+    foreach ($relative in $ConfigFiles) {
+        $target = Join-Path (Join-Path $dir 'root') $relative
+        [void](New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force)
+        [IO.File]::WriteAllText($target, (Get-MutatedText (Join-Path $RepoRoot $relative) $relative $Mutation), $Utf8NoBom)
     }
     return $dir
 }
@@ -58,7 +71,7 @@ function Invoke-ContractAgainst {
         try { & $Body; [void]$results.Add(@{ Name = $Name; Passed = $true; Message = '' }) }
         catch { [void]$results.Add(@{ Name = $Name; Passed = $false; Message = $_.Exception.Message }) }
     }.GetNewClosure()
-    try { Invoke-WorkflowContract -WorkflowDir $Directory -RepoRoot $RepoRoot -Case $recorder }
+    try { Invoke-WorkflowContract -WorkflowDir $Directory -RepoRoot $RepoRoot -ConfigRoot (Join-Path $Directory 'root') -Case $recorder }
     catch { [void]$results.Add(@{ Name = 'the contract could not run'; Passed = $false; Message = $_.Exception.Message }) }
     return @($results)
 }
@@ -70,7 +83,7 @@ $SetupDotnetPin = 'actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68
 # --- release.yml ---------------------------------------------------------------------------------------
 Add-Mutation 'an action pinned by a movable tag' 'release.yml' 'every action is pinned' $DownloadPin 'actions/download-artifact@v8'
 Add-Mutation 'a pin without its version comment' 'release.yml' 'every action is pinned' $SetupDotnetPin 'actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68'
-Add-Mutation 'an expression inside a run: block' 'release.yml' 'no run: block contains an expression' "Write-Host '::error::A release is cut by pushing a tag vX.Y.Z." "Write-Host '`${{ github.ref_name }}'; Write-Host '::error::A release is cut by pushing a tag vX.Y.Z."
+Add-Mutation 'an expression inside a run: block' 'release.yml' 'no run: block contains an expression' "Write-Host '::error::A release is cut by merging the release PR" "Write-Host '`${{ github.ref_name }}'; Write-Host '::error::A release is cut by merging the release PR"
 Add-Mutation 'the release job loses its write permission' 'release.yml' 'only the release job may write' "      contents: write" "      contents: read"
 Add-Mutation 'the package job gets a write token' 'release.yml' 'only the release job may write' "    permissions:`n      contents: read`n    outputs:" "    permissions:`n      contents: write`n    outputs:"
 Add-Mutation 'an extra permission on the release job' 'release.yml' 'only the release job may write' "      contents: write" "      contents: write`n      id-token: write"
@@ -78,8 +91,8 @@ Add-Mutation 'the release job no longer needs the package job' 'release.yml' 'th
 Add-Mutation 'a dotnet step in the job that holds the write token' 'release.yml' 'the two jobs are split' "      - name: Download the release assets built by the package job" "      - uses: $SetupDotnetPin`n      - name: Download the release assets built by the package job"
 Add-Mutation 'a release script in the package job, which has no token' 'release.yml' 'the two jobs are split' "      - name: Install .NET 8" "      - name: Publish early`n        run: |`n          & .\build\Publish-Release.ps1 -Repo `$env:REPO -ReleaseId 1`n      - name: Install .NET 8"
 Add-Mutation 'the tag filter narrowed to v*' 'release.yml' 'a pushed tag of any name starts it' "push:`n    tags: ['**']" "push:`n    tags: ['v*']"
-Add-Mutation 'tag pushes share one queue again' 'release.yml' 'queues per ref' 'group: release-${{ github.ref }}' "group: release-`${{ github.event_name == 'push' && 'publish' || github.ref }}"
-Add-Mutation 'a running release may be cancelled' 'release.yml' 'queues per ref' 'cancel-in-progress: false' 'cancel-in-progress: true'
+Add-Mutation 'tag pushes share one queue again' 'release.yml' 'queues per tag' 'group: release-${{ inputs.tag || github.ref_name }}' "group: release-`${{ github.event_name == 'push' && 'publish' || github.ref }}"
+Add-Mutation 'a running release may be cancelled' 'release.yml' 'queues per tag' 'cancel-in-progress: false' 'cancel-in-progress: true'
 Add-Mutation 'publishing by tag name' 'release.yml' 'publishing is by the verifier release id' '& .\build\Publish-Release.ps1 -Repo $env:REPO -ReleaseId $env:RELEASE_ID' '& .\build\Publish-Release.ps1 -Repo $env:REPO -ReleaseId $env:RELEASE_TAG'
 Add-Mutation 'publishing with a make_latest that is fixed in the workflow' 'release.yml' 'publishing is by the verifier release id' '& .\build\Publish-Release.ps1' 'gh api -X PATCH "repos/$env:REPO/releases/$env:RELEASE_ID" -F draft=false -f make_latest=true; & .\build\Publish-Release.ps1'
 Add-Mutation 'publishing without the asset recheck' 'release.yml' 'publishing is by the verifier release id' " && steps.verify.outcome == 'success' && steps.recheck.outcome == 'success'" " && steps.verify.outcome == 'success'"
@@ -133,6 +146,48 @@ Add-Mutation 'ci: a missing pwsh no longer fails the run' 'ci.yml' 'the script t
 Add-Mutation 'ci: triggered by pull_request_target' 'ci.yml' 'pull_request_target' "  pull_request:`n    branches: [main]" "  pull_request_target:`n    branches: [main]"
 Add-Mutation 'ci: the wrong test category' 'ci.yml' 'the unit tests run only' 'Category=EngineFree' 'Category=Integration'
 Add-Mutation 'ci: an x86 test host' 'ci.yml' 'the unit tests run only' ' -p:PlatformTarget=AnyCPU' ''
+Add-Mutation 'called releases share one queue' 'release.yml' 'queues per tag' 'group: release-${{ inputs.tag || github.ref_name }}' 'group: release-${{ github.ref }}'
+Add-Mutation 'one tag gets two queue names again' 'release.yml' 'queues per tag' 'group: release-${{ inputs.tag || github.ref_name }}' 'group: release-${{ inputs.tag || github.ref }}'
+Add-Mutation 'release.yml can no longer be called' 'release.yml' 'calls it with a tag' "  workflow_call:`n    inputs:`n      tag:`n        description: 'The tag release-please created, vX.Y.Z'`n        required: true`n        type: string`n" ''
+Add-Mutation 'a call that takes a dry-run input after its tag' 'release.yml' 'calls it with a tag' "        description: 'The tag release-please created, vX.Y.Z'`n        required: true`n        type: string`n" "        description: 'The tag release-please created, vX.Y.Z'`n        required: true`n        type: string`n      dry_run:`n        type: boolean`n"
+Add-Mutation 'a call that takes a dry-run input' 'release.yml' 'calls it with a tag' "  workflow_call:`n    inputs:`n      tag:" "  workflow_call:`n    inputs:`n      dry_run:`n        type: boolean`n      tag:"
+Add-Mutation 'the tag of a call ignored' 'release.yml' 'the tag is user input' 'TAG: ${{ inputs.tag || github.ref_name }}' "TAG: `${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}"
+
+# --- release-please.yml and pr-title.yml -----------------------------------------------------------------
+Add-Mutation 'ci: no longer dispatchable for the release PR' 'ci.yml' 'and by hand' "  workflow_dispatch:`n" ''
+Add-Mutation 'release-please: release.yml called without a release' 'release-please.yml' 'only when it created a release' "    if: needs.release-please.outputs.release_created == 'true'`n" ''
+Add-Mutation 'release-please: release.yml called with another tag' 'release-please.yml' 'only when it created a release' 'tag: ${{ needs.release-please.outputs.tag_name }}' 'tag: ${{ github.ref_name }}'
+Add-Mutation 'release-please: the third-party action may dispatch workflows' 'release-please.yml' 'contents and pull requests only' 'pull-requests: write' "pull-requests: write`n      actions: write"
+Add-Mutation 'release-please: a reusable workflow from elsewhere' 'release-please.yml' 'every action is pinned' 'uses: ./.github/workflows/release.yml' 'uses: someone/else/.github/workflows/release.yml@main'
+Add-Mutation 'release-please: the release PR misses the pr-title check' 'release-please.yml' 'required checks by dispatch' 'gh workflow run pr-title.yml' 'echo pr-title.yml'
+Add-Mutation 'pr-title: a title edit no longer re-runs the check' 'pr-title.yml' 'again when its title is edited' 'types: [opened, edited, synchronize, reopened]' 'types: [opened, synchronize, reopened]'
+Add-Mutation 'pr-title: runs without a pull request' 'pr-title.yml' 'runs only for one' "    if: github.event_name == 'pull_request'`n" ''
+Add-Mutation 'pr-title: a write token' 'pr-title.yml' 'reads the pull request only' 'pull-requests: read' 'pull-requests: write'
+Add-Mutation 'pr-title: write-all by default' 'pr-title.yml' 'reads the pull request only' 'permissions: {}' 'permissions: write-all'
+Add-Mutation 'pr-title: the action gets no token' 'pr-title.yml' 'reads the pull request only' "        env:`n          GITHUB_TOKEN: `${{ github.token }}`n" ''
+Add-Mutation 'pr-title: another action instead of the title check' 'pr-title.yml' 'reads the pull request only' 'amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1' $CheckoutPin
+Add-Mutation 'pr-title: an extra trigger' 'pr-title.yml' 'checks every pull request' "  workflow_dispatch:`n" "  workflow_dispatch:`n  push:`n"
+Add-Mutation 'release-please: runs on every branch' 'release-please.yml' 'runs for pushes to main only' 'branches: [main]' "branches: ['**']"
+Add-Mutation 'release-please: a running release may be cancelled' 'release-please.yml' 'runs for pushes to main only' 'cancel-in-progress: false' 'cancel-in-progress: true'
+Add-Mutation 'release-please: write-all by default' 'release-please.yml' 'runs for pushes to main only' 'permissions: {}' 'permissions: write-all'
+Add-Mutation 'release-please: the call cannot write the release' 'release-please.yml' 'only when it created a release' 'contents: write # release.yml grants' 'contents: read # release.yml grants'
+Add-Mutation 'release-please: release_created not passed on' 'release-please.yml' 'only when it created a release' "      release_created: `${{ steps.release.outputs.release_created }}`n" ''
+Add-Mutation 'release-please: checks dispatched without a release PR' 'release-please.yml' 'required checks by dispatch' "    if: needs.release-please.outputs.prs_created == 'true'`n" ''
+Add-Mutation 'release-please: the dispatching job may not dispatch' 'release-please.yml' 'required checks by dispatch' 'actions: write # dispatch' 'contents: read # dispatch'
+Add-Mutation 'release-please: ci.yml no longer dispatched' 'release-please.yml' 'required checks by dispatch' 'gh workflow run ci.yml' 'echo ci.yml'
+Add-Mutation 'release-please: checks dispatched on main' 'release-please.yml' 'required checks by dispatch' ' --ref "$branch"' ''
+Add-Mutation 'release-please: an empty branch no longer fails the job' 'release-please.yml' 'required checks by dispatch' "            exit 1`n" ''
+Add-Mutation 'release-please: the branch not from the PR' 'release-please.yml' 'required checks by dispatch' "jq -r '.headBranchName // empty'" "jq -r '.baseBranchName // empty'"
+
+# --- the files outside .github/workflows the contract reads ----------------------------------------------
+Add-Mutation 'config: published, not a draft' 'release-please-config.json' 'creates a DRAFT with its tag' '"draft": true' '"draft": false'
+Add-Mutation 'config: a draft without its tag' 'release-please-config.json' 'creates a DRAFT with its tag' '"force-tag-creation": true' '"force-tag-creation": false'
+Add-Mutation 'config: a component in the tag' 'release-please-config.json' 'creates a DRAFT with its tag' '"include-component-in-tag": false' '"include-component-in-tag": true'
+Add-Mutation 'config: no GitHub release at all' 'release-please-config.json' 'creates a DRAFT with its tag' '"draft": true,' "`"draft`": true,`n  `"skip-github-release`": true,"
+Add-Mutation 'manifest: not a plain version' '.release-please-manifest.json' 'creates a DRAFT with its tag' '"1.9.2"' '"v1.9.2"'
+Add-Mutation 'collector: release-please runs no longer accepted' '.github/stats/collect.py' 'own-downloads is uploaded' 'RELEASE_PLEASE_WORKFLOW_PATH = ".github/workflows/release-please.yml"' 'RELEASE_PLEASE_WORKFLOW_PATH = ".github/workflows/other.yml"'
+Add-Mutation 'collector: release-please dropped from the accepted set' '.github/stats/collect.py' 'own-downloads is uploaded' 'OWN_RUN_WORKFLOW_PATHS = (RELEASE_WORKFLOW_PATH, RELEASE_PLEASE_WORKFLOW_PATH)' 'OWN_RUN_WORKFLOW_PATHS = (RELEASE_WORKFLOW_PATH,)'
+Add-Mutation 'config: another release type' 'release-please-config.json' 'creates a DRAFT with its tag' '"release-type": "simple"' '"release-type": "node"'
 
 try {
     Invoke-Case 'mutations: the table has at least 20 named defects and every one names the rule it breaks' {

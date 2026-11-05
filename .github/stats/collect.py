@@ -49,6 +49,9 @@ MAX_PAGES = 10
 OWN_DOWNLOADS_ARTIFACT = "own-downloads"
 OWN_DOWNLOADS_FILE = "own-downloads.json"
 RELEASE_WORKFLOW_PATH = ".github/workflows/release.yml"
+# release-please.yml CALLS release.yml, and a called workflow uploads its artifacts into the caller's run.
+RELEASE_PLEASE_WORKFLOW_PATH = ".github/workflows/release-please.yml"
+OWN_RUN_WORKFLOW_PATHS = (RELEASE_WORKFLOW_PATH, RELEASE_PLEASE_WORKFLOW_PATH)
 OWN_RUN_EVENTS = ("push", "workflow_dispatch")
 
 REPO_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*")
@@ -91,9 +94,11 @@ def _artifact_list(response: object) -> list:
 
 def provenance_problem(artifact_run: Mapping[str, object], run: object) -> str | None:
     """Why an own-downloads artifact must not be trusted, or None when it comes from a run of
-    release.yml of this very repository (not a fork) started by a push or by hand.
+    release.yml (or of release-please.yml, which calls it) of this very repository (not a fork)
+    started by a push or by hand.
 
-    The default branch is deliberately not checked: release runs are tag pushes.
+    The branch is deliberately not checked: a tag push runs on the tag and a call from
+    release-please.yml runs on main, so the branch names no release.
     """
     repository_id, head_repository_id = artifact_run.get("repository_id"), artifact_run.get("head_repository_id")
     if repository_id is None or repository_id != head_repository_id:
@@ -101,8 +106,8 @@ def provenance_problem(artifact_run: Mapping[str, object], run: object) -> str |
     if not isinstance(run, dict):
         return "its run could not be read"
     path = run.get("path")
-    if not isinstance(path, str) or path.split("@", 1)[0] != RELEASE_WORKFLOW_PATH:
-        return "its run is not a run of release.yml"
+    if not isinstance(path, str) or path.split("@", 1)[0] not in OWN_RUN_WORKFLOW_PATHS:
+        return "its run is not a run of release.yml or of release-please.yml, which calls it"
     if run.get("event") not in OWN_RUN_EVENTS:
         return "its run was not started by a push or by hand"
     return None

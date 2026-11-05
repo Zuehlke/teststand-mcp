@@ -253,22 +253,27 @@ try {
             $run = Invoke-ChildProcess -FilePath 'git' -ArgumentList (@('-C', $dir, '-c', 'user.name=t', '-c', 'user.email=t@example.invalid') + $GitArgs) -TimeoutSeconds 60
             Assert-Equal 0 $run.ExitCode "git $($GitArgs -join ' ') said: $($run.Stderr)"
             return $run.Stdout.Trim()
-        }
+        }.GetNewClosure()   # bound to THIS fixture's $dir; the test cases call it later, from their own scope
         [void](& $git @('init', '-q', '-b', 'main'))
         [void](& $git @('commit', '-q', '--allow-empty', '-m', 'on main'))
         $onMain = & $git @('rev-parse', 'HEAD')
         [void](& $git @('checkout', '-q', '-b', 'side'))
         [void](& $git @('commit', '-q', '--allow-empty', '-m', 'unmerged'))
-        return @{ Dir = $dir; OnMain = $onMain; OffMain = (& $git @('rev-parse', 'HEAD')) }
+        $offMain = & $git @('rev-parse', 'HEAD')
+        [void](& $git @('checkout', '-q', 'main'))
+        [void](& $git @('commit', '-q', '--allow-empty', '-m', 'later on main'))
+        return @{ Dir = $dir; Git = $git; OnMain = $onMain; OffMain = $offMain; LaterOnMain = (& $git @('rev-parse', 'HEAD')) }
     }
 
     Invoke-Case 'gate: -MainRef passes a commit on that branch and writes the outputs' {
         $repo = New-MainFixture
         $outFile = Join-Path (New-TempDir) 'github_output'
         Use-Environment @{ GITHUB_OUTPUT = $outFile } {
+            [void](& $repo.Git @('tag', 'v1.9.0', $repo.OnMain))
             $run = Invoke-Script $TagGatePath @{ Tag = 'v1.9.0'; Commit = $repo.OnMain; MainRef = 'refs/heads/main'; RepoRoot = $repo.Dir }
             Assert-Equal 0 $run.ExitCode "exit code. Output was:`n$($run.Output)"
             Assert-Contains $run.Output "is on refs/heads/main" 'the check says it ran'
+            Assert-Contains $run.Output "Tag v1.9.0 points at $($repo.OnMain)" 'the tag check says it ran'
         }
         Assert-Equal "version=1.9.0`ntag=v1.9.0`n" ([IO.File]::ReadAllText($outFile, $Utf8NoBom)) 'GITHUB_OUTPUT text'
     }
@@ -283,6 +288,29 @@ try {
             Assert-Contains $run.Output 'git push origin --delete refs/tags/v1.9.0' 'the retag starts with the remote delete'
         }
         Assert-True (-not (Test-Path -LiteralPath $outFile)) 'GITHUB_OUTPUT must not be written for a refused commit'
+    }
+
+    Invoke-Case 'gate: a commit on main that the tag does NOT point at is refused (a called release builds the caller''s commit), and so is a missing tag' {
+        $repo = New-MainFixture
+        [void](& $repo.Git @('tag', 'v1.9.0', $repo.OnMain))
+        $outFile = Join-Path (New-TempDir) 'github_output'
+        Use-Environment @{ GITHUB_OUTPUT = $outFile } {
+            $run = Invoke-Script $TagGatePath @{ Tag = 'v1.9.0'; Commit = $repo.LaterOnMain; MainRef = 'refs/heads/main'; RepoRoot = $repo.Dir }
+            Assert-Equal 1 $run.ExitCode 'exit code'
+            Assert-Contains $run.Output "The tag v1.9.0 points at $($repo.OnMain), but this run builds $($repo.LaterOnMain)" 'what'
+        }
+        Assert-True (-not (Test-Path -LiteralPath $outFile)) 'GITHUB_OUTPUT must not be written for a mismatch'
+        $missing = Invoke-Script $TagGatePath @{ Tag = 'v1.9.1'; Commit = $repo.OnMain; MainRef = 'refs/heads/main'; RepoRoot = $repo.Dir }
+        Assert-Equal 1 $missing.ExitCode 'a tag the clone does not have'
+        Assert-Contains $missing.Output 'fetch-depth: 0' 'the fix'
+    }
+
+    Invoke-Case 'gate: an ANNOTATED tag is resolved to its commit, not to the tag object' {
+        $repo = New-MainFixture
+        [void](& $repo.Git @('tag', '-a', 'v1.9.0', '-m', 'release', $repo.OnMain))
+        $run = Invoke-Script $TagGatePath @{ Tag = 'v1.9.0'; Commit = $repo.OnMain; MainRef = 'refs/heads/main'; RepoRoot = $repo.Dir }
+        Assert-Equal 0 $run.ExitCode "exit code. Output was:`n$($run.Output)"
+        Assert-Contains $run.Output "Tag v1.9.0 points at $($repo.OnMain)" 'the tag check says it ran'
     }
 
     Invoke-Case 'gate: -MainRef naming a branch the clone does not have fails and says to fetch the full history' {

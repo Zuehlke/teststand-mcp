@@ -9,8 +9,38 @@ The scripts run on Windows. They work under Windows PowerShell 5.1 (`powershell.
 
 ## Cutting a release
 
-Push a tag `vX.Y.Z` and the release workflow (`.github/workflows/release.yml`) takes it from there. You
-never edit a version number: the tag is the version.
+Merge the release PR. `.github/workflows/release-please.yml` keeps one open, titled
+`chore(main): release X.Y.Z`, and updates it on every merge to `main`: it bumps the version in
+`.release-please-manifest.json` and writes `CHANGELOG.md` from the PR titles. When you merge it,
+release-please creates a DRAFT release with the tag `vX.Y.Z` and calls the release workflow
+(`.github/workflows/release.yml`) with that tag. The release workflow builds, verifies and publishes
+exactly as for a pushed tag, and keeps the changelog as the release notes.
+
+The PR title decides the version, because every PR is squash-merged and its title becomes the commit
+release-please reads. The `pr-title` check enforces a conventional commit title:
+
+| Title | Next version |
+|---|---|
+| `fix: ...` | patch (1.9.2 to 1.9.3) |
+| `feat: ...` | minor (1.9.2 to 1.10.0) |
+| `feat!: ...`, or a `BREAKING CHANGE:` footer | major (1.9.2 to 2.0.0) |
+| `chore:`, `ci:`, `docs:`, `test:`, `refactor:`, `build:` | none (no release PR until a `fix` or `feat` arrives) |
+
+Never create or publish a release in the GitHub web UI. A published release without assets takes
+`releases/latest`, and every marketplace install fails with a 404 until it has assets. The release
+workflow deletes such an empty release of its tag and replaces it, but only when it runs.
+
+The release PR is opened with the workflow token, which starts no `pull_request` run. release-please.yml
+therefore starts `ci.yml` and `pr-title.yml` on the release branch by hand (`workflow_dispatch`). The checks of
+those runs are expected to count as the PR's required checks; the first release PR is where this is confirmed
+(see the risks in `plans/release-please.md`). If they do not appear on the release PR, close and reopen the PR
+yourself: your reopen event starts both workflows.
+
+### Pushing a tag by hand (fallback)
+
+Push a tag `vX.Y.Z` and the release workflow takes it from there. You never edit a version number: the tag
+is the version. Use this only when release-please cannot cut the release, and update
+`.release-please-manifest.json` to the same version afterwards, or release-please proposes it again.
 
 ```powershell
 git switch main
@@ -42,8 +72,9 @@ What the workflow does, in order:
    (x86, then x64), each of which builds the exe, stages the plugin, smoke-tests it and zips it. Both plugins'
    assets are kept as one workflow artifact. If this job fails, nothing is created, not even a draft.
 2. Job `release` (write token): checks that the artifact holds exactly each plugin's four assets, deletes every
-   leftover DRAFT of the same tag (from an earlier failed run), and creates a DRAFT release with them
-   (`build\New-ReleaseDraft.ps1`). A published release that already carries the tag stops the run.
+   DRAFT of the same tag (release-please's, or the leftover of an earlier failed run) and a published release
+   of the tag that has NO assets, and creates a DRAFT release with them and the notes of what it deleted
+   (`build\New-ReleaseDraft.ps1`). A published release with assets that already carries the tag stops the run.
 3. Verifies the draft through the API, downloading the assets the way a user would
    (`build\Assert-PublishedRelease.ps1`).
 4. Re-checks that the draft still holds exactly the verified asset ids (`build\Assert-ReleaseAssetSet.ps1`).
@@ -56,9 +87,14 @@ What the workflow does, in order:
 
 A failed verification leaves a draft. `releases/latest` never moves until the whole check has passed. To run it
 again, use Re-run failed jobs on the run: the leftover draft of the tag is deleted first, so the second run
-does not collide with the first. If a PUBLISHED release already carries the tag, the run stops with:
+does not collide with the first. Only when the first run failed while CREATING its draft (after it had deleted
+release-please's) do the re-run's notes hold only the workflow's fixed line: then paste the version's section of
+`CHANGELOG.md` into the release notes after it is published. A draft that was created keeps the notes, and the
+re-run carries them over. If a PUBLISHED release with assets already carries the tag, the run stops with:
 
-> A published release of <...> already carries the tag <...> (id <...>).
+> A published release of <...> <...> already carries the tag <...> (id <...>).
+
+The second `<...>` is `with assets`, or `with an unknown number of assets` when the release list did not say; such a release is refused as well, because it may have been downloaded.
 
 That tag is spent. Fix forward with the next patch version.
 
@@ -108,8 +144,25 @@ nothing:
 
 > The tag <...> points at <...>, which is not on <...>.
 
-Merge the change into `main`, then move the tag to the merged commit with the same four commands. A dry run
-skips this check: it may run from any branch and publishes nothing. To check locally before you push, add
+Merge the change into `main`, then move the tag to the merged commit with the same four commands.
+
+The gate also checks that the tag points at the commit the run builds. A run called by release-please builds the
+commit of the push that started it, which is the tagged commit. That changes only when release-please created the
+release late: its run for the merge was cancelled or failed, and a later push caught up. The gate then stops with:
+
+> The tag <...> points at <...>, but this run builds <...>.
+
+To release the tagged commit, first confirm that no published release names the tag. Then delete the remote tag
+and push it again at the commit the message names first (`<tagged sha>` below). Push the sha, not your local tag,
+which may point elsewhere. The push starts a run on that commit, which also replaces release-please's draft:
+
+```powershell
+git fetch origin
+git push origin --delete refs/tags/v1.9.3
+git push origin <tagged sha>:refs/tags/v1.9.3
+```
+
+A dry run skips both checks: it may run from any branch and publishes nothing. To check locally before you push, add
 `-MainRef refs/remotes/origin/main -Commit <sha>` to the gate command above (after a `git fetch`).
 
 ### A hand-uploaded asset fails verification
@@ -251,12 +304,20 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File build\tests\BuildPluginA
 
 Done once by a repository admin:
 
-1. **Enable Actions** for the repository (Settings, Actions, General). Nothing here runs without it.
+1. **Enable Actions** for the repository (Settings, Actions, General). Nothing here runs without it. On the
+   same page, under Workflow permissions, tick "Allow GitHub Actions to create and approve pull requests":
+   release-please.yml opens the release PR with the workflow token.
 2. **Set Pages to the "GitHub Actions" source** (Settings, Pages, Build and deployment, Source). The
    statistics workflow `.github/workflows/pages.yml` has a `deploy` job that publishes the page. Without
    this setting only that job fails. The download counts are already committed to the `stats` branch by
    then, and `ci.yml` and `release.yml` are not affected.
-3. **Optional: the `STATS_TRAFFIC_TOKEN` secret** (Settings, Secrets and variables, Actions). The workflow
+3. **Squash merging only, with the PR title as the commit** (Settings, General, Pull Requests): untick "Allow
+   merge commits" and "Allow rebase merging", keep "Allow squash merging" and set its default commit message
+   to "Pull request title". release-please reads those squash commits.
+4. **Protect `main`** (Settings, Rules, Rulesets, `ProtectMain`): enforcement Active, target the default
+   branch, require a pull request, require the status checks `check` and `pr-title`, block force pushes.
+   GitHub offers a check here only after it has run once, so add `pr-title` after the first PR that ran it.
+5. **Optional: the `STATS_TRAFFIC_TOKEN` secret** (Settings, Secrets and variables, Actions). The workflow
    token cannot read repository traffic, so the views and clones need a token that can. Without the secret
    the statistics skip traffic, and the page says so. Make it a fine-grained personal access token for this
    ONE repository, with the single repository permission "Administration: Read-only" (that is what the
@@ -280,7 +341,7 @@ this list cannot drift from the code unnoticed.
 
 **It stopped at the tag gate.** See [A tag is rejected](#a-tag-is-rejected). A manual run says:
 
-> A release is cut by pushing a tag vX.Y.Z. A manual run is only a dry run: tick dry_run.
+> A release is cut by merging the release PR, or by pushing a tag vX.Y.Z. A manual run is only a dry run: tick dry_run.
 >
 > A dry run needs a rehearsal tag
 
