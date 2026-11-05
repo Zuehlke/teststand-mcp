@@ -42,11 +42,8 @@ commit cannot land after release-please starts counting.
 - Its own workflow `pr-title.yml` (as built: inside `ci.yml` a title edit would re-run the 30-minute
   Windows job), job `pr-title`, `if: github.event_name == 'pull_request'`, using
   `amannn/action-semantic-pull-request` pinned by SHA like every other action here.
-- `types: [opened, edited, synchronize, reopened]` on `pull_request`, so a title edit re-runs it, plus
-  `workflow_dispatch` for the release PR. `ci.yml` gets `workflow_dispatch` too.
+- `types: [opened, edited, synchronize, reopened]` on `pull_request`, so a title edit re-runs it.
 - The job needs `pull-requests: read` only.
-- A skipped job is expected to report success, so a run without a PR (push, dispatch) is expected not to block
-  a required check. To be confirmed on the first release PR (see Risks).
 - The rules live in `build/tests/WorkflowContract.ps1`, each proven to fail by a row in
   `build/tests/WorkflowMutations.Tests.ps1`.
 
@@ -64,13 +61,13 @@ commit cannot land after release-please starts counting.
 New `.github/workflows/release-please.yml` on `push: branches: [main]`:
 
 - Job `release-please`: `googleapis/release-please-action` (pinned SHA), `permissions: contents: write,
-  pull-requests: write`. Outputs `release_created`, `tag_name`, `prs_created` and `pr`.
+  pull-requests: write`. Outputs `release_created` and `tag_name`.
 - Job `release`: `needs: release-please`, `if: needs.release-please.outputs.release_created == 'true'`,
   `uses: ./.github/workflows/release.yml` with `tag: ${{ needs.release-please.outputs.tag_name }}`,
   `permissions: contents: write`.
-- Job `ci-on-release-pr`: when release-please opened or updated its PR, `gh workflow run ci.yml` and
-  `gh workflow run pr-title.yml`, each `--ref <release branch>` taken from the `pr` output (`actions: write`). A PR opened with `GITHUB_TOKEN` starts no `pull_request` run, so
-  without this the release PR never gets its required checks. `workflow_dispatch` is the documented exception.
+- No job starts the release PR's checks. The plan assumed a PR opened with `GITHUB_TOKEN` starts no
+  `pull_request` run and added a dispatch job; on the first release PR (#47, 2026-11-05) the `pull_request`
+  runs started by themselves, so the dispatch only ran every check twice and was removed.
 
 ### 4. `release.yml` accepts the call
 
@@ -135,7 +132,7 @@ In `build/ReleaseDraft.psm1`:
 
 | Risk | Mitigation |
 |---|---|
-| The release PR's checks started by `workflow_dispatch` (`ci.yml`, and `pr-title.yml` whose job is then skipped) do not satisfy the required checks on the PR | Test on the first release PR. Fallback: a GitHub App token for release-please; then drop the `workflow_call` job and let the tag push trigger `release.yml` (one trigger only, never both). |
+| The release PR's `pull_request` checks stop starting (GitHub changes how runs started by the workflow token behave) | Close and reopen the release PR by hand (CONTRIBUTING). Lasting fallback: a GitHub App token for release-please. |
 | `force-tag-creation` creates the tag but the draft creation fails | `release.yml` is not called (`release_created` false); re-run the release-please job. Nothing is published. |
 | A non-conventional squash title slips in | It is only missing from the changelog and the version bump; the next `fix:` releases it. The PR-title check makes this rare. |
 | Someone still publishes in the web UI | Slice 5 recovers an empty one; a published release WITH assets is refused as today. |

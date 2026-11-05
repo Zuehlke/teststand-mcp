@@ -7,18 +7,13 @@
 #                          points at a release without assets.
 #   job `release`:         calls release.yml with that tag. release.yml builds, verifies and publishes
 #                          exactly as for a pushed tag; it takes release-please's notes over into its own draft.
-#   job `ci-on-release-pr`: starts ci.yml and pr-title.yml on the release PR's branch.
 #
 # Load-bearing choices (do not "simplify" them away):
 #   * release.yml is CALLED, not triggered by the tag: a tag created with the workflow token starts no
 #     `push: tags` run, and a second trigger would race release-please's draft. One release run per tag.
-#   * The release PR is opened with the workflow token, which starts no pull_request run either, so its
-#     required checks would never report. workflow_dispatch is the documented exception: ci-on-release-pr
-#     dispatches ci.yml and pr-title.yml on the PR branch, whose head is the PR head. The pr-title job is
-#     skipped there (it needs a pull request), and a skipped job is expected to count as passed (to be
-#     confirmed on the first release PR, see Risks in plans/release-please.md).
-#   * The release-please action gets contents and pull-requests, never actions: write; only the job that
-#     runs gh alone may dispatch.
+#   * Nothing starts ci.yml or pr-title.yml on the release PR: its pull_request runs start by themselves
+#     (observed on the first release PR, #47, 2026-11-05). A dispatch on top only ran every check twice.
+#   * The release-please action gets contents and pull-requests, never actions: write.
 #   * One queue, never cancelled: two merges close together update the release PR one after the other. GitHub
 #     keeps one running and one pending run per queue, so a THIRD push while one runs cancels the pending one
 #     (GitHub docs, "Control the concurrency of workflows and jobs": a new queued run cancels the pending one).
@@ -49,8 +44,6 @@ jobs:
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
-      prs_created: ${{ steps.release.outputs.prs_created }}
-      pr: ${{ steps.release.outputs.pr }}
     steps:
       - name: Update the release PR, or create the draft release and its tag once it was merged
         id: release
@@ -68,24 +61,3 @@ jobs:
     with:
       tag: ${{ needs.release-please.outputs.tag_name }}
 
-  ci-on-release-pr:
-    needs: release-please
-    if: needs.release-please.outputs.prs_created == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      actions: write # dispatch ci.yml and pr-title.yml
-    steps:
-      - name: Start ci.yml and pr-title.yml on the release PR branch, so its required checks report
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          PR_JSON: ${{ needs.release-please.outputs.pr }}
-        run: |
-          branch=$(jq -r '.headBranchName // empty' <<< "$PR_JSON")
-          if [ -z "$branch" ]; then
-            echo '::error::release-please reported a created or updated PR but no head branch, so its checks could not be started.'
-            exit 1
-          fi
-          gh workflow run ci.yml --repo "$REPO" --ref "$branch"
-          gh workflow run pr-title.yml --repo "$REPO" --ref "$branch"
