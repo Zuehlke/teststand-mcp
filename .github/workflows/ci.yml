@@ -12,12 +12,13 @@
 # The TestStand engine is NOT installed on a GitHub runner. Nothing here needs it: the packaging
 # smoke tests only run `--version`, `--list-tools --json` and an MCP `initialize` round trip, none of
 # which connects the engine (see build/PluginSmoke.psm1).
+#
+# Pull requests only, never a push to main: the ProtectMain ruleset requires a PR that is up to date with
+# main and green, and squash merges it, so the commit on main has exactly the tree this run tested.
 name: ci
 
 on:
   pull_request:
-    branches: [main]
-  push:
     branches: [main]
 
 # The token can read the repository and nothing else.
