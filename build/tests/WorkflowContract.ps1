@@ -13,9 +13,9 @@
 #    release.yml     triggers, the per-tag concurrency group, the tag gate first, publish by release_id
 #                    and only after the verify step, the final public fetch with the verified digest, the
 #                    own-downloads artifact, the dry run and its cleanup by the id it created;
-#    release-please.yml  a draft with its tag (the config), release.yml CALLED with that tag, the release PR's
-#                    checks dispatched, the least permissions per job;
-#    pr-title.yml    the conventional title check, re-run on a title edit, skipped (= passed) when dispatched.
+#    release-please.yml  a draft with its tag (the config), release.yml CALLED with that tag, no other job,
+#                    the least permissions per job;
+#    pr-title.yml    the conventional title check, re-run on a title edit.
 #  What the scripts do (delete a leftover draft, decide make_latest, delete only the own draft) is tested
 #  with a fake gh in ReleaseDraft.Tests.ps1; here only that the workflow calls them the way they expect.
 #  The asset names and their common prefix come from build\ReleaseAssets.psm1, never from a literal.
@@ -245,12 +245,11 @@ $ExpectedWorkflows = @('ci.yml', 'pages.yml', 'pr-title.yml', 'release-please.ym
     $ciSteps = @(Get-Steps $ciJob)
     $ciCode = Remove-CommentLines $ci
 
-    Invoke-Case 'ci.yml: runs for pull requests to main, pushes to main and by hand (release-please.yml starts it on the release PR), and for nothing else' {
+    Invoke-Case 'ci.yml: runs for pull requests to main and pushes to main, and for nothing else' {
         $on = Get-TopLevelBlock $ci 'on'
         Assert-True ($on -cmatch '(?m)^  pull_request:') 'no pull_request trigger'
         Assert-True ($on -cmatch '(?m)^  push:') 'no push trigger'
-        Assert-True ($on -cmatch '(?m)^  workflow_dispatch:') 'no workflow_dispatch trigger (the release PR, opened with the workflow token, gets its checks through it)'
-        Assert-Equal 3 @($on -split "`n" | Where-Object { $_ -cmatch '\A  [a-z_]+:' }).Count 'the number of triggers'
+        Assert-Equal 2 @($on -split "`n" | Where-Object { $_ -cmatch '\A  [a-z_]+:' }).Count 'the number of triggers'
         Assert-Equal 2 @([regex]::Matches($on, 'branches:\s*\[main\]')).Count 'both triggers are limited to main'
     }
 
@@ -646,7 +645,6 @@ $ExpectedWorkflows = @('ci.yml', 'pages.yml', 'pr-title.yml', 'release-please.ym
     $rpCode = Remove-CommentLines $rp
     $rpJob = Get-JobText $rpCode 'release-please'
     $rpCall = Get-JobText $rpCode 'release'
-    $rpDispatch = Get-JobText $rpCode 'ci-on-release-pr'
 
     Invoke-Case 'release-please.yml: runs for pushes to main only, in one queue that is never cancelled' {
         $on = Get-TopLevelBlock $rpCode 'on'
@@ -655,6 +653,7 @@ $ExpectedWorkflows = @('ci.yml', 'pages.yml', 'pr-title.yml', 'release-please.ym
         $concurrency = Get-TopLevelBlock $rpCode 'concurrency'
         Assert-True ($concurrency -cmatch 'cancel-in-progress:\s*false') 'a release in progress must not be cancelled'
         Assert-True ((Get-TopLevelBlock $rpCode 'permissions') -cmatch '(?m)^permissions:\s*\{\}\s*$') 'top-level permissions must be {}'
+        Assert-Equal 'release-please|release' (@([regex]::Matches((Get-TopLevelBlock $rpCode 'jobs'), '(?m)^  ([A-Za-z0-9_-]+):') | ForEach-Object { $_.Groups[1].Value }) -join '|') 'the jobs (the release PR starts its own pull_request checks; a dispatch only ran them twice)'
     }
 
     Invoke-Case 'release-please.yml: the release-please job may write contents and pull requests only, and creates a DRAFT with its tag' {
@@ -682,18 +681,6 @@ $ExpectedWorkflows = @('ci.yml', 'pages.yml', 'pr-title.yml', 'release-please.ym
         Assert-True ($rpJob -cmatch '(?m)^      tag_name:\s*\$\{\{ steps\.release\.outputs\.tag_name \}\}') 'tag_name is passed on'
     }
 
-    Invoke-Case 'release-please.yml: the release PR gets its required checks by dispatch, from a job that may only dispatch' {
-        Assert-Equal 'actions: write' ((Get-GrantedPermissions $rpDispatch) -join '|') 'the permissions of the dispatching job'
-        Assert-True ($rpDispatch -cmatch "(?m)^    if: needs\.release-please\.outputs\.prs_created == 'true'\s*$") 'only when the release PR was created or updated'
-        $run = (@(Get-RunValues $rpDispatch) -join "`n")
-        foreach ($workflow in @('ci.yml', 'pr-title.yml')) {
-            Assert-True ($run -cmatch ('(?m)^\s*gh workflow run ' + [regex]::Escape($workflow) + ' .*--ref "\$branch"\s*$')) "the release PR needs the checks of $workflow, on ITS branch (without --ref the run is on main)"
-        }
-        Assert-Contains $run "jq -r '.headBranchName // empty'" 'the branch is the head branch of the PR release-please reported'
-        Assert-True ($run -cmatch '(?s)if \[ -z "\$branch" \]; then.*?exit 1') 'an empty branch fails the job instead of dispatching on the default branch'
-        Assert-True ($rpDispatch -cmatch 'PR_JSON:\s*\$\{\{ needs\.release-please\.outputs\.pr \}\}') 'the branch comes from the PR release-please reported, through env'
-    }
-
     # ============================================================================================
     #  pr-title.yml (release-please reads the squash commits, which are the PR titles)
     # ============================================================================================
@@ -701,19 +688,17 @@ $ExpectedWorkflows = @('ci.yml', 'pages.yml', 'pr-title.yml', 'release-please.ym
     $prTitleCode = Remove-CommentLines $prTitle
     $prTitleJob = Get-JobText $prTitleCode 'pr-title'
 
-    Invoke-Case 'pr-title.yml: checks every pull request to main again when its title is edited, and can be dispatched' {
+    Invoke-Case 'pr-title.yml: checks every pull request to main again when its title is edited' {
         $on = Get-TopLevelBlock $prTitleCode 'on'
         Assert-True ($on -cmatch '(?m)^  pull_request:\s*\n    branches:\s*\[main\]') 'pull requests to main'
         Assert-True ($on -cmatch '(?m)^    types:\s*\[[^\]]*\bedited\b[^\]]*\]') 'a title edit must re-run the check'
         Assert-True ($on -cmatch '(?m)^    types:\s*\[[^\]]*\bsynchronize\b[^\]]*\]') 'a new push must re-run the check'
-        Assert-True ($on -cmatch '(?m)^  workflow_dispatch:') 'release-please.yml dispatches it on the release PR'
-        Assert-Equal 2 @($on -split "`n" | Where-Object { $_ -cmatch '\A  [a-z_]+:' }).Count 'the number of triggers'
+        Assert-Equal 1 @($on -split "`n" | Where-Object { $_ -cmatch '\A  [a-z_]+:' }).Count 'the number of triggers'
     }
 
-    Invoke-Case 'pr-title.yml: reads the pull request only, runs only for one, and checks it with the semantic PR title action' {
+    Invoke-Case 'pr-title.yml: reads the pull request only and checks it with the semantic PR title action' {
         Assert-Equal 'pull-requests: read' ((Get-GrantedPermissions $prTitleJob) -join '|') 'the permissions of the job'
         Assert-True ((Get-TopLevelBlock $prTitleCode 'permissions') -cmatch '(?m)^permissions:\s*\{\}\s*$') 'top-level permissions must be {}'
-        Assert-True ($prTitleJob -cmatch "(?m)^    if: github\.event_name == 'pull_request'\s*$") 'skipped when dispatched: a skipped job counts as passed, and there is no title to read'
         Assert-True ($prTitleJob -cmatch 'amannn/action-semantic-pull-request@') 'the title check'
         Assert-True ($prTitleJob -cmatch 'GITHUB_TOKEN:\s*\$\{\{ github\.token \}\}') 'the action reads the PR with the workflow token'
     }

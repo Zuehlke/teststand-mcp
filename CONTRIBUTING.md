@@ -30,11 +30,9 @@ Never create or publish a release in the GitHub web UI. A published release with
 `releases/latest`, and every marketplace install fails with a 404 until it has assets. The release
 workflow deletes such an empty release of its tag and replaces it, but only when it runs.
 
-The release PR is opened with the workflow token, which starts no `pull_request` run. release-please.yml
-therefore starts `ci.yml` and `pr-title.yml` on the release branch by hand (`workflow_dispatch`). The checks of
-those runs are expected to count as the PR's required checks; the first release PR is where this is confirmed
-(see the risks in `plans/release-please.md`). If they do not appear on the release PR, close and reopen the PR
-yourself: your reopen event starts both workflows.
+The release PR gets its required checks like any other PR: `ci.yml` and `pr-title.yml` start on its
+`pull_request` event. If they ever do not appear on it, close and reopen the PR yourself: your reopen event
+starts both workflows.
 
 ### Pushing a tag by hand (fallback)
 

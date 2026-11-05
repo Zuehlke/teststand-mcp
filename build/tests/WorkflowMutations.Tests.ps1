@@ -154,37 +154,30 @@ Add-Mutation 'a call that takes a dry-run input' 'release.yml' 'calls it with a 
 Add-Mutation 'the tag of a call ignored' 'release.yml' 'the tag is user input' 'TAG: ${{ inputs.tag || github.ref_name }}' "TAG: `${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}"
 
 # --- release-please.yml and pr-title.yml -----------------------------------------------------------------
-Add-Mutation 'ci: no longer dispatchable for the release PR' 'ci.yml' 'and by hand' "  workflow_dispatch:`n" ''
 Add-Mutation 'release-please: release.yml called without a release' 'release-please.yml' 'only when it created a release' "    if: needs.release-please.outputs.release_created == 'true'`n" ''
 Add-Mutation 'release-please: release.yml called with another tag' 'release-please.yml' 'only when it created a release' 'tag: ${{ needs.release-please.outputs.tag_name }}' 'tag: ${{ github.ref_name }}'
 Add-Mutation 'release-please: the third-party action may dispatch workflows' 'release-please.yml' 'contents and pull requests only' 'pull-requests: write' "pull-requests: write`n      actions: write"
 Add-Mutation 'release-please: a reusable workflow from elsewhere' 'release-please.yml' 'every action is pinned' 'uses: ./.github/workflows/release.yml' 'uses: someone/else/.github/workflows/release.yml@main'
-Add-Mutation 'release-please: the release PR misses the pr-title check' 'release-please.yml' 'required checks by dispatch' 'gh workflow run pr-title.yml' 'echo pr-title.yml'
 Add-Mutation 'pr-title: a title edit no longer re-runs the check' 'pr-title.yml' 'again when its title is edited' 'types: [opened, edited, synchronize, reopened]' 'types: [opened, synchronize, reopened]'
-Add-Mutation 'pr-title: runs without a pull request' 'pr-title.yml' 'runs only for one' "    if: github.event_name == 'pull_request'`n" ''
 Add-Mutation 'pr-title: a write token' 'pr-title.yml' 'reads the pull request only' 'pull-requests: read' 'pull-requests: write'
 Add-Mutation 'pr-title: write-all by default' 'pr-title.yml' 'reads the pull request only' 'permissions: {}' 'permissions: write-all'
 Add-Mutation 'pr-title: the action gets no token' 'pr-title.yml' 'reads the pull request only' "        env:`n          GITHUB_TOKEN: `${{ github.token }}`n" ''
 Add-Mutation 'pr-title: another action instead of the title check' 'pr-title.yml' 'reads the pull request only' 'amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1' $CheckoutPin
-Add-Mutation 'pr-title: an extra trigger' 'pr-title.yml' 'checks every pull request' "  workflow_dispatch:`n" "  workflow_dispatch:`n  push:`n"
+Add-Mutation 'pr-title: an extra trigger' 'pr-title.yml' 'checks every pull request' "    types: [opened, edited, synchronize, reopened]`n" "    types: [opened, edited, synchronize, reopened]`n  workflow_dispatch:`n"
+Add-Mutation 'ci: an extra trigger' 'ci.yml' 'and for nothing else' "  push:`n    branches: [main]`n" "  push:`n    branches: [main]`n  workflow_dispatch:`n"
+Add-Mutation 'release-please: a job that starts the checks again' 'release-please.yml' 'runs for pushes to main only' "jobs:`n" "jobs:`n  ci-on-release-pr:`n    runs-on: ubuntu-latest`n    timeout-minutes: 5`n    steps:`n      - run: echo`n"
 Add-Mutation 'release-please: runs on every branch' 'release-please.yml' 'runs for pushes to main only' 'branches: [main]' "branches: ['**']"
 Add-Mutation 'release-please: a running release may be cancelled' 'release-please.yml' 'runs for pushes to main only' 'cancel-in-progress: false' 'cancel-in-progress: true'
 Add-Mutation 'release-please: write-all by default' 'release-please.yml' 'runs for pushes to main only' 'permissions: {}' 'permissions: write-all'
 Add-Mutation 'release-please: the call cannot write the release' 'release-please.yml' 'only when it created a release' 'contents: write # release.yml grants' 'contents: read # release.yml grants'
 Add-Mutation 'release-please: release_created not passed on' 'release-please.yml' 'only when it created a release' "      release_created: `${{ steps.release.outputs.release_created }}`n" ''
-Add-Mutation 'release-please: checks dispatched without a release PR' 'release-please.yml' 'required checks by dispatch' "    if: needs.release-please.outputs.prs_created == 'true'`n" ''
-Add-Mutation 'release-please: the dispatching job may not dispatch' 'release-please.yml' 'required checks by dispatch' 'actions: write # dispatch' 'contents: read # dispatch'
-Add-Mutation 'release-please: ci.yml no longer dispatched' 'release-please.yml' 'required checks by dispatch' 'gh workflow run ci.yml' 'echo ci.yml'
-Add-Mutation 'release-please: checks dispatched on main' 'release-please.yml' 'required checks by dispatch' ' --ref "$branch"' ''
-Add-Mutation 'release-please: an empty branch no longer fails the job' 'release-please.yml' 'required checks by dispatch' "            exit 1`n" ''
-Add-Mutation 'release-please: the branch not from the PR' 'release-please.yml' 'required checks by dispatch' "jq -r '.headBranchName // empty'" "jq -r '.baseBranchName // empty'"
 
 # --- the files outside .github/workflows the contract reads ----------------------------------------------
 Add-Mutation 'config: published, not a draft' 'release-please-config.json' 'creates a DRAFT with its tag' '"draft": true' '"draft": false'
 Add-Mutation 'config: a draft without its tag' 'release-please-config.json' 'creates a DRAFT with its tag' '"force-tag-creation": true' '"force-tag-creation": false'
 Add-Mutation 'config: a component in the tag' 'release-please-config.json' 'creates a DRAFT with its tag' '"include-component-in-tag": false' '"include-component-in-tag": true'
 Add-Mutation 'config: no GitHub release at all' 'release-please-config.json' 'creates a DRAFT with its tag' '"draft": true,' "`"draft`": true,`n  `"skip-github-release`": true,"
-Add-Mutation 'manifest: not a plain version' '.release-please-manifest.json' 'creates a DRAFT with its tag' '"1.9.2"' '"v1.9.2"'
+Add-Mutation 'manifest: not a plain version' '.release-please-manifest.json' 'creates a DRAFT with its tag' '".": "' '".": "v'
 Add-Mutation 'collector: release-please runs no longer accepted' '.github/stats/collect.py' 'own-downloads is uploaded' 'RELEASE_PLEASE_WORKFLOW_PATH = ".github/workflows/release-please.yml"' 'RELEASE_PLEASE_WORKFLOW_PATH = ".github/workflows/other.yml"'
 Add-Mutation 'collector: release-please dropped from the accepted set' '.github/stats/collect.py' 'own-downloads is uploaded' 'OWN_RUN_WORKFLOW_PATHS = (RELEASE_WORKFLOW_PATH, RELEASE_PLEASE_WORKFLOW_PATH)' 'OWN_RUN_WORKFLOW_PATHS = (RELEASE_WORKFLOW_PATH,)'
 Add-Mutation 'config: another release type' 'release-please-config.json' 'creates a DRAFT with its tag' '"release-type": "simple"' '"release-type": "node"'

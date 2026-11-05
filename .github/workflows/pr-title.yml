@@ -3,24 +3,19 @@
 # conventional commit: `fix: ...` releases a patch, `feat: ...` a minor version, `feat!: ...` a major one;
 # `chore:`, `ci:`, `docs:`, `test:`, `refactor:` and the like release nothing.
 #
-# Its own workflow, so a title edit re-runs this check only, never the 30-minute ci.yml. The release PR is
-# opened with the workflow token, which starts no pull_request run: release-please.yml dispatches this
-# workflow on that branch, and the job is then skipped, which a required check is expected to count as passed
-# (to be confirmed on the first release PR, see Risks in plans/release-please.md).
+# Its own workflow, so a title edit re-runs this check only, never the 30-minute ci.yml.
 name: pr-title
 
 on:
   pull_request:
     branches: [main]
     types: [opened, edited, synchronize, reopened]
-  workflow_dispatch:
 
 # The token can read the pull request and nothing else.
 permissions: {}
 
 jobs:
   pr-title:
-    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
