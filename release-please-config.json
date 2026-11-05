@@ -4,7 +4,6 @@
   "include-component-in-tag": false,
   "draft": true,
   "force-tag-creation": true,
-  "bootstrap-sha": "7fb2a2ec47ec42258ce574ebf08a28238187f1e3",
   "packages": {
     ".": {}
   }
