@@ -2,7 +2,7 @@
 
 **Created**: 2026-11-04
 **Branch**: feature/release-please
-**Status**: slices 1 to 6 built (2026-11-04), slice 0 step 2 and slice 7 open
+**Status**: slices 0 to 6 done, merged in #45 (2026-11-05); slice 7 (first release) in progress
 **Builds on**: [plugin-install-and-release-workflow.md](plugin-install-and-release-workflow.md), [dual-bitness-plugins.md](dual-bitness-plugins.md)
 
 ## Goal
