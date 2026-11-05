@@ -184,7 +184,7 @@ Add-Mutation 'config: published, not a draft' 'release-please-config.json' 'crea
 Add-Mutation 'config: a draft without its tag' 'release-please-config.json' 'creates a DRAFT with its tag' '"force-tag-creation": true' '"force-tag-creation": false'
 Add-Mutation 'config: a component in the tag' 'release-please-config.json' 'creates a DRAFT with its tag' '"include-component-in-tag": false' '"include-component-in-tag": true'
 Add-Mutation 'config: no GitHub release at all' 'release-please-config.json' 'creates a DRAFT with its tag' '"draft": true,' "`"draft`": true,`n  `"skip-github-release`": true,"
-Add-Mutation 'manifest: not a plain version' '.release-please-manifest.json' 'creates a DRAFT with its tag' '"1.9.2"' '"v1.9.2"'
+Add-Mutation 'manifest: not a plain version' '.release-please-manifest.json' 'creates a DRAFT with its tag' '".": "' '".": "v'
 Add-Mutation 'collector: release-please runs no longer accepted' '.github/stats/collect.py' 'own-downloads is uploaded' 'RELEASE_PLEASE_WORKFLOW_PATH = ".github/workflows/release-please.yml"' 'RELEASE_PLEASE_WORKFLOW_PATH = ".github/workflows/other.yml"'
 Add-Mutation 'collector: release-please dropped from the accepted set' '.github/stats/collect.py' 'own-downloads is uploaded' 'OWN_RUN_WORKFLOW_PATHS = (RELEASE_WORKFLOW_PATH, RELEASE_PLEASE_WORKFLOW_PATH)' 'OWN_RUN_WORKFLOW_PATHS = (RELEASE_WORKFLOW_PATH,)'
 Add-Mutation 'config: another release type' 'release-please-config.json' 'creates a DRAFT with its tag' '"release-type": "simple"' '"release-type": "node"'
