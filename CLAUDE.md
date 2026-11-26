@@ -81,6 +81,13 @@ Six rules that lived here as prose are now guards, defaults or a tool, so they h
 - The on-disk format is a first-class property (`file_format`, `fileFormat`); implementation and tests are in the file-format note above.
 - `wait_for_execution` / `get_execution_status` now state the headless `Paused` trap, and `set_station_global` warns against being polled.
 
+## Step-type substeps (2026-11-26, issue #51)
+
+The rules are in `tool-contracts.md`; tests `T38`.
+- A substep is a `Step` from `StepType.GetSubstep(i)`. It has NO kind property (measured on TS 2026, the whole substep tree dumped): the kind is its `Name` (`Pre`/`Post`/`Edit`/`OnNewStep`), anything else is Custom. An Edit substep's `MenuName` is an unevaluated `ResStr(...)`; the evaluated button text comes from `Step.GetEditSubstepMenuStructure()` (`MenuItems[i].Name` + `SubstepIndex`).
+- `ExecuteSubstep(i, Type.Missing)` / `CanExecuteSubstep(i, Type.Missing)` is the UI case (no SequenceContext). Measured: `NI_Wait`'s `OnNewStep` runs headless, authors `TS.AdditionalResultsHints[0]`, and still returns `false`, hence the leaf diff in the result.
+- Not verified: a LabVIEW substep (the issue's case) and the timeout path. The call runs on a pool thread, not the engine thread; whether a LabVIEW VI with a hidden front panel needs the STA/UI thread is open.
+
 ## TestStand ENVIRONMENTS (`.tsenv`) — engine internals (2026-08-14, issue #35)
 
 The user-facing half (sources and their precedence, `tsenv_path='auto'`, the restart rule, what `get_engine_paths` and `open_sequence_file` report) is in the imported `headless-and-tools.md`. This section is the developer half: how the server makes an environment take effect and proves it did.

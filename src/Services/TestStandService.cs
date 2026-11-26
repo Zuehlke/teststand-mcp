@@ -201,6 +201,15 @@ public interface ITestStandService : IDisposable
     /// and FileDiffer/the editor pair and display elements by this name.</summary>
     Task<StepPropertyValue> RenameStepPropertyAsync(string filePath, string sequenceName,
         string stepGroup, string stepName, string propertyPath, string newName, bool save = true);
+    /// <summary>Lists the substeps of the step's TYPE (StepType.GetSubstep) with their kind, code
+    /// module and whether this step can execute them, plus the Edit-substep menu.</summary>
+    Task<StepSubstepList> GetStepSubstepsAsync(string filePath, string sequenceName,
+        string stepGroup, string stepName);
+    /// <summary>Runs one substep of a step (Step.ExecuteSubstep without a sequence context, the
+    /// editor's case) and reports what it changed on the step.</summary>
+    Task<SubstepRunResult> RunStepSubstepAsync(string filePath, string sequenceName,
+        string stepGroup, string stepName, string? substepName, int? substepIndex,
+        int timeoutSeconds = 60, bool allowUi = false, bool save = false);
 
     // Executions
     /// <summary>Starts execution of an entry point in the given sequence file and returns execution info.</summary>
@@ -4781,6 +4790,176 @@ public sealed class TestStandService : ITestStandService
             catch (Exception ex) { _logger.LogDebug(ex, "Name read-back failed for '{Path}'.", propertyPath); }
             return info;
         });
+    }
+
+    // ── Step-type substeps (issue #51) ───────────────────────────────────────
+
+    private (NiStep step, NationalInstruments.TestStand.Interop.API.StepType type) ResolveStepAndType(
+        string filePath, string sequenceName, string stepGroup, string stepName)
+    {
+        var sf   = GetOrLoadSeqFile(filePath);
+        var seq  = sf.GetSequenceByName(sequenceName);
+        var step = (NiStep)(object)ResolveStepInGroup(seq, ParseStepGroup(stepGroup), stepName);
+        return (step, step.StepType);
+    }
+
+    private StepSubstepInfo DescribeSubstep(NiStep step,
+        NationalInstruments.TestStand.Interop.API.StepType type, int index)
+    {
+        NiStep sub = type.GetSubstep(index);
+        NiPropertyObject po = sub.AsPropertyObject();
+        var info = new StepSubstepInfo { Index = index, Name = sub.Name, Adapter = sub.AdapterKeyName };
+        // Measured (TS 2026): the kind IS the substep's name for the engine-defined kinds; any other
+        // name is a Custom substep. There is no separate kind property on the substep.
+        info.Kind = info.Name is "Pre" or "Post" or "Edit" or "OnNewStep" ? info.Name : "Custom";
+        foreach (var p in new[] { "TS.SData.ViCall.VIPath", "TS.SData.Call.LibPath",
+                                  "TS.SData.PythonCall.ModulePath", "TS.SData.AssemblyPath",
+                                  "TS.SData.SFPath", "TS.SData.SeqName" })
+        {
+            if (TryReadLeaf(po, p) is string s && s.Length > 0) { info.ModulePath = s; break; }
+        }
+        if (TryReadLeaf(po, "TS.SData.ViCall.ShowFrnPnl") is bool fp) info.ShowsFrontPanel = fp;
+        try { info.CanExecute = step.CanExecuteSubstep(index, Type.Missing); }
+        catch (Exception ex) { _logger.LogDebug(ex, "CanExecuteSubstep({Index}) failed.", index); }
+        return info;
+    }
+
+    private static object? TryReadLeaf(NiPropertyObject po, string path)
+    {
+        try { if (!po.Exists(path, 0)) return null; } catch { return null; }
+        try { return po.GetValNumber(path, 0); } catch { }
+        try { return po.GetValBoolean(path, 0); } catch { }
+        try { return po.GetValString(path, 0); } catch { }
+        return null;
+    }
+
+    /// <summary>All substeps of the step's type, with the evaluated Edit-menu text attached.</summary>
+    private List<StepSubstepInfo> DescribeSubsteps(NiStep step,
+        NationalInstruments.TestStand.Interop.API.StepType type)
+    {
+        var list = new List<StepSubstepInfo>();
+        for (int i = 0; i < type.NumSubsteps; i++) list.Add(DescribeSubstep(step, type, i));
+        try
+        {
+            NiPropertyObject? menu = step.GetEditSubstepMenuStructure();
+            int budget = 2_000;
+            if (menu != null) AttachMenuText(BuildPropertyNode(menu, "", 0, 16, true, 0, ref budget), list);
+        }
+        catch (Exception ex) { _logger.LogDebug(ex, "GetEditSubstepMenuStructure failed."); }
+        return list;
+    }
+
+    // The menu tree's items carry the EVALUATED button text plus the SubstepIndex it runs; the
+    // substep's own MenuName is an unevaluated expression such as ResStr("...", "...").
+    private static void AttachMenuText(PropertyNode node, List<StepSubstepInfo> substeps)
+    {
+        var kids = node.Children ?? new List<PropertyNode>();
+        var idx  = kids.FirstOrDefault(c => c.Name == "SubstepIndex")?.Value;
+        var text = kids.FirstOrDefault(c => c.Name == "Name")?.Value as string;
+        if (idx is double d && d >= 0 && d < substeps.Count && !string.IsNullOrEmpty(text))
+        {
+            substeps[(int)d].MenuText = text.Replace("&", "");
+            substeps[(int)d].HasEditPanel = kids.FirstOrDefault(c => c.Name == "HasEditPanel")?.Value as bool?;
+        }
+        foreach (var c in kids) AttachMenuText(c, substeps);
+    }
+
+    /// <inheritdoc/>
+    public async Task<StepSubstepList> GetStepSubstepsAsync(string filePath, string sequenceName,
+        string stepGroup, string stepName)
+    {
+        EnsureConnected();
+        return await Task.Run(() =>
+        {
+            var (step, type) = ResolveStepAndType(filePath, sequenceName, stepGroup, stepName);
+            return new StepSubstepList
+            {
+                StepName = stepName, StepType = type.Name, Substeps = DescribeSubsteps(step, type),
+            };
+        });
+    }
+
+    /// <inheritdoc/>
+    public async Task<SubstepRunResult> RunStepSubstepAsync(string filePath, string sequenceName,
+        string stepGroup, string stepName, string? substepName, int? substepIndex,
+        int timeoutSeconds = 60, bool allowUi = false, bool save = false)
+    {
+        EnsureConnected();
+        if (substepIndex == null && string.IsNullOrWhiteSpace(substepName))
+            throw new ArgumentException("Pass 'substep_name' or 'substep_index'.");
+
+        // Resolve + guard + snapshot first; the run itself is bounded separately below.
+        var (step, type, sub, before) = await Task.Run(() =>
+        {
+            var (st, ty) = ResolveStepAndType(filePath, sequenceName, stepGroup, stepName);
+            var all = DescribeSubsteps(st, ty);
+            StepSubstepInfo d;
+            if (substepIndex is int i)
+            {
+                if (i < 0 || i >= all.Count)
+                    throw new ArgumentOutOfRangeException(nameof(substepIndex),
+                        $"Step type '{ty.Name}' has {all.Count} substep(s); index {i} is out of range.");
+                d = all[i];
+            }
+            else
+            {
+                // Match the substep name or the button text; every Edit substep is NAMED "Edit".
+                string want = substepName!.Replace("&", "").Trim().TrimEnd('.');
+                var hits = all.Where(s => string.Equals(s.Name, want, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(s.MenuText?.Trim().TrimEnd('.'), want, StringComparison.OrdinalIgnoreCase)).ToList();
+                if (hits.Count == 0)
+                    throw new ArgumentException($"Step type '{ty.Name}' has no substep named '{substepName}'. " +
+                        "Call get_step_substeps to list them.");
+                if (hits.Count > 1)
+                    throw new ArgumentException($"'{substepName}' matches substeps " +
+                        string.Join(", ", hits.Select(h => $"{h.Index} ({h.MenuText ?? h.Name})")) +
+                        "; pass substep_index.");
+                d = hits[0];
+            }
+            int idx = d.Index;
+            if (!d.CanExecute)
+                throw new InvalidOperationException($"CanExecuteSubstep is false for substep '{d.Name}' " +
+                    $"(index {idx}) of step '{stepName}'.");
+            if (d.ShowsFrontPanel == true && !allowUi)
+                throw new InvalidOperationException($"Substep '{d.Name}' shows a front panel and waits for " +
+                    "a user, which blocks a headless server. Pass allow_ui=true only when someone is at the " +
+                    "station to answer it.");
+            return (st, ty, d, SnapshotLeaves(st));
+        });
+
+        // ExecuteSubstep is a blocking COM call that cannot be cancelled: on a timeout the call stays
+        // parked on its pool thread, and the tool reports that instead of hanging the session.
+        var run = Task.Run(() => step.ExecuteSubstep(sub.Index, Type.Missing));
+        if (await Task.WhenAny(run, Task.Delay(TimeSpan.FromSeconds(Math.Max(1, timeoutSeconds)))) != run)
+            throw new TimeoutException($"Substep '{sub.Name}' did not return within {timeoutSeconds} s; " +
+                "it probably waits for user input (a dialog). The call is still pending inside the engine; " +
+                "restart the server before editing this file again.");
+        bool modified = await run;
+
+        return await Task.Run(() =>
+        {
+            var result = new SubstepRunResult
+            {
+                StepName = stepName, SubstepIndex = sub.Index, SubstepName = sub.Name, Modified = modified,
+                Changes = PropertyTreeDiff.Diff(before, SnapshotLeaves(step)),
+            };
+            if (save && (modified || result.Changes.Count > 0))
+            {
+                var sf = GetOrLoadSeqFile(filePath);
+                SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
+                result.Saved = true;
+            }
+            else if (!save && result.Changes.Count > 0)
+                result.Note = "Not saved (save=false). Call save_sequence_file to keep the changes.";
+            return result;
+        });
+    }
+
+    private Dictionary<string, object?> SnapshotLeaves(NiStep step)
+    {
+        int budget = 50_000;
+        var tree = BuildPropertyNode(step.AsPropertyObject(), "", 0, 64, true, 0, ref budget);
+        return PropertyTreeDiff.Flatten(tree);
     }
 
     /// <summary>

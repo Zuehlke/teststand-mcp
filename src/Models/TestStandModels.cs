@@ -1311,6 +1311,71 @@ public class StepPropertyValue
     public int? NumElements { get; set; }
 }
 
+/// <summary>One substep of a step's TYPE (get_step_substeps): an Edit, Custom, Pre, Post or
+/// OnNewStep action the step type author defined, with the code module it calls.</summary>
+public class StepSubstepInfo
+{
+    /// <summary>Zero-based index into the step type's Substeps array (what ExecuteSubstep takes).</summary>
+    public int Index { get; set; }
+    /// <summary>The substep's name, e.g. "Configure" or "Refresh".</summary>
+    public string Name { get; set; } = "";
+    /// <summary>Pre / Post / Edit / OnNewStep (the engine keys these by NAME), else Custom.</summary>
+    public string Kind { get; set; } = "";
+    /// <summary>Edit substeps: the button/menu text the editor shows (evaluated, without '&amp;').</summary>
+    public string? MenuText { get; set; }
+    /// <summary>Edit substeps: whether the substep has an edit panel in the Step Settings pane.</summary>
+    public bool? HasEditPanel { get; set; }
+    /// <summary>Adapter key of the substep's code module (e.g. "G Flexible VI Adapter").</summary>
+    public string Adapter { get; set; } = "";
+    /// <summary>Module path read from the substep (VI path, DLL path, sequence name, ...), if any.</summary>
+    public string? ModulePath { get; set; }
+    /// <summary>LabVIEW only: whether the VI shows its front panel (a dialog that waits for a user).</summary>
+    public bool? ShowsFrontPanel { get; set; }
+    /// <summary>Step.CanExecuteSubstep for this step.</summary>
+    public bool CanExecute { get; set; }
+}
+
+/// <summary>Result of get_step_substeps.</summary>
+public class StepSubstepList
+{
+    /// <summary>Step name.</summary>
+    public string StepName { get; set; } = "";
+    /// <summary>Name of the step's type.</summary>
+    public string StepType { get; set; } = "";
+    /// <summary>The type's substeps in index order.</summary>
+    public List<StepSubstepInfo> Substeps { get; set; } = new();
+}
+
+/// <summary>One leaf that differs between two property-tree snapshots.</summary>
+public class PropertyChange
+{
+    /// <summary>Dotted leaf path relative to the step.</summary>
+    public string Path { get; set; } = "";
+    /// <summary>Value before; null when the leaf did not exist.</summary>
+    public object? Before { get; set; }
+    /// <summary>Value after; null when the leaf was removed.</summary>
+    public object? After { get; set; }
+}
+
+/// <summary>Result of run_step_substep.</summary>
+public class SubstepRunResult
+{
+    /// <summary>Step name.</summary>
+    public string StepName { get; set; } = "";
+    /// <summary>Index of the substep that ran.</summary>
+    public int SubstepIndex { get; set; }
+    /// <summary>Name of the substep that ran.</summary>
+    public string SubstepName { get; set; } = "";
+    /// <summary>ExecuteSubstep's return value: the substep says it modified the step.</summary>
+    public bool Modified { get; set; }
+    /// <summary>Step-property leaves that changed, read back before and after the run.</summary>
+    public List<PropertyChange> Changes { get; set; } = new();
+    /// <summary>True when the file was saved after the run.</summary>
+    public bool Saved { get; set; }
+    /// <summary>Hint for the caller, e.g. that unsaved changes need save_sequence_file.</summary>
+    public string? Note { get; set; }
+}
+
 /// <summary>
 /// Read-back of a property-tree node written by set_property_node — the scope-generic
 /// counterpart of <see cref="StepPropertyValue"/> for Parameters / Locals / FileGlobals /

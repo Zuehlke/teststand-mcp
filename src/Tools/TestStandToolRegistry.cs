@@ -596,6 +596,44 @@ public class TestStandToolRegistry
                 .AddOptional("save", "boolean", "Save the file after writing (default true).", true),
             RenameStepPropertyAsync);
 
+        Register("get_step_substeps",
+            "List the SUBSTEPS of a step's type: the Edit buttons a custom step type adds to the Step " +
+            "Settings pane, plus Custom, Pre, Post and OnNewStep substeps. Per substep: index, name, kind, " +
+            "menuText (an Edit substep's button text, e.g. 'Configure Wait...'; every Edit substep is " +
+            "NAMED 'Edit'), hasEditPanel, adapter, modulePath, showsFrontPanel (LabVIEW) and canExecute " +
+            "for THIS step. The kind is the name for Pre/Post/Edit/OnNewStep; any other name is Custom. " +
+            "Run one with run_step_substep.",
+            s => s
+                .AddRequired("sequence_file_path", "string", "Path to the sequence file")
+                .AddRequired("sequence_name", "string", "Name of the sequence")
+                .AddRequired("step_group", "string", "Step group: 'Setup', 'Main', or 'Cleanup'")
+                .AddRequired("step_name", "string", "Name of the step (Name#N / @idx:N selectors work)"),
+            GetStepSubstepsAsync);
+
+        Register("run_step_substep",
+            "Run ONE substep of a step, exactly as the editor's button does (Step.ExecuteSubstep with no " +
+            "sequence context). Typical use: set a custom step's inputs with set_step_property, then run " +
+            "its non-interactive 'Refresh' substep so it derives the rest. Returns 'modified' (the " +
+            "substep's own report) and 'changes', the step-property leaves that differ before/after. " +
+            "HEADLESS: a substep whose LabVIEW VI shows its front panel waits for a user and is REFUSED " +
+            "unless allow_ui=true; any substep that does not return within timeout_seconds is reported " +
+            "as a timeout (the call cannot be cancelled and stays pending in the engine). save defaults " +
+            "to FALSE: inspect 'changes', then save_sequence_file.",
+            s => s
+                .AddRequired("sequence_file_path", "string", "Path to the sequence file")
+                .AddRequired("sequence_name", "string", "Name of the sequence")
+                .AddRequired("step_group", "string", "Step group: 'Setup', 'Main', or 'Cleanup'")
+                .AddRequired("step_name", "string", "Name of the step (Name#N / @idx:N selectors work)")
+                .AddOptional("substep_name", "string",
+                    "Substep name or Edit button text as get_step_substeps lists it (case-insensitive, " +
+                    "'&' and a trailing '...' ignored). Ambiguous names are refused; pass substep_index.")
+                .AddOptional("substep_index", "integer", "Zero-based substep index from get_step_substeps.")
+                .AddOptional("timeout_seconds", "integer", "Bound for the substep run (default 60).", 60)
+                .AddOptional("allow_ui", "boolean",
+                    "Allow a substep that shows a front panel (someone must answer it). Default false.", false)
+                .AddOptional("save", "boolean", "Save the file when the substep changed it (default false).", false),
+            RunStepSubstepAsync);
+
         Register("run_sequence_analyzer",
             "Run the NI TestStand Sequence Analyzer and return a HUMAN-READABLE TEXT summary, " +
             "grouped by severity by default (like the editor's Analysis Results 'Group By' pane). " +
@@ -4108,6 +4146,25 @@ public class TestStandToolRegistry
         var info = await _ts.RenameStepPropertyAsync(filePath, seqName, stepGroup, stepName,
             path, newName, save);
         return OkJson(info);
+    }
+
+    private async Task<CallToolResult> GetStepSubstepsAsync(JsonElement? args) =>
+        OkJson(await _ts.GetStepSubstepsAsync(
+            args!.Value.GetRequiredString("sequence_file_path"),
+            args!.Value.GetRequiredString("sequence_name"),
+            args!.Value.GetRequiredString("step_group"),
+            args!.Value.GetRequiredString("step_name")));
+
+    private async Task<CallToolResult> RunStepSubstepAsync(JsonElement? args)
+    {
+        var a = args!.Value;
+        int idx = a.GetIntOrDefault("substep_index", -1);
+        return OkJson(await _ts.RunStepSubstepAsync(
+            a.GetRequiredString("sequence_file_path"), a.GetRequiredString("sequence_name"),
+            a.GetRequiredString("step_group"), a.GetRequiredString("step_name"),
+            a.GetStringOrNull("substep_name"), idx >= 0 ? idx : null,
+            a.GetIntOrDefault("timeout_seconds", 60), a.GetBoolOrDefault("allow_ui", false),
+            a.GetBoolOrDefault("save", false)));
     }
 
     private async Task<CallToolResult> SetSequenceCallTargetAsync(JsonElement? args)

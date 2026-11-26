@@ -91,6 +91,16 @@ It is the editor's "Load Prototype" button for any step (LabVIEW, DLL or CVI, .N
 - The writer touches only the binding expression. The "use default" asymmetry of LabVIEW panes does not exist for .NET.
 - `load_module_prototype` runs the same three tiers for a .NET step, so it can complete a step that was configured while the assembly was missing, or re-sync one whose signature changed. An already valid interface survives the reload.
 
+## Step-type substeps
+
+`get_step_substeps` lists what a step's TYPE defines: Edit substeps (the buttons in the Step Settings pane), Custom, Pre, Post and OnNewStep substeps. `run_step_substep` runs one exactly as the editor's button does.
+
+- The kind is the substep's NAME for Pre, Post, Edit and OnNewStep; any other name is a Custom substep. Every Edit substep is named `Edit`; tell them apart by `menuText` (the button text) or by index.
+- Typical use for a custom step type: set its inputs with `set_step_property`, then run its non-interactive substep (for example a "Refresh") so it derives the rest.
+- Judge the effect by `changes` (the step-property leaves that differ before and after), not by `modified`. A substep can change the step and still report `modified:false`.
+- A substep whose LabVIEW VI shows its front panel waits for a user and is refused unless `allow_ui:true`. Any substep that does not return within `timeout_seconds` is reported as a timeout; the call cannot be cancelled, so restart the server before editing that file again. The Edit substeps of the built-in step types open a dialog: do not run them headless.
+- `save` defaults to false. Check `changes`, then `save_sequence_file`.
+
 ## Users and text encoding
 
 - Pass `persist:false` for every test or experimental user. It edits only the loaded users data and never touches `users.ini` on disk.
