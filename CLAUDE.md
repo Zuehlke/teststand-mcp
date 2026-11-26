@@ -90,6 +90,14 @@ The rules are in `tool-contracts.md`; tests `T38`.
 - `run_substep_on_steps` holds the `NiStep` objects it collected, so duplicate step names need no re-resolution; it resolves and guards the substep once per call (substeps belong to the TYPE).
 - Not verified: a LabVIEW substep (the issue's case) and the timeout path. The call runs on a pool thread, not the engine thread; whether a LabVIEW VI with a hidden front panel needs the STA/UI thread is open.
 
+## TestStand interop version (2026-11-26)
+
+The rule is in `headless-and-tools.md` (Bitness).
+- Reported by a user on 64-bit TestStand 2026 Q3: release 1.9.3 shipped the 23.0.0.49152 interop of the NuGet package in `bin`, .NET 8 loaded it at startup, and an engine component that needs 26.0.0.49152 of the same assembly could not load (one version per load context).
+- Fix: the package is referenced with `ExcludeAssets="runtime"` (nothing in `bin`, nothing in `deps.json`) and `TestStandInteropResolver` (a `[ModuleInitializer]`, so it also covers the prototype worker) answers `AssemblyLoadContext.Default.Resolving` from `<TestStand>\API\DotNET\Assemblies\CurrentVersion`, then `<TestStand>\Bin`, then `bin\interop-fallback` (the package copy, for CI and `--list-tools` without TestStand). The install is found by `TestStandInstallLocator`, so `connect_engine engine_path` does not steer it.
+- Measured: the old comment "the .NET-Framework PIA does NOT load under .NET Core/8" is wrong for the 26.0 PIA. The x86 and x64 servers load it, connect and pass a Single Pass against 32- and 64-bit TestStand 2026 Q3. `get_engine_paths` reports `interopVersion` / `interopPath`.
+- The TEST project keeps the package runtime files in its bin: the NUnit adapter reads the test assembly's metadata, and with it the interop references, before any module initializer runs ("NUnit failed to load", 0 tests, exit code 0). So the suite still runs on 23.0 and does not cover the resolver; the server exe was verified over MCP stdio instead.
+
 ## TestStand ENVIRONMENTS (`.tsenv`) — engine internals (2026-08-14, issue #35)
 
 The user-facing half (sources and their precedence, `tsenv_path='auto'`, the restart rule, what `get_engine_paths` and `open_sequence_file` report) is in the imported `headless-and-tools.md`. This section is the developer half: how the server makes an environment take effect and proves it did.

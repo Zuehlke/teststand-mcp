@@ -7399,7 +7399,9 @@ public sealed class TestStandService : ITestStandService
                 // expose the absolute path so the doc/presentation agents don't guess "<repo>\scripts".
                 ScriptsDirectory  = Directory.Exists(Path.Combine(AppContext.BaseDirectory, "scripts"))
                     ? Path.Combine(AppContext.BaseDirectory, "scripts")
-                    : ""
+                    : "",
+                InteropVersion    = typeof(NiEngine).Assembly.GetName().Version?.ToString() ?? "",
+                InteropPath       = typeof(NiEngine).Assembly.Location,
             };
         });
     }

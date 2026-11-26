@@ -997,6 +997,10 @@ public class EnginePaths
     /// next to the exe. Agents use this absolute path instead of a working-directory-relative
     /// "&lt;repo&gt;\scripts" guess, so they work from any project. Empty if the folder is missing.</summary>
     public string ScriptsDirectory { get; set; } = "";
+    /// <summary>Version of the loaded TestStand interop assembly; matches the installed engine.</summary>
+    public string InteropVersion { get; set; } = "";
+    /// <summary>Where the TestStand interop assembly was loaded from: the installation, never the server's bin.</summary>
+    public string InteropPath { get; set; } = "";
 
     // ── TestStand environment (.tsenv) ────────────────────────────────────────
     // Without these there is no way to tell WHICH environment the engine is working in — and every
