@@ -8,7 +8,9 @@ namespace TestStandMCP.Tools;
 /// <summary>Leaf-level before/after comparison of two property-tree snapshots (run_step_substep).</summary>
 internal static class PropertyTreeDiff
 {
-    /// <summary>Flattens a tree to dotted leaf path -> value; arrays use "[i]".</summary>
+    /// <summary>Flattens a tree to dotted leaf path -> value; arrays use "[i]". A node without a value
+    /// and without children (an empty array or container) is structure, not a leaf: it is skipped, so an
+    /// array that gets its first element shows only the new element's leaves, not a "null -> null" row.</summary>
     public static Dictionary<string, object?> Flatten(PropertyNode root)
     {
         var leaves = new Dictionary<string, object?>();
@@ -16,7 +18,7 @@ internal static class PropertyTreeDiff
         {
             if (n.Children == null || n.Children.Count == 0)
             {
-                if (path.Length > 0) leaves[path] = n.Value;
+                if (path.Length > 0 && n.Value != null) leaves[path] = n.Value;
                 return;
             }
             foreach (var c in n.Children)

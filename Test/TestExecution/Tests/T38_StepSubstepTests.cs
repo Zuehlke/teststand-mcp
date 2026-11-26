@@ -53,6 +53,8 @@ public class T38_StepSubstepTests : TestBase
         Assert.That(r.Changes.Any(c => c.Path == "TS.AdditionalResultsHints[0].ValueToLog" &&
             (string?)c.After == "Evaluate(Step.TimeExpr)"), Is.True,
             string.Join("; ", r.Changes.Select(c => $"{c.Path}: {c.Before} -> {c.After}")));
+        Assert.That(r.Changes.Where(c => c.Before == null && c.After == null), Is.Empty,
+            "an empty array or container is structure, not a changed leaf");
         Assert.That(r.Note, Does.Contain("save_sequence_file"));
     }
 
@@ -88,6 +90,16 @@ public class T38_StepSubstepTests : TestBase
             new() { Name = "Arr", Children = new() { Leaf("[0]", 1.0) } } } };
         var flat = PropertyTreeDiff.Flatten(tree);
         Assert.That(flat.Keys, Is.EquivalentTo(new[] { "Config.Description", "Arr[0]" }));
+    }
+
+    [Test]
+    public void PropertyTreeDiff_EmptyArrayGainingAnElement_ReportsOnlyTheNewLeaves()
+    {
+        var before = new PropertyNode { Children = new() { new() { Name = "Hints" } } };
+        var after  = new PropertyNode { Children = new() { new() { Name = "Hints", Children = new() {
+            new() { Name = "[0]", Children = new() { Leaf("Name", "x"), new() { Name = "Elements" } } } } } } };
+        var d = PropertyTreeDiff.Diff(PropertyTreeDiff.Flatten(before), PropertyTreeDiff.Flatten(after));
+        Assert.That(d.Select(c => c.Path), Is.EqualTo(new[] { "Hints[0].Name" }));
     }
 
     [Test]
