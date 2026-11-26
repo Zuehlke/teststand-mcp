@@ -86,6 +86,8 @@ Six rules that lived here as prose are now guards, defaults or a tool, so they h
 The rules are in `tool-contracts.md`; tests `T38`.
 - A substep is a `Step` from `StepType.GetSubstep(i)`. It has NO kind property (measured on TS 2026, the whole substep tree dumped): the kind is its `Name` (`Pre`/`Post`/`Edit`/`OnNewStep`), anything else is Custom. An Edit substep's `MenuName` is an unevaluated `ResStr(...)`; the evaluated button text comes from `Step.GetEditSubstepMenuStructure()` (`MenuItems[i].Name` + `SubstepIndex`).
 - `ExecuteSubstep(i, Type.Missing)` / `CanExecuteSubstep(i, Type.Missing)` is the UI case (no SequenceContext). Measured: `NI_Wait`'s `OnNewStep` runs headless, authors `TS.AdditionalResultsHints[0]`, and still returns `false`, hence the leaf diff in the result.
+- LabVIEW safety reuses the prototype-load machinery: `ConfigureLabVIEWAdapter`/`RestoreLabVIEWAdapter` around `ExecuteSubstep`, and `InputGuards.PackedLibrarySubstepRefusal` for a `.lvlibp` module. The `.lvlibp` refusal is extrapolated from the measured connector-pane load crash, not measured for an execution. After a timeout `_pendingSubstep` blocks every further substep run until restart.
+- `run_substep_on_steps` holds the `NiStep` objects it collected, so duplicate step names need no re-resolution; it resolves and guards the substep once per call (substeps belong to the TYPE).
 - Not verified: a LabVIEW substep (the issue's case) and the timeout path. The call runs on a pool thread, not the engine thread; whether a LabVIEW VI with a hidden front panel needs the STA/UI thread is open.
 
 ## TestStand ENVIRONMENTS (`.tsenv`) — engine internals (2026-08-14, issue #35)

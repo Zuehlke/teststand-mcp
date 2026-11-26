@@ -631,8 +631,42 @@ public class TestStandToolRegistry
                 .AddOptional("timeout_seconds", "integer", "Bound for the substep run (default 60).", 60)
                 .AddOptional("allow_ui", "boolean",
                     "Allow a substep that shows a front panel (someone must answer it). Default false.", false)
-                .AddOptional("save", "boolean", "Save the file when the substep changed it (default false).", false),
+                .AddOptional("save", "boolean", "Save the file when the substep changed it (default false).", false)
+                .AddOptional("labview_server", "string",
+                    "LabVIEW substeps: server the adapter is routed to for the run, then restored. " +
+                    "'deferred' (default) / 'exec' = the running LabVIEW ADE; 'rte' = Run-Time (may fault " +
+                    "headless); 'auto' = leave as configured.", "deferred", new[] { "deferred", "exec", "rte", "auto" })
+                .AddOptional("force_unsafe_inprocess", "boolean",
+                    "Run a substep whose VI is in a packed library (.lvlibp) anyway. That load can KILL the " +
+                    "server process; refused by default.", false),
             RunStepSubstepAsync);
+
+        Register("run_substep_on_steps",
+            "BULK form of run_step_substep: run one substep on EVERY step of a step type, in the whole file " +
+            "or in one sequence, in file order, and save ONCE at the end. Typical use: 'Refresh' all steps of " +
+            "a custom type after their inputs were set. The substep is resolved and guarded once (front " +
+            "panel, packed library); CanExecuteSubstep is checked per step. A failing step is recorded and " +
+            "the run continues; the FIRST TIMEOUT STOPS the run and nothing is saved (the engine still holds " +
+            "that call; restart the server). Returns counts plus one entry per step (sequence, group, index " +
+            "for the @idx:N selector, modified, changeCount, error); include_changes=true adds each step's " +
+            "changed leaves. LabVIEW routing and refusals as in run_step_substep.",
+            s => s
+                .AddRequired("sequence_file_path", "string", "Path to the sequence file")
+                .AddRequired("step_type", "string", "Step type name (exact, as get_steps reports it)")
+                .AddOptional("sequence_name", "string", "Limit to one sequence (default: all sequences).")
+                .AddOptional("substep_name", "string",
+                    "Substep name or Edit button text (case-insensitive). Or pass substep_index.")
+                .AddOptional("substep_index", "integer", "Zero-based substep index from get_step_substeps.")
+                .AddOptional("timeout_seconds", "integer", "Bound PER STEP (default 60).", 60)
+                .AddOptional("allow_ui", "boolean",
+                    "Allow a substep that shows a front panel (someone must answer every one). Default false.", false)
+                .AddOptional("save", "boolean", "Save once at the end when any step changed (default false).", false)
+                .AddOptional("include_changes", "boolean",
+                    "Include each step's changed leaves (large on many steps). Default false.", false)
+                .AddOptional("labview_server", "string", "As in run_step_substep.", "deferred",
+                    new[] { "deferred", "exec", "rte", "auto" })
+                .AddOptional("force_unsafe_inprocess", "boolean", "As in run_step_substep.", false),
+            RunSubstepOnStepsAsync);
 
         Register("run_sequence_analyzer",
             "Run the NI TestStand Sequence Analyzer and return a HUMAN-READABLE TEXT summary, " +
@@ -4164,7 +4198,20 @@ public class TestStandToolRegistry
             a.GetRequiredString("step_group"), a.GetRequiredString("step_name"),
             a.GetStringOrNull("substep_name"), idx >= 0 ? idx : null,
             a.GetIntOrDefault("timeout_seconds", 60), a.GetBoolOrDefault("allow_ui", false),
-            a.GetBoolOrDefault("save", false)));
+            a.GetBoolOrDefault("save", false), a.GetStringOrNull("labview_server"),
+            a.GetBoolOrDefault("force_unsafe_inprocess", false)));
+    }
+
+    private async Task<CallToolResult> RunSubstepOnStepsAsync(JsonElement? args)
+    {
+        var a = args!.Value;
+        int idx = a.GetIntOrDefault("substep_index", -1);
+        return OkJson(await _ts.RunSubstepOnStepsAsync(
+            a.GetRequiredString("sequence_file_path"), a.GetRequiredString("step_type"),
+            a.GetStringOrNull("substep_name"), idx >= 0 ? idx : null, a.GetStringOrNull("sequence_name"),
+            a.GetIntOrDefault("timeout_seconds", 60), a.GetBoolOrDefault("allow_ui", false),
+            a.GetBoolOrDefault("save", false), a.GetBoolOrDefault("include_changes", false),
+            a.GetStringOrNull("labview_server"), a.GetBoolOrDefault("force_unsafe_inprocess", false)));
     }
 
     private async Task<CallToolResult> SetSequenceCallTargetAsync(JsonElement? args)

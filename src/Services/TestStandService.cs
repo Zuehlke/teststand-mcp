@@ -209,7 +209,14 @@ public interface ITestStandService : IDisposable
     /// editor's case) and reports what it changed on the step.</summary>
     Task<SubstepRunResult> RunStepSubstepAsync(string filePath, string sequenceName,
         string stepGroup, string stepName, string? substepName, int? substepIndex,
-        int timeoutSeconds = 60, bool allowUi = false, bool save = false);
+        int timeoutSeconds = 60, bool allowUi = false, bool save = false,
+        string? labviewServer = null, bool forceUnsafeInProcess = false);
+    /// <summary>Runs one substep on EVERY step of a step type in a file (or one sequence), saving once.
+    /// Stops at the first timeout.</summary>
+    Task<BulkSubstepRunResult> RunSubstepOnStepsAsync(string filePath, string stepType,
+        string? substepName, int? substepIndex, string? sequenceName = null, int timeoutSeconds = 60,
+        bool allowUi = false, bool save = false, bool includeChanges = false,
+        string? labviewServer = null, bool forceUnsafeInProcess = false);
 
     // Executions
     /// <summary>Starts execution of an entry point in the given sequence file and returns execution info.</summary>
@@ -4879,80 +4886,198 @@ public sealed class TestStandService : ITestStandService
         });
     }
 
-    /// <inheritdoc/>
-    public async Task<SubstepRunResult> RunStepSubstepAsync(string filePath, string sequenceName,
-        string stepGroup, string stepName, string? substepName, int? substepIndex,
-        int timeoutSeconds = 60, bool allowUi = false, bool save = false)
-    {
-        EnsureConnected();
-        if (substepIndex == null && string.IsNullOrWhiteSpace(substepName))
-            throw new ArgumentException("Pass 'substep_name' or 'substep_index'.");
+    // Set when a substep run timed out: its ExecuteSubstep call is still parked inside the engine and
+    // cannot be cancelled, so every further substep run is refused until the server restarts.
+    private volatile string? _pendingSubstep;
 
-        // Resolve + guard + snapshot first; the run itself is bounded separately below.
-        var (step, type, sub, before) = await Task.Run(() =>
+    private static StepSubstepInfo PickSubstep(List<StepSubstepInfo> all, string typeName,
+        string? substepName, int? substepIndex)
+    {
+        if (substepIndex is int i)
         {
-            var (st, ty) = ResolveStepAndType(filePath, sequenceName, stepGroup, stepName);
-            var all = DescribeSubsteps(st, ty);
-            StepSubstepInfo d;
-            if (substepIndex is int i)
-            {
-                if (i < 0 || i >= all.Count)
-                    throw new ArgumentOutOfRangeException(nameof(substepIndex),
-                        $"Step type '{ty.Name}' has {all.Count} substep(s); index {i} is out of range.");
-                d = all[i];
-            }
-            else
-            {
-                // Match the substep name or the button text; every Edit substep is NAMED "Edit".
-                string want = substepName!.Replace("&", "").Trim().TrimEnd('.');
-                var hits = all.Where(s => string.Equals(s.Name, want, StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(s.MenuText?.Trim().TrimEnd('.'), want, StringComparison.OrdinalIgnoreCase)).ToList();
-                if (hits.Count == 0)
-                    throw new ArgumentException($"Step type '{ty.Name}' has no substep named '{substepName}'. " +
-                        "Call get_step_substeps to list them.");
-                if (hits.Count > 1)
-                    throw new ArgumentException($"'{substepName}' matches substeps " +
-                        string.Join(", ", hits.Select(h => $"{h.Index} ({h.MenuText ?? h.Name})")) +
-                        "; pass substep_index.");
-                d = hits[0];
-            }
-            int idx = d.Index;
-            if (!d.CanExecute)
-                throw new InvalidOperationException($"CanExecuteSubstep is false for substep '{d.Name}' " +
-                    $"(index {idx}) of step '{stepName}'.");
-            if (d.ShowsFrontPanel == true && !allowUi)
-                throw new InvalidOperationException($"Substep '{d.Name}' shows a front panel and waits for " +
-                    "a user, which blocks a headless server. Pass allow_ui=true only when someone is at the " +
-                    "station to answer it.");
-            return (st, ty, d, SnapshotLeaves(st));
+            if (i < 0 || i >= all.Count)
+                throw new ArgumentOutOfRangeException(nameof(substepIndex),
+                    $"Step type '{typeName}' has {all.Count} substep(s); index {i} is out of range.");
+            return all[i];
+        }
+        // Match the substep name or the button text; every Edit substep is NAMED "Edit".
+        string want = substepName!.Replace("&", "").Trim().TrimEnd('.');
+        var hits = all.Where(s => string.Equals(s.Name, want, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(s.MenuText?.Trim().TrimEnd('.'), want, StringComparison.OrdinalIgnoreCase)).ToList();
+        if (hits.Count == 0)
+            throw new ArgumentException($"Step type '{typeName}' has no substep named '{substepName}'. " +
+                "Call get_step_substeps to list them.");
+        if (hits.Count > 1)
+            throw new ArgumentException($"'{substepName}' matches substeps " +
+                string.Join(", ", hits.Select(h => $"{h.Index} ({h.MenuText ?? h.Name})")) + "; pass substep_index.");
+        return hits[0];
+    }
+
+    // Refusals that hold for every step of the type, checked once before anything runs.
+    internal static void GuardSubstep(StepSubstepInfo d, bool allowUi, bool forceUnsafeInProcess)
+    {
+        if (d.ShowsFrontPanel == true && !allowUi)
+            throw new InvalidOperationException($"Substep '{d.Name}' shows a front panel and waits for " +
+                "a user, which blocks a headless server. Pass allow_ui=true only when someone is at the " +
+                "station to answer it.");
+        if (IsLabVIEWAdapter(d.Adapter) && InputGuards.IsPackedLibraryModulePath(d.ModulePath) && !forceUnsafeInProcess)
+            throw new InvalidOperationException(InputGuards.PackedLibrarySubstepRefusal(d.Name, d.ModulePath));
+    }
+
+    private void ThrowIfSubstepPending()
+    {
+        if (_pendingSubstep is string p)
+            throw new InvalidOperationException($"A substep run timed out earlier ({p}) and is still pending " +
+                "inside the engine. Restart the MCP server before running substeps or editing that file again.");
+    }
+
+    /// <summary>One substep run on one step: snapshot, LabVIEW routing, bounded ExecuteSubstep, diff.</summary>
+    private async Task<SubstepRunResult> ExecuteSubstepBoundedAsync(NiStep step, string stepName,
+        StepSubstepInfo sub, int timeoutSeconds, string? labviewServer)
+    {
+        var before = await Task.Run(() =>
+        {
+            if (!step.CanExecuteSubstep(sub.Index, Type.Missing))
+                throw new InvalidOperationException($"CanExecuteSubstep is false for substep '{sub.Name}' " +
+                    $"(index {sub.Index}) of step '{stepName}'.");
+            return SnapshotLeaves(step);
         });
 
         // ExecuteSubstep is a blocking COM call that cannot be cancelled: on a timeout the call stays
-        // parked on its pool thread, and the tool reports that instead of hanging the session.
-        var run = Task.Run(() => step.ExecuteSubstep(sub.Index, Type.Missing));
+        // parked on its pool thread, and the tool reports that instead of hanging the session. A LabVIEW
+        // substep is routed to the running LabVIEW ADE first, like a prototype load, so the adapter does
+        // not auto-detect the LabVIEW Run-Time whose delay-load faults the process headless.
+        var run = Task.Run(() =>
+        {
+            var lv = IsLabVIEWAdapter(sub.Adapter) ? ConfigureLabVIEWAdapter(sub.Adapter, labviewServer) : null;
+            try { return step.ExecuteSubstep(sub.Index, Type.Missing); }
+            finally { RestoreLabVIEWAdapter(lv); }
+        });
         if (await Task.WhenAny(run, Task.Delay(TimeSpan.FromSeconds(Math.Max(1, timeoutSeconds)))) != run)
+        {
+            _pendingSubstep = $"'{sub.Name}' on step '{stepName}'";
             throw new TimeoutException($"Substep '{sub.Name}' did not return within {timeoutSeconds} s; " +
                 "it probably waits for user input (a dialog). The call is still pending inside the engine; " +
-                "restart the server before editing this file again.");
+                "restart the MCP server before running substeps or editing this file again.");
+        }
         bool modified = await run;
-
-        return await Task.Run(() =>
+        var after = await Task.Run(() => SnapshotLeaves(step));
+        return new SubstepRunResult
         {
-            var result = new SubstepRunResult
-            {
-                StepName = stepName, SubstepIndex = sub.Index, SubstepName = sub.Name, Modified = modified,
-                Changes = PropertyTreeDiff.Diff(before, SnapshotLeaves(step)),
-            };
-            if (save && (modified || result.Changes.Count > 0))
-            {
-                var sf = GetOrLoadSeqFile(filePath);
-                SaveSequenceFileWithRetry((NiSequenceFile)(object)sf, filePath);
-                result.Saved = true;
-            }
-            else if (!save && result.Changes.Count > 0)
-                result.Note = "Not saved (save=false). Call save_sequence_file to keep the changes.";
-            return result;
+            StepName = stepName, SubstepIndex = sub.Index, SubstepName = sub.Name, Modified = modified,
+            Changes = PropertyTreeDiff.Diff(before, after),
+        };
+    }
+
+    /// <inheritdoc/>
+    public async Task<SubstepRunResult> RunStepSubstepAsync(string filePath, string sequenceName,
+        string stepGroup, string stepName, string? substepName, int? substepIndex,
+        int timeoutSeconds = 60, bool allowUi = false, bool save = false,
+        string? labviewServer = null, bool forceUnsafeInProcess = false)
+    {
+        EnsureConnected();
+        ThrowIfSubstepPending();
+        if (substepIndex == null && string.IsNullOrWhiteSpace(substepName))
+            throw new ArgumentException("Pass 'substep_name' or 'substep_index'.");
+
+        var (step, sub) = await Task.Run(() =>
+        {
+            var (st, ty) = ResolveStepAndType(filePath, sequenceName, stepGroup, stepName);
+            var d = PickSubstep(DescribeSubsteps(st, ty), ty.Name, substepName, substepIndex);
+            GuardSubstep(d, allowUi, forceUnsafeInProcess);
+            return (st, d);
         });
+
+        var result = await ExecuteSubstepBoundedAsync(step, stepName, sub, timeoutSeconds, labviewServer);
+        if (save && (result.Modified || result.Changes.Count > 0))
+        {
+            await Task.Run(() => SaveSequenceFileWithRetry((NiSequenceFile)(object)GetOrLoadSeqFile(filePath), filePath));
+            result.Saved = true;
+        }
+        else if (!save && result.Changes.Count > 0)
+            result.Note = "Not saved (save=false). Call save_sequence_file to keep the changes.";
+        return result;
+    }
+
+    /// <inheritdoc/>
+    public async Task<BulkSubstepRunResult> RunSubstepOnStepsAsync(string filePath, string stepType,
+        string? substepName, int? substepIndex, string? sequenceName = null, int timeoutSeconds = 60,
+        bool allowUi = false, bool save = false, bool includeChanges = false,
+        string? labviewServer = null, bool forceUnsafeInProcess = false)
+    {
+        EnsureConnected();
+        ThrowIfSubstepPending();
+        if (substepIndex == null && string.IsNullOrWhiteSpace(substepName))
+            throw new ArgumentException("Pass 'substep_name' or 'substep_index'.");
+
+        // Collect every step of the type (file order), then resolve + guard the substep ONCE.
+        var (targets, sub) = await Task.Run(() =>
+        {
+            var sf = GetOrLoadSeqFile(filePath);
+            var list = new List<(NiStep step, string seq, string group, int index)>();
+            int numSeqs = Convert.ToInt32((object)sf.NumSequences);
+            for (int s = 0; s < numSeqs; s++)
+            {
+                NiSequence seq = (NiSequence)(object)sf.GetSequence(s);
+                if (sequenceName != null && !string.Equals(seq.Name, sequenceName, StringComparison.Ordinal)) continue;
+                foreach (var (g, gName) in new[] { (0, "Setup"), (1, "Main"), (2, "Cleanup") })
+                    for (int i = 0; i < seq.GetNumSteps((NiStepGroups)g); i++)
+                    {
+                        NiStep st = seq.GetStep(i, (NiStepGroups)g);
+                        if (string.Equals(st.StepType.Name, stepType, StringComparison.Ordinal))
+                            list.Add((st, seq.Name, gName, i));
+                    }
+            }
+            if (sequenceName != null && !list.Any() &&
+                !Enumerable.Range(0, numSeqs).Any(s => ((NiSequence)(object)sf.GetSequence(s)).Name == sequenceName))
+                throw new ArgumentException($"Sequence '{sequenceName}' not found in the file.");
+            if (list.Count == 0) return (list, (StepSubstepInfo?)null);
+            var d = PickSubstep(DescribeSubsteps(list[0].Item1, list[0].Item1.StepType), stepType, substepName, substepIndex);
+            GuardSubstep(d, allowUi, forceUnsafeInProcess);
+            return (list, (StepSubstepInfo?)d);
+        });
+
+        var result = new BulkSubstepRunResult { StepType = stepType, Matched = targets.Count };
+        if (sub == null)
+        {
+            result.Note = $"No step of type '{stepType}' found" + (sequenceName == null ? "." : $" in '{sequenceName}'.");
+            return result;
+        }
+        result.SubstepIndex = sub.Index;
+        result.SubstepName  = sub.Name;
+
+        foreach (var (step, seq, group, index) in targets)
+        {
+            var entry = new BulkSubstepStepResult { Sequence = seq, StepGroup = group, StepIndex = index };
+            try { entry.StepName = step.Name; } catch { }
+            result.Steps.Add(entry);
+            try
+            {
+                var r = await ExecuteSubstepBoundedAsync(step, entry.StepName, sub, timeoutSeconds, labviewServer);
+                entry.Modified    = r.Modified;
+                entry.ChangeCount = r.Changes.Count;
+                if (includeChanges) entry.Changes = r.Changes;
+                result.Ran++;
+                if (r.Modified || r.Changes.Count > 0) result.Changed++;
+            }
+            catch (TimeoutException ex)
+            {
+                // The engine still holds the call: stop, and do not save a file the engine is busy with.
+                entry.Error = ex.Message;
+                result.Note = "Stopped at the first timeout; nothing was saved. Restart the MCP server.";
+                return result;
+            }
+            catch (Exception ex) { entry.Error = ex.Message; result.Failed++; }
+        }
+
+        if (save && result.Changed > 0)
+        {
+            await Task.Run(() => SaveSequenceFileWithRetry((NiSequenceFile)(object)GetOrLoadSeqFile(filePath), filePath));
+            result.Saved = true;
+        }
+        else if (!save && result.Changed > 0)
+            result.Note = "Not saved (save=false). Call save_sequence_file to keep the changes.";
+        return result;
     }
 
     private Dictionary<string, object?> SnapshotLeaves(NiStep step)

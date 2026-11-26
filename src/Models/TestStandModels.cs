@@ -1376,6 +1376,52 @@ public class SubstepRunResult
     public string? Note { get; set; }
 }
 
+/// <summary>One step of a run_substep_on_steps call.</summary>
+public class BulkSubstepStepResult
+{
+    /// <summary>Sequence that holds the step.</summary>
+    public string Sequence { get; set; } = "";
+    /// <summary>Setup / Main / Cleanup.</summary>
+    public string StepGroup { get; set; } = "";
+    /// <summary>Zero-based index in the group (the @idx:N selector), unique where names repeat.</summary>
+    public int StepIndex { get; set; }
+    /// <summary>Step name.</summary>
+    public string StepName { get; set; } = "";
+    /// <summary>ExecuteSubstep's return value.</summary>
+    public bool Modified { get; set; }
+    /// <summary>Number of step-property leaves that changed.</summary>
+    public int ChangeCount { get; set; }
+    /// <summary>The changed leaves, only with include_changes=true.</summary>
+    public List<PropertyChange>? Changes { get; set; }
+    /// <summary>Why this step failed, if it did.</summary>
+    public string? Error { get; set; }
+}
+
+/// <summary>Result of run_substep_on_steps.</summary>
+public class BulkSubstepRunResult
+{
+    /// <summary>Step type whose steps were run.</summary>
+    public string StepType { get; set; } = "";
+    /// <summary>Index of the substep that ran.</summary>
+    public int SubstepIndex { get; set; }
+    /// <summary>Name of the substep that ran.</summary>
+    public string SubstepName { get; set; } = "";
+    /// <summary>Steps of the type found in scope.</summary>
+    public int Matched { get; set; }
+    /// <summary>Steps on which the substep returned.</summary>
+    public int Ran { get; set; }
+    /// <summary>Steps the substep modified or changed.</summary>
+    public int Changed { get; set; }
+    /// <summary>Steps that failed (not counting a timeout, which stops the run).</summary>
+    public int Failed { get; set; }
+    /// <summary>True when the file was saved once at the end.</summary>
+    public bool Saved { get; set; }
+    /// <summary>Hint for the caller (unsaved changes, stop after a timeout, nothing found).</summary>
+    public string? Note { get; set; }
+    /// <summary>Per-step outcome in file order.</summary>
+    public List<BulkSubstepStepResult> Steps { get; set; } = new();
+}
+
 /// <summary>
 /// Read-back of a property-tree node written by set_property_node — the scope-generic
 /// counterpart of <see cref="StepPropertyValue"/> for Parameters / Locals / FileGlobals /

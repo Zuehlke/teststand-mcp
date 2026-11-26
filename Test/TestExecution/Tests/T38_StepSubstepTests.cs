@@ -78,6 +78,76 @@ public class T38_StepSubstepTests : TestBase
         });
     }
 
+    // ── Bulk form ───────────────────────────────────────────────────────────
+
+    private async Task BuildBulkFileAsync()
+    {
+        await Ts.CreateSequenceFileAsync(TempSeqFile);
+        await Ts.InsertSequenceAsync(TempSeqFile, "Sub");
+        await Ts.InsertStepAsync(TempSeqFile, "MainSequence", "Main", "NI_Wait", "W");
+        await Ts.InsertStepAsync(TempSeqFile, "MainSequence", "Main", "MessagePopup", "P");
+        await Ts.InsertStepAsync(TempSeqFile, "MainSequence", "Cleanup", "NI_Wait", "W");
+        await Ts.InsertStepAsync(TempSeqFile, "Sub", "Main", "NI_Wait", "W2");
+    }
+
+    [Test]
+    public async Task RunSubstepOnSteps_WholeFile_RunsEveryStepOfTheTypeOnly()
+    {
+        await BuildBulkFileAsync();
+        var r = await Ts.RunSubstepOnStepsAsync(TempSeqFile, "NI_Wait", "OnNewStep", null, save: true);
+
+        Assert.That(r.Matched, Is.EqualTo(3));
+        Assert.That(r.Ran, Is.EqualTo(3));
+        Assert.That(r.Changed, Is.EqualTo(3));
+        Assert.That(r.Failed, Is.EqualTo(0));
+        Assert.That(r.Saved, Is.True);
+        Assert.That(r.Steps.Select(s => $"{s.Sequence}/{s.StepGroup}/{s.StepIndex}/{s.StepName}"),
+            Is.EqualTo(new[] { "MainSequence/Main/0/W", "MainSequence/Cleanup/0/W", "Sub/Main/0/W2" }));
+        Assert.That(r.Steps.All(s => s.Changes == null), "changes only with include_changes");
+
+        // sequence_name narrows the scope; include_changes adds the per-step leaf list.
+        var again = await Ts.RunSubstepOnStepsAsync(TempSeqFile, "NI_Wait", "OnNewStep", null,
+            sequenceName: "Sub", includeChanges: true);
+        Assert.That(again.Matched, Is.EqualTo(1));
+        Assert.That(again.Steps[0].Changes, Is.Not.Null);
+    }
+
+    [Test]
+    public async Task RunSubstepOnSteps_NoStepOfType_ReportsInsteadOfFailing()
+    {
+        await BuildBulkFileAsync();
+        var r = await Ts.RunSubstepOnStepsAsync(TempSeqFile, "NumericLimitTest", "Edit", null);
+        Assert.That(r.Matched, Is.EqualTo(0));
+        Assert.That(r.Note, Does.Contain("No step of type"));
+    }
+
+    // ── LabVIEW / UI guards (pure) ──────────────────────────────────────────
+
+    private static StepSubstepInfo Lv(string path, bool? panel = false) =>
+        new() { Name = "Refresh", Adapter = "G Flexible VI Adapter", ModulePath = path, ShowsFrontPanel = panel };
+
+    [Test]
+    public void Guard_PackedLibraryVi_IsRefusedUnlessForced()
+    {
+        var sub = Lv(@"C:\Lib\Steps.lvlibp\X_gui.vi");
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            TestStandMCP.Services.TestStandService.GuardSubstep(sub, allowUi: false, forceUnsafeInProcess: false));
+        Assert.That(ex!.Message, Does.Contain("packed library"));
+        Assert.DoesNotThrow(() =>
+            TestStandMCP.Services.TestStandService.GuardSubstep(sub, allowUi: false, forceUnsafeInProcess: true));
+    }
+
+    [Test]
+    public void Guard_FrontPanel_IsRefusedUnlessAllowUi_PlainViPasses()
+    {
+        Assert.Throws<InvalidOperationException>(() =>
+            TestStandMCP.Services.TestStandService.GuardSubstep(Lv(@"C:\VIs\X_gui.vi", true), false, false));
+        Assert.DoesNotThrow(() =>
+            TestStandMCP.Services.TestStandService.GuardSubstep(Lv(@"C:\VIs\X_gui.vi", true), true, false));
+        Assert.DoesNotThrow(() =>
+            TestStandMCP.Services.TestStandService.GuardSubstep(Lv(@"C:\VIs\X_gui.vi"), false, false));
+    }
+
     // ── PropertyTreeDiff (pure) ─────────────────────────────────────────────
 
     private static PropertyNode Leaf(string n, object? v) => new() { Name = n, Value = v };

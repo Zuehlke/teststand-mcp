@@ -189,6 +189,7 @@
     "run_sequence_analyzer",
     "run_step_substep",
     "run_steps_interactively",
+    "run_substep_on_steps",
     "save_report",
     "save_sequence_file",
     "set_array_element",

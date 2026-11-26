@@ -98,8 +98,10 @@ It is the editor's "Load Prototype" button for any step (LabVIEW, DLL or CVI, .N
 - The kind is the substep's NAME for Pre, Post, Edit and OnNewStep; any other name is a Custom substep. Every Edit substep is named `Edit`; tell them apart by `menuText` (the button text) or by index.
 - Typical use for a custom step type: set its inputs with `set_step_property`, then run its non-interactive substep (for example a "Refresh") so it derives the rest.
 - Judge the effect by `changes` (the step-property leaves that differ before and after), not by `modified`. A substep can change the step and still report `modified:false`.
-- A substep whose LabVIEW VI shows its front panel waits for a user and is refused unless `allow_ui:true`. Any substep that does not return within `timeout_seconds` is reported as a timeout; the call cannot be cancelled, so restart the server before editing that file again. The Edit substeps of the built-in step types open a dialog: do not run them headless.
+- A substep whose LabVIEW VI shows its front panel waits for a user and is refused unless `allow_ui:true`. Any substep that does not return within `timeout_seconds` is reported as a timeout; the call cannot be cancelled, so every further substep run is refused until the MCP server restarts. The Edit substeps of the built-in step types open a dialog: do not run them headless.
+- A LabVIEW substep runs with the adapter routed to the running LabVIEW development environment (`labview_server`, default `deferred`), restored afterwards, as for a prototype load. A substep whose VI sits in a packed library (`.lvlibp`) is refused: loading it can kill the server process. Run it in the Sequence Editor; never pass `force_unsafe_inprocess:true`.
 - `save` defaults to false. Check `changes`, then `save_sequence_file`.
+- `run_substep_on_steps` runs one substep on every step of a step type, in the whole file or one `sequence_name`, and saves once. Per step it reports `modified`, `changeCount` and `error`, plus `stepIndex` for the `@idx:N` selector; `include_changes:true` adds the changed leaves. A failing step does not stop the run; the first timeout stops it, and then nothing is saved. Try `run_step_substep` on one step first.
 
 ## Users and text encoding
 
