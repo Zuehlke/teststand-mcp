@@ -60,8 +60,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File build\Assert-ReleaseTag.
 
 Two things to know about the push itself:
 
-- The `pre-push` hook runs on a tag push too. It stops every `TestStandMCP.exe` and `SeqEdit.exe` and runs
-  the integration suite, so save open Sequence Editor work first. See [.githooks/README.md](.githooks/README.md).
+- The `pre-push` hook runs on a tag push too. After two script checks (`hooks.json`, the staging table)
+  it stops every `TestStandMCP.exe` and `SeqEdit.exe` and runs the integration suite, so save open
+  Sequence Editor work first. See [.githooks/README.md](.githooks/README.md).
   On the real repository, let the hook run.
 - Every tag has its own run, and a running release is never cancelled. Two tags pushed close together may
   overlap. Before it publishes, the workflow compares the version with the current latest release, and a
