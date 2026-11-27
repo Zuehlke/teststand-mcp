@@ -155,6 +155,8 @@ internal class Program
         logger.LogInformation("{Product} v{Version} starting...", VersionInfo.ProductName, VersionInfo.Current.Version);
         logger.LogInformation("Platform: {OS}", Environment.OSVersion);
         logger.LogInformation("Runtime: {Runtime}", RuntimeInformation.FrameworkDescription);
+        var interop = typeof(NationalInstruments.TestStand.Interop.API.Engine).Assembly;
+        logger.LogInformation("TestStand interop: {Version} from {Path}", interop.GetName().Version, interop.Location);
 
         using var cts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) =>

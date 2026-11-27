@@ -63,6 +63,9 @@ $script:BinCopyExclude = @('CLAUDE.md', 'README.md', 'scripts', '.claude')
 # Debug symbols stay out: they carry the build machine's source paths, and nothing at run time needs them.
 $script:BinExcludePattern = @('*.pdb')
 $script:BinForbiddenPaths = @('README.md', 'build/*', '*.pdb')
+# The package interop the exe falls back to without a TestStand install (TestStandInteropResolver);
+# the staged exe's --list-tools smoke test runs on a runner without TestStand.
+$script:InteropFallbackFile = 'interop-fallback/NationalInstruments.TestStand.Interop.API.dll'
 $script:ClaudeMdHeader = "# TestStand MCP rules (generated from the $SkillName skill; do not edit)"
 
 function Get-PublishedExePath {
@@ -180,7 +183,7 @@ function Get-StagingTable {
             -Why 'The plugin ships one converted agent per source agent (spec AC-5); a different number means an agent was dropped or one was added without a source.' `
             -Fix 'Fix the source folder .claude/agents (the plugin agents are generated from it by Write-PluginAgents in build\PluginStaging.psm1), never agents/.'),
         (New-StagingEntry -Path $p.Bin -Source $script:PublishSource -Copy $script:CopyAll -Exclude $script:BinCopyExclude -ExcludePattern $script:BinExcludePattern -ExactTopLevel `
-            -Required (@($script:ExeName, 'appsettings.json') + @($Layout.BinRequired)) -Forbidden (@($Layout.BinForbidden) + $script:BinForbiddenPaths) `
+            -Required (@($script:ExeName, 'appsettings.json', $script:InteropFallbackFile) + @($Layout.BinRequired)) -Forbidden (@($Layout.BinForbidden) + $script:BinForbiddenPaths) `
             -Why 'bin/ is the exe and its runtime files for the chosen layout (spec AC-4): a missing runtime file does not start on the user''s station, and anything that dotnet publish did not produce (a README, a build script, debug symbols) is not part of the release.' `
             -Fix 'Compare the dotnet publish output with the layout table in build\PluginArchive.psm1, and with what TestStandMCP.csproj copies to the output (the drift test in BuildPluginArchive.Tests.ps1 names every top-level name).'),
         (New-StagingEntry -Path $p.BinClaudeMd -Kind File -Generated 'ClaudeMd' `

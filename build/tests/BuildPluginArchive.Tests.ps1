@@ -398,7 +398,8 @@ try {
         param([string[]]$Without = @(), [string[]]$Extra = @())
         $dir = New-TempDir
         $files = @('TestStandMCP.exe', 'appsettings.json', 'TestStandMCP.runtimeconfig.json', 'coreclr.dll', 'Other.dll', 'TestStandMCP.pdb',
-            'CLAUDE.md', 'README.md', 'scripts/Test-LoadPrototype.ps1', '.claude/agents/stale-publish-agent.md', 'cs/Resource.dll') + $Extra
+            'CLAUDE.md', 'README.md', 'scripts/Test-LoadPrototype.ps1', '.claude/agents/stale-publish-agent.md', 'cs/Resource.dll',
+            'interop-fallback/NationalInstruments.TestStand.Interop.API.dll') + $Extra
         foreach ($name in $files) {
             if ($Without -contains $name) { continue }
             Write-TextFile (Join-Path $dir $name) "fake $name"
@@ -595,11 +596,13 @@ try {
 
     Invoke-Case 'drift: every top-level item the csproj copies to the output is excluded from bin/ or required in it' {
         $bin = @(Get-StagingTable -RepoRoot $RepoRoot -Layout $FolderLayout -PublishDir $script:TemplatePublish | Where-Object { $_.Path -ceq 'bin' })[0]
-        $handled = @($bin.Exclude) + @($bin.Required)
+        $handled = @(@($bin.Exclude) + @($bin.Required) | ForEach-Object { ($_ -split '[\\/]')[0] })
         function Get-UnhandledOutputItem {
             param([string]$ProjectText)
-            $items = [regex]::Matches($ProjectText, '(?s)<(?:None|Content)\s+(?:Include|Update)="([^"]+)"[^>]*?CopyToOutputDirectory')
-            return @($items | ForEach-Object { ($_.Groups[1].Value -split '[\\/]')[0] } | Sort-Object -Unique | Where-Object { $handled -cnotcontains $_ })
+            $items = [regex]::Matches($ProjectText, '(?s)<(?:None|Content)\s+(?:Include|Update)="([^"]+)"([^>]*?)CopyToOutputDirectory')
+            # The output path is the Link when the item has one, else the item path itself.
+            $paths = @($items | ForEach-Object { $link = [regex]::Match($_.Groups[2].Value, '\bLink="([^"]+)"'); if ($link.Success) { $link.Groups[1].Value } else { $_.Groups[1].Value } })
+            return @($paths | ForEach-Object { ($_ -split '[\\/]')[0] } | Sort-Object -Unique | Where-Object { $handled -cnotcontains $_ })
         }
         $project = [IO.File]::ReadAllText((Join-Path $RepoRoot 'TestStandMCP.csproj'))
         Assert-Equal 0 (Get-UnhandledOutputItem $project).Count "csproj output items the staging table does not handle: $((Get-UnhandledOutputItem $project) -join ', ')"
@@ -607,6 +610,7 @@ try {
         Assert-Equal 'extras' ((Get-UnhandledOutputItem '<None Include="extras\**\*" CopyToOutputDirectory="PreserveNewest" />') -join ',') 'the drift check sees a new item'
         Assert-Equal 'extras,more' ((Get-UnhandledOutputItem '<Content Include="more\a.txt" CopyToOutputDirectory="Always" /><None Update="extras\b" CopyToOutputDirectory="Always" /><None Include="scripts\x" CopyToOutputDirectory="Always" />') -join ',') 'both Include and Update, Content and None, and an item that is handled is not reported'
         Assert-Equal 0 (Get-UnhandledOutputItem '<None Include="scripts\x.ps1" />').Count 'an item that is not copied to the output is not looked at'
+        Assert-Equal 'extras' ((Get-UnhandledOutputItem '<None Include="$(Pkg)\lib\a.dll" Link="extras\a.dll" CopyToOutputDirectory="Always" />') -join ',') 'a Link names the output path, not the source path'
     }
 
     # ---- the Outline rows of slice 5.2, one fixture each ------------------

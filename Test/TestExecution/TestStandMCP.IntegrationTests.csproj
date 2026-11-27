@@ -34,6 +34,7 @@
     <Compile Include="..\..\src\Tools\SchemaBuilder.cs" Link="Shared\SchemaBuilder.cs" />
     <Compile Include="..\..\src\Tools\DiffReportShaper.cs" Link="Shared\DiffReportShaper.cs" />
     <Compile Include="..\..\src\Tools\SequenceModelIo.cs" Link="Shared\SequenceModelIo.cs" />
+    <Compile Include="..\..\src\Tools\PropertyTreeDiff.cs" Link="Shared\PropertyTreeDiff.cs" />
     <Compile Include="..\..\src\Tools\StepCopyPolicy.cs" Link="Shared\StepCopyPolicy.cs" />
     <Compile Include="..\..\src\Tools\TypeConsistencyAuditor.cs" Link="Shared\TypeConsistencyAuditor.cs" />
     <Compile Include="..\..\src\Tools\TestStandToolRegistry.cs" Link="Shared\TestStandToolRegistry.cs" />
@@ -66,6 +67,10 @@
   <ItemGroup>
     <FrameworkReference Include="Microsoft.WindowsDesktop.App" />
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <!-- Unlike the server, the test host KEEPS the package's runtime files in its bin: the NUnit adapter
+         reads this assembly's metadata, and with it the interop references, before any of its code
+         (and so before TestStandInteropResolver) can run, and CI runs the engine-free unit tests from
+         this project on a runner without TestStand. -->
     <PackageReference Include="NationalInstruments.TestStand.API" Version="23.0.0" />
   </ItemGroup>
 

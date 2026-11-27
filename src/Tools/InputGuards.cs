@@ -174,6 +174,15 @@ public static class InputGuards
         "import_sequence_file with its default labview_panes='copy' (~1s per step, no LabVIEW). " +
         "Pass force_unsafe_inprocess=true only if you accept losing the server process.";
 
+    /// <summary>The refusal message for running a substep whose code module is a packed-library VI.</summary>
+    public static string PackedLibrarySubstepRefusal(string substepName, string? viPath) =>
+        $"Substep '{substepName}' calls a VI inside a packed library" +
+        (string.IsNullOrWhiteSpace(viPath) ? "" : $" ('{viPath}')") +
+        ". Loading such a VI in the server process raises the native delay-load fault 0xC06D007E, which " +
+        "escapes managed try/catch and KILLS THE SERVER PROCESS (measured for its connector-pane load; " +
+        "an execution loads the same VI). Run this substep in the Sequence Editor instead, or pass " +
+        "force_unsafe_inprocess=true only if you accept losing the server process.";
+
     /// <summary>The advisory note for a <c>configure_labview_module</c> call on a packed-library VI
     /// whose automatic prototype load was skipped to keep the server alive.</summary>
     public static string PackedLibraryAutoLoadSkippedNote(string? viPath) =>
