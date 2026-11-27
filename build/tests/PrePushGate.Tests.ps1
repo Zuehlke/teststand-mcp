@@ -25,9 +25,41 @@ function New-FakeRoot {
 }
 
 function Invoke-Gate {
-    param([string]$X86Root, [string]$X64Root)
-    $output = @(& $HostPath -NoProfile -ExecutionPolicy Bypass -File $GatePath -ProgramFilesX86 $X86Root -ProgramFiles64 $X64Root -DryRun 2>&1 | ForEach-Object { "$_" })
+    param([string]$X86Root, [string]$X64Root, [string]$Gate = $GatePath, [switch]$NoDryRun)
+    $dry = @(); if (-not $NoDryRun) { $dry = @('-DryRun') }
+    $output = @(& $HostPath -NoProfile -ExecutionPolicy Bypass -File $Gate -ProgramFilesX86 $X86Root -ProgramFiles64 $X64Root @dry 2>&1 | ForEach-Object { "$_" })
     return @{ ExitCode = $LASTEXITCODE; Output = ($output -join "`n") }
+}
+
+# A fake repository around a copy of the real gate, for running its script checks for real.
+# The stub generator writes generated.json (or fails when a 'fail' marker exists); the stub
+# archive test always FAILS, so no case ever reaches the step that stops real processes.
+function New-FakeRepo {
+    param([string]$Generated, [string]$Committed, [switch]$GeneratorFails)
+    $repo = New-TempDir
+    [void](New-Item -ItemType Directory -Path (Join-Path $repo '.githooks'))
+    Copy-Item -LiteralPath $GatePath -Destination (Join-Path $repo '.githooks\run-tests.ps1')
+    Write-TextFile (Join-Path $repo 'Test\TestExecution\TestStandMCP.IntegrationTests.csproj') '<Project />'
+    Write-TextFile (Join-Path $repo 'plugin\hooks\hooks.json') $Committed
+    Write-TextFile (Join-Path $repo 'build\generated.json') $Generated
+    if ($GeneratorFails) { Write-TextFile (Join-Path $repo 'build\fail') 'x' }
+    Write-TextFile (Join-Path $repo 'build\New-HooksJson.ps1') @'
+param([string]$OutputPath)
+if (Test-Path (Join-Path $PSScriptRoot 'fail')) { Write-Host 'GENERATOR BROKE'; exit 1 }
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'generated.json') -Destination $OutputPath
+exit 0
+'@
+    Write-TextFile (Join-Path $repo 'build\tests\BuildPluginArchive.Tests.ps1') @'
+Write-Host 'PASS  a case the gate hides'
+Write-Host "ARCHIVE RAN with GIT_DIR=[$env:GIT_DIR]"
+exit 1
+'@
+    return $repo
+}
+
+function Invoke-FakeGate {
+    param([string]$Repo)
+    return Invoke-Gate (New-FakeRoot -WithEngine) (New-FakeRoot) -Gate (Join-Path $Repo '.githooks\run-tests.ps1') -NoDryRun
 }
 
 try {
@@ -65,6 +97,32 @@ try {
         $run = Invoke-Gate (New-FakeRoot) (New-FakeRoot)
         Assert-Equal 1 $run.ExitCode 'exit code'
         Assert-Contains $run.Output 'no TestStand is installed' 'the reason'
+        Assert-NotContains $run.Output 'would run the script checks' 'blocked before the checks are announced'
+    }
+
+    Invoke-Case 'script checks: a stale hooks.json blocks the push before the archive test runs' {
+        $run = Invoke-FakeGate (New-FakeRepo -Generated "{`n  `"a`": 1`n}`n" -Committed "{`n  `"a`": 2`n}`n")
+        Assert-Equal 1 $run.ExitCode 'exit code'
+        Assert-Contains $run.Output 'plugin/hooks/hooks.json is stale' 'the reason'
+        Assert-NotContains $run.Output 'ARCHIVE RAN' 'the archive test is not started'
+    }
+
+    Invoke-Case 'script checks: a failing generator blocks the push and shows its own output' {
+        $run = Invoke-FakeGate (New-FakeRepo -Generated '{}' -Committed '{}' -GeneratorFails)
+        Assert-Equal 1 $run.ExitCode 'exit code'
+        Assert-Contains $run.Output 'GENERATOR BROKE' 'the generator output is shown'
+        Assert-Contains $run.Output 'New-HooksJson.ps1 failed (exit 1)' 'the reason'
+        Assert-NotContains $run.Output 'is stale' 'a generator failure is not reported as a stale file'
+    }
+
+    Invoke-Case 'script checks: CRLF-only difference passes, GIT_DIR is cleared, a failing archive test blocks' {
+        $repo = New-FakeRepo -Generated "{`n  `"a`": 1`n}`n" -Committed "{`r`n  `"a`": 1`r`n}`r`n"
+        $run = Use-Environment @{ GIT_DIR = 'C:\not-this-repo\.git\worktrees\x' } { Invoke-FakeGate $repo }
+        Assert-Equal 1 $run.ExitCode 'exit code'
+        Assert-Contains $run.Output 'ARCHIVE RAN with GIT_DIR=[]' 'the CRLF copy was accepted and the archive test saw no GIT_DIR'
+        Assert-Contains $run.Output 'BuildPluginArchive.Tests.ps1 did not pass (exit 1)' 'the reason'
+        Assert-NotContains $run.Output 'a case the gate hides' 'PASS lines are filtered out'
+        Assert-NotContains $run.Output 'stopping' 'no process is stopped'
     }
 }
 finally {

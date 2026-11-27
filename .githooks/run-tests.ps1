@@ -1,12 +1,14 @@
 # ============================================================================
 #  TestStandMCP — pre-push test gate (invoked by .githooks/pre-push)
 #  ---------------------------------------------------------------------------
-#  1. Terminates running TestStand processes (they hold COM engine handles and
+#  1. Finds the installed TestStand bitnesses (none at all blocks the push).
+#  2. Runs two script checks that otherwise fail only in CI (about a minute, and
+#     before anything is stopped): plugin/hooks/hooks.json must match what
+#     build/New-HooksJson.ps1 generates, and BuildPluginArchive.Tests.ps1 (which
+#     holds the csproj-vs-staging-table drift test) must pass.
+#  3. Terminates running TestStand processes (they hold COM engine handles and
 #     make the integration tests flaky via file-sharing violations).
-#  2. Runs two fast script checks that otherwise fail only in CI: plugin/hooks/hooks.json
-#     must match what build/New-HooksJson.ps1 generates, and BuildPluginArchive.Tests.ps1
-#     (which holds the csproj-vs-staging-table drift test) must pass.
-#  3. Runs the integration test suite once per installed TestStand bitness:
+#  4. Runs the integration test suite once per installed TestStand bitness:
 #     as x86 when 32-bit TestStand is installed, as x64 when 64-bit TestStand is
 #     (each plugin drives only its own bitness, so each needs its own run).
 #  Exits 0 only when EVERY run passes — any other exit code blocks the push, and
@@ -67,35 +69,47 @@ if ($DryRun) {
     exit 0
 }
 
-# ── 1b) Script checks: seconds here, instead of a red CI run after the push ──
-# Run under this same host only; CI covers the second host.
-$psHost = (Get-Process -Id $PID).Path
-$psArgs = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File')
-$generated = Join-Path ([IO.Path]::GetTempPath()) ("hooks-{0}.json" -f [guid]::NewGuid())
+# ── 2) Script checks: a minute here instead of a red CI run after the push ──
+# Under this same host only; CI covers the second host. They read the working tree.
+# A push from a linked worktree exports an absolute GIT_DIR to the hook; the archive
+# tests run 'git -C <temp fixture> init/add', which would then act on the real repository.
+Remove-Item Env:GIT_DIR, Env:GIT_WORK_TREE, Env:GIT_INDEX_FILE, Env:GIT_COMMON_DIR, Env:GIT_OBJECT_DIRECTORY -ErrorAction SilentlyContinue
+$powerShellExe = (Get-Process -Id $PID).Path
+$scriptArgs = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File')
+$passLinePattern = '^PASS  '   # the case lines build/tests/TestHarness.ps1 prints
+
 Write-Host '  -> checking plugin/hooks/hooks.json against build/New-HooksJson.ps1 ...' -ForegroundColor Yellow
-& $psHost @psArgs (Join-Path $repoRoot 'build\New-HooksJson.ps1') -OutputPath $generated | Out-Null
-$genCode = $LASTEXITCODE
+$generatedHooksPath = Join-Path ([IO.Path]::GetTempPath()) ("hooks-{0}.json" -f [guid]::NewGuid())
+$generatorOutput = @(& $powerShellExe @scriptArgs (Join-Path $repoRoot 'build\New-HooksJson.ps1') -OutputPath $generatedHooksPath 2>&1 | ForEach-Object { "$_" })
+$generatorExitCode = $LASTEXITCODE
+if ($generatorExitCode -ne 0 -or -not (Test-Path $generatedHooksPath)) {
+    $generatorOutput | ForEach-Object { Write-Host "     $_" }
+    Write-Host ("  FAIL: build/New-HooksJson.ps1 failed (exit {0}) - push aborted." -f $generatorExitCode) -ForegroundColor Red
+    Remove-Item $generatedHooksPath -ErrorAction SilentlyContinue
+    exit 1
+}
 # Compare without CRs: the generator writes LF, a checkout under core.autocrlf=true gives CRLF.
-function Read-Lf([string]$Path) { ([IO.File]::ReadAllText($Path)) -replace "`r", '' }
-$fresh = ($genCode -eq 0) -and (Test-Path $generated) -and
-    ((Read-Lf $generated) -ceq (Read-Lf (Join-Path $repoRoot 'plugin\hooks\hooks.json')))
-Remove-Item $generated -ErrorAction SilentlyContinue
-if (-not $fresh) {
-    Write-Host ("  FAIL: plugin/hooks/hooks.json is stale or New-HooksJson.ps1 failed (exit {0}) - push aborted." -f $genCode) -ForegroundColor Red
+function Get-TextWithoutCR([string]$Path) { ([IO.File]::ReadAllText($Path)) -replace "`r", '' }
+$hooksJsonIsFresh = (Get-TextWithoutCR $generatedHooksPath) -ceq (Get-TextWithoutCR (Join-Path $repoRoot 'plugin\hooks\hooks.json'))
+Remove-Item $generatedHooksPath -ErrorAction SilentlyContinue
+if (-not $hooksJsonIsFresh) {
+    Write-Host '  FAIL: plugin/hooks/hooks.json is stale - push aborted.' -ForegroundColor Red
     Write-Host '        Run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File build\New-HooksJson.ps1, then commit hooks.json' -ForegroundColor DarkGray
     exit 1
 }
+
 Write-Host '  -> running build/tests/BuildPluginArchive.Tests.ps1 (about a minute) ...' -ForegroundColor Yellow
-$archiveOut = @(& $psHost @psArgs (Join-Path $repoRoot 'build\tests\BuildPluginArchive.Tests.ps1') 2>&1 | ForEach-Object { "$_" })
-if ($LASTEXITCODE -ne 0) {
-    $archiveOut | Where-Object { $_ -notmatch '^PASS  ' } | ForEach-Object { Write-Host "     $_" }
-    Write-Host ("  FAIL: BuildPluginArchive.Tests.ps1 did not pass (exit {0}) - push aborted." -f $LASTEXITCODE) -ForegroundColor Red
+$archiveTestOutput = @(& $powerShellExe @scriptArgs (Join-Path $repoRoot 'build\tests\BuildPluginArchive.Tests.ps1') 2>&1 | ForEach-Object { "$_" })
+$archiveExitCode = $LASTEXITCODE
+if ($archiveExitCode -ne 0) {
+    $archiveTestOutput | Where-Object { $_ -notmatch $passLinePattern } | ForEach-Object { Write-Host "     $_" }
+    Write-Host ("  FAIL: BuildPluginArchive.Tests.ps1 did not pass (exit {0}) - push aborted." -f $archiveExitCode) -ForegroundColor Red
     Write-Host '        A new csproj output item needs an entry in Get-StagingTable (build/PluginStaging.psm1).' -ForegroundColor DarkGray
     exit 1
 }
 Write-Host '  PASS: script checks are green.' -ForegroundColor Green
 
-# ── 2) Free the engine: stop processes that hold COM handles ────────────────
+# ── 3) Free the engine: stop processes that hold COM handles ────────────────
 function Stop-EngineProcesses {
     $killed = $false
     foreach ($name in @('TestStandMCP', 'SeqEdit')) {
@@ -111,7 +125,7 @@ function Stop-EngineProcesses {
     if ($killed) { Start-Sleep -Milliseconds 700 }
 }
 
-# ── 3) Run the tests, once per bitness; the first failure stops the gate ────
+# ── 4) Run the tests, once per bitness; the first failure stops the gate ────
 foreach ($run in $runs) {
     Stop-EngineProcesses
     Write-Host ("  -> dotnet test as {0} ({1}-bit TestStand; Debug / net8.0-windows) ..." -f $run.Arch, $run.Bits) -ForegroundColor Yellow

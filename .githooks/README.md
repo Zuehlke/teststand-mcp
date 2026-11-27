@@ -18,9 +18,12 @@ must pass (it holds the drift test between the csproj output items and the
 staging table in `build/PluginStaging.psm1`). The full script suite
 (`build/Invoke-ScriptTests.ps1`, about 5 minutes per PowerShell host) stays in CI.
 
-Because the tests need exclusive access to the TestStand COM engine, the hook
-first **terminates any running `TestStandMCP.exe` / `SeqEdit.exe`** — so save
-your work in open Sequence Editors before pushing.
+The script checks read the working tree, not the pushed commit. They run before
+anything is stopped, so a failing check leaves your Sequence Editors open.
+
+Because the integration tests need exclusive access to the TestStand COM engine,
+the hook then **terminates any running `TestStandMCP.exe` / `SeqEdit.exe`**, so
+save your work in open Sequence Editors before pushing.
 
 ## Activation (per clone)
 
