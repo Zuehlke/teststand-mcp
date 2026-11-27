@@ -36,6 +36,7 @@ try {
         Assert-Equal 0 $run.ExitCode 'exit code'
         Assert-Contains $run.Output 'would test as x86, then as x64 (-p:Platform=x64)' 'both runs, x86 first, x64 built for x64'
         Assert-NotContains $run.Output 'x86 (' 'the x86 run keeps the default (x86) build'
+        Assert-Contains $run.Output 'would run the script checks (hooks.json, BuildPluginArchive.Tests.ps1)' 'the script checks that otherwise fail only in CI'
     }
 
     Invoke-Case 'gate: only 32-bit TestStand -> the x86 run alone, the x64 run is skipped by name' {
