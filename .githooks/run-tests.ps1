@@ -71,8 +71,9 @@ if ($DryRun) {
 
 # ── 2) Script checks: a minute here instead of a red CI run after the push ──
 # Under this same host only; CI covers the second host. They read the working tree.
-# A push from a linked worktree exports an absolute GIT_DIR to the hook; the archive
-# tests run 'git -C <temp fixture> init/add', which would then act on the real repository.
+# Measured 2026-11-27 with a probe hook: a push from a linked worktree exports an absolute
+# GIT_DIR to pre-push (the main checkout exports none). The archive tests run
+# 'git -C <temp fixture> init/add', which would then act on the real repository.
 Remove-Item Env:GIT_DIR, Env:GIT_WORK_TREE, Env:GIT_INDEX_FILE, Env:GIT_COMMON_DIR, Env:GIT_OBJECT_DIRECTORY -ErrorAction SilentlyContinue
 $powerShellExe = (Get-Process -Id $PID).Path
 $scriptArgs = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File')
@@ -84,16 +85,18 @@ $generatorOutput = @(& $powerShellExe @scriptArgs (Join-Path $repoRoot 'build\Ne
 $generatorExitCode = $LASTEXITCODE
 if ($generatorExitCode -ne 0 -or -not (Test-Path $generatedHooksPath)) {
     $generatorOutput | ForEach-Object { Write-Host "     $_" }
-    Write-Host ("  FAIL: build/New-HooksJson.ps1 failed (exit {0}) - push aborted." -f $generatorExitCode) -ForegroundColor Red
+    Write-Host ("  FAIL: build/New-HooksJson.ps1 failed or wrote no file (exit {0}) - push aborted." -f $generatorExitCode) -ForegroundColor Red
     Remove-Item $generatedHooksPath -ErrorAction SilentlyContinue
     exit 1
 }
 # Compare without CRs: the generator writes LF, a checkout under core.autocrlf=true gives CRLF.
 function Get-TextWithoutCR([string]$Path) { ([IO.File]::ReadAllText($Path)) -replace "`r", '' }
-$hooksJsonIsFresh = (Get-TextWithoutCR $generatedHooksPath) -ceq (Get-TextWithoutCR (Join-Path $repoRoot 'plugin\hooks\hooks.json'))
+$committedHooksPath = Join-Path $repoRoot 'plugin\hooks\hooks.json'
+$hooksJsonIsFresh = (Test-Path $committedHooksPath) -and
+    ((Get-TextWithoutCR $generatedHooksPath) -ceq (Get-TextWithoutCR $committedHooksPath))
 Remove-Item $generatedHooksPath -ErrorAction SilentlyContinue
 if (-not $hooksJsonIsFresh) {
-    Write-Host '  FAIL: plugin/hooks/hooks.json is stale - push aborted.' -ForegroundColor Red
+    Write-Host '  FAIL: plugin/hooks/hooks.json is stale or missing - push aborted.' -ForegroundColor Red
     Write-Host '        Run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File build\New-HooksJson.ps1, then commit hooks.json' -ForegroundColor DarkGray
     exit 1
 }

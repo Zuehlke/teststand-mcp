@@ -1,10 +1,12 @@
 # ============================================================================
 #  PrePushGate.Tests.ps1 - plain PowerShell asserts for .githooks/run-tests.ps1, the pre-push gate:
-#  which bitness runs it would make for which installed TestStand.
+#  which bitness runs it would make for which installed TestStand, and its script checks.
 #  Runs under Windows PowerShell 5.1 and PowerShell 7:
 #    powershell.exe -NoProfile -ExecutionPolicy Bypass -File build\tests\PrePushGate.Tests.ps1
 #  Prints PASS/FAIL per case and exits non-zero when any case fails.
-#  Only -DryRun runs against fake Program Files roots: no test suite runs and no process is stopped.
+#  The bitness cases use -DryRun against fake Program Files roots. The script-check cases run the
+#  real gate in a fake repository whose archive test always fails, so no test suite runs and no
+#  process is stopped in either.
 #  ASCII only on purpose: 5.1 reads a BOM-less script as ANSI.
 # ============================================================================
 $ErrorActionPreference = 'Stop'
@@ -111,7 +113,7 @@ try {
         $run = Invoke-FakeGate (New-FakeRepo -Generated '{}' -Committed '{}' -GeneratorFails)
         Assert-Equal 1 $run.ExitCode 'exit code'
         Assert-Contains $run.Output 'GENERATOR BROKE' 'the generator output is shown'
-        Assert-Contains $run.Output 'New-HooksJson.ps1 failed (exit 1)' 'the reason'
+        Assert-Contains $run.Output 'New-HooksJson.ps1 failed or wrote no file (exit 1)' 'the reason'
         Assert-NotContains $run.Output 'is stale' 'a generator failure is not reported as a stale file'
     }
 
@@ -122,7 +124,7 @@ try {
         Assert-Contains $run.Output 'ARCHIVE RAN with GIT_DIR=[]' 'the CRLF copy was accepted and the archive test saw no GIT_DIR'
         Assert-Contains $run.Output 'BuildPluginArchive.Tests.ps1 did not pass (exit 1)' 'the reason'
         Assert-NotContains $run.Output 'a case the gate hides' 'PASS lines are filtered out'
-        Assert-NotContains $run.Output 'stopping' 'no process is stopped'
+        Assert-NotContains $run.Output 'dotnet test as' 'the gate stops before the integration tests'
     }
 }
 finally {
