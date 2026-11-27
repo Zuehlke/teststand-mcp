@@ -997,6 +997,10 @@ public class EnginePaths
     /// next to the exe. Agents use this absolute path instead of a working-directory-relative
     /// "&lt;repo&gt;\scripts" guess, so they work from any project. Empty if the folder is missing.</summary>
     public string ScriptsDirectory { get; set; } = "";
+    /// <summary>Version of the loaded TestStand interop assembly; matches the installed engine.</summary>
+    public string InteropVersion { get; set; } = "";
+    /// <summary>Where the TestStand interop assembly was loaded from: the installation, never the server's bin.</summary>
+    public string InteropPath { get; set; } = "";
 
     // ── TestStand environment (.tsenv) ────────────────────────────────────────
     // Without these there is no way to tell WHICH environment the engine is working in — and every
@@ -1309,6 +1313,117 @@ public class StepPropertyValue
     public bool IsArray { get; set; }
     /// <summary>Number of elements for arrays, else null.</summary>
     public int? NumElements { get; set; }
+}
+
+/// <summary>One substep of a step's TYPE (get_step_substeps): an Edit, Custom, Pre, Post or
+/// OnNewStep action the step type author defined, with the code module it calls.</summary>
+public class StepSubstepInfo
+{
+    /// <summary>Zero-based index into the step type's Substeps array (what ExecuteSubstep takes).</summary>
+    public int Index { get; set; }
+    /// <summary>The substep's name, e.g. "Configure" or "Refresh".</summary>
+    public string Name { get; set; } = "";
+    /// <summary>Pre / Post / Edit / OnNewStep (the engine keys these by NAME), else Custom.</summary>
+    public string Kind { get; set; } = "";
+    /// <summary>Edit substeps: the button/menu text the editor shows (evaluated, without '&amp;').</summary>
+    public string? MenuText { get; set; }
+    /// <summary>Edit substeps: whether the substep has an edit panel in the Step Settings pane.</summary>
+    public bool? HasEditPanel { get; set; }
+    /// <summary>Adapter key of the substep's code module (e.g. "G Flexible VI Adapter").</summary>
+    public string Adapter { get; set; } = "";
+    /// <summary>Module path read from the substep (VI path, DLL path, sequence name, ...), if any.</summary>
+    public string? ModulePath { get; set; }
+    /// <summary>LabVIEW only: whether the VI shows its front panel (a dialog that waits for a user).</summary>
+    public bool? ShowsFrontPanel { get; set; }
+    /// <summary>Step.CanExecuteSubstep for this step.</summary>
+    public bool CanExecute { get; set; }
+}
+
+/// <summary>Result of get_step_substeps.</summary>
+public class StepSubstepList
+{
+    /// <summary>Step name.</summary>
+    public string StepName { get; set; } = "";
+    /// <summary>Name of the step's type.</summary>
+    public string StepType { get; set; } = "";
+    /// <summary>The type's substeps in index order.</summary>
+    public List<StepSubstepInfo> Substeps { get; set; } = new();
+}
+
+/// <summary>One leaf that differs between two property-tree snapshots.</summary>
+public class PropertyChange
+{
+    /// <summary>Dotted leaf path relative to the step.</summary>
+    public string Path { get; set; } = "";
+    /// <summary>Value before; null when the leaf did not exist.</summary>
+    public object? Before { get; set; }
+    /// <summary>Value after; null when the leaf was removed.</summary>
+    public object? After { get; set; }
+}
+
+/// <summary>Result of run_step_substep.</summary>
+public class SubstepRunResult
+{
+    /// <summary>Step name.</summary>
+    public string StepName { get; set; } = "";
+    /// <summary>Index of the substep that ran.</summary>
+    public int SubstepIndex { get; set; }
+    /// <summary>Name of the substep that ran.</summary>
+    public string SubstepName { get; set; } = "";
+    /// <summary>ExecuteSubstep's return value: the substep says it modified the step.</summary>
+    public bool Modified { get; set; }
+    /// <summary>Step-property leaves that changed, read back before and after the run.</summary>
+    public List<PropertyChange> Changes { get; set; } = new();
+    /// <summary>True when the file was saved after the run.</summary>
+    public bool Saved { get; set; }
+    /// <summary>Hint for the caller, e.g. that unsaved changes need save_sequence_file.</summary>
+    public string? Note { get; set; }
+}
+
+/// <summary>One step of a run_substep_on_steps call.</summary>
+public class BulkSubstepStepResult
+{
+    /// <summary>Sequence that holds the step.</summary>
+    public string Sequence { get; set; } = "";
+    /// <summary>Setup / Main / Cleanup.</summary>
+    public string StepGroup { get; set; } = "";
+    /// <summary>Zero-based index in the group (the @idx:N selector), unique where names repeat.</summary>
+    public int StepIndex { get; set; }
+    /// <summary>Step name.</summary>
+    public string StepName { get; set; } = "";
+    /// <summary>ExecuteSubstep's return value.</summary>
+    public bool Modified { get; set; }
+    /// <summary>Number of step-property leaves that changed.</summary>
+    public int ChangeCount { get; set; }
+    /// <summary>The changed leaves, only with include_changes=true.</summary>
+    public List<PropertyChange>? Changes { get; set; }
+    /// <summary>Why this step failed, if it did.</summary>
+    public string? Error { get; set; }
+}
+
+/// <summary>Result of run_substep_on_steps.</summary>
+public class BulkSubstepRunResult
+{
+    /// <summary>Step type whose steps were run.</summary>
+    public string StepType { get; set; } = "";
+    /// <summary>Index of the substep that ran.</summary>
+    public int SubstepIndex { get; set; }
+    /// <summary>Name of the substep that ran.</summary>
+    public string SubstepName { get; set; } = "";
+    /// <summary>Steps of the type found in scope.</summary>
+    public int Matched { get; set; }
+    /// <summary>Steps on which the substep returned.</summary>
+    public int Ran { get; set; }
+    /// <summary>Steps the substep modified or changed.</summary>
+    public int Changed { get; set; }
+    /// <summary>Steps that failed (not counting a timeout, which stops the run).</summary>
+    public int Failed { get; set; }
+    /// <summary>True when the file was saved once at the end.</summary>
+    public bool Saved { get; set; }
+    /// <summary>Hint for the caller (unsaved changes, stop after a timeout, nothing found).</summary>
+    public string? Note { get; set; }
+    /// <summary>Per-step outcome in file order.</summary>
+    public List<BulkSubstepStepResult> Steps { get; set; } = new();
 }
 
 /// <summary>
