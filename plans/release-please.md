@@ -2,7 +2,7 @@
 
 **Created**: 2026-11-04
 **Branch**: feature/release-please
-**Status**: slices 0 to 6 done, merged in #45 (2026-11-05); slice 7 (first release) in progress
+**Status**: done. Slices 0 to 6 merged in #45, first release `v1.9.3` published by release-please on 2026-11-05 (#47), `bootstrap-sha` removed afterwards
 **Builds on**: [plugin-install-and-release-workflow.md](plugin-install-and-release-workflow.md), [dual-bitness-plugins.md](dual-bitness-plugins.md)
 
 ## Goal
