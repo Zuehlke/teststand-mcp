@@ -14,7 +14,7 @@
 #  Exits 0 only when EVERY run passes — any other exit code blocks the push, and
 #  so does a station with no TestStand at all.
 #  -ProgramFilesX86 / -ProgramFiles64 point the detection at other roots, and
-#  -DryRun only prints the runs it would make (both for testing the gate itself).
+#  -DryRun only prints the checks and runs it would make (both for testing the gate itself).
 # ============================================================================
 param(
     [string]$ProgramFilesX86 = ${env:ProgramFiles(x86)},
@@ -74,6 +74,7 @@ if ($DryRun) {
 # Measured 2026-11-27 with a probe hook: a push from a linked worktree exports an absolute
 # GIT_DIR to pre-push (the main checkout exports none). The archive tests run
 # 'git -C <temp fixture> init/add', which would then act on the real repository.
+# To re-check: a throwaway repo plus a linked worktree, a pre-push hook running 'env | grep ^GIT_', push from each.
 Remove-Item Env:GIT_DIR, Env:GIT_WORK_TREE, Env:GIT_INDEX_FILE, Env:GIT_COMMON_DIR, Env:GIT_OBJECT_DIRECTORY -ErrorAction SilentlyContinue
 $powerShellExe = (Get-Process -Id $PID).Path
 $scriptArgs = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File')
