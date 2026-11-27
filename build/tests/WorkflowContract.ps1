@@ -245,12 +245,11 @@ $ExpectedWorkflows = @('ci.yml', 'pages.yml', 'pr-title.yml', 'release-please.ym
     $ciSteps = @(Get-Steps $ciJob)
     $ciCode = Remove-CommentLines $ci
 
-    Invoke-Case 'ci.yml: runs for pull requests to main and pushes to main, and for nothing else' {
+    Invoke-Case 'ci.yml: runs for pull requests to main, and for nothing else (not again on main)' {
         $on = Get-TopLevelBlock $ci 'on'
         Assert-True ($on -cmatch '(?m)^  pull_request:') 'no pull_request trigger'
-        Assert-True ($on -cmatch '(?m)^  push:') 'no push trigger'
-        Assert-Equal 2 @($on -split "`n" | Where-Object { $_ -cmatch '\A  [a-z_]+:' }).Count 'the number of triggers'
-        Assert-Equal 2 @([regex]::Matches($on, 'branches:\s*\[main\]')).Count 'both triggers are limited to main'
+        Assert-Equal 1 @($on -split "`n" | Where-Object { $_ -cmatch '\A  [a-z_]+:' }).Count 'the number of triggers (a push to main would test the tree the up-to-date PR already tested)'
+        Assert-True ($on -cmatch '(?m)^  pull_request:\s*\n    branches:\s*\[main\]\s*$') 'pull requests to main'
     }
 
     Invoke-Case 'ci.yml: read-only token, no write permission anywhere, nothing that publishes' {

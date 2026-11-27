@@ -11,9 +11,19 @@ x64 (`-p:Platform=x64`) when 64-bit TestStand is. A missing bitness is skipped
 with a note; a station with no TestStand at all cannot push. Both runs together
 take about twice as long as one.
 
-Because the tests need exclusive access to the TestStand COM engine, the hook
-first **terminates any running `TestStandMCP.exe` / `SeqEdit.exe`** — so save
-your work in open Sequence Editors before pushing.
+Before the integration tests it runs two script checks that would otherwise
+fail only in CI (about a minute together): `plugin/hooks/hooks.json` must match
+what `build/New-HooksJson.ps1` generates, and `build/tests/BuildPluginArchive.Tests.ps1`
+must pass (it holds the drift test between the csproj output items and the
+staging table in `build/PluginStaging.psm1`). The full script suite
+(`build/Invoke-ScriptTests.ps1`, about 5 minutes per PowerShell host) stays in CI.
+
+The script checks read the working tree, not the pushed commit. They run before
+anything is stopped, so a failing check leaves your Sequence Editors open.
+
+Because the integration tests need exclusive access to the TestStand COM engine,
+the hook then **terminates any running `TestStandMCP.exe` / `SeqEdit.exe`**, so
+save your work in open Sequence Editors before pushing.
 
 ## Activation (per clone)
 
@@ -40,7 +50,7 @@ git config core.hooksPath   # -> .githooks
 | File            | Role                                                        |
 | --------------- | ---------------------------------------------------------- |
 | `pre-push`      | POSIX-sh entry point Git invokes; delegates to PowerShell. |
-| `run-tests.ps1` | Stops engine processes, runs `dotnet test` per installed bitness, returns the result. `-DryRun` prints the runs it would make. |
+| `run-tests.ps1` | Runs the two script checks, stops engine processes, runs `dotnet test` per installed bitness, returns the result. `-DryRun` prints the script checks and the runs it would make. |
 
 The `pre-push` stub is forced to LF line endings via `.gitattributes`; without
 that, `sh.exe` on Windows would fail with `bad interpreter: /bin/sh^M`.

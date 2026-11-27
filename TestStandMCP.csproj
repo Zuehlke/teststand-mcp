@@ -76,11 +76,17 @@
   <ItemGroup>
     <!-- Microsoft.CSharp provides the runtime binder for `dynamic` (late-bound IDispatch COM). -->
     <PackageReference Include="Microsoft.CSharp" Version="4.7.0" />
-    <!-- NI TestStand interop, netstandard2.0 build (loads under .NET 8). Same namespaces/types
-         as the .NET-Framework PIA, so the source compiles unchanged. Replaces the old direct
-         HintPath reference to the .NET-Framework PIA, which does NOT load under .NET Core/8 —
-         that was the root cause of the engine "Connect" failure on .NET Core. -->
-    <PackageReference Include="NationalInstruments.TestStand.API" Version="23.0.0" />
+    <!-- NI TestStand interop, netstandard2.0 build: the compile-time reference only. At run time the
+         installed TestStand's own interop is loaded (measured 2026-11-26: the 26.0 assembly from
+         API\DotNET\Assemblies\CurrentVersion loads under .NET 8, connects and runs Single Pass on
+         both bitnesses). -->
+    <!-- Compile against 23.0, but ship NONE of its runtime files in bin/deps.json: a .NET 8 load context
+         holds one version per assembly, and a 23.0 copy loaded at startup blocked TestStand 2026's own
+         components that need 26.0. TestStandInteropResolver loads the installed version instead; the
+         package copy goes to interop-fallback\ for stations without TestStand (CI, list-tools). -->
+    <PackageReference Include="NationalInstruments.TestStand.API" Version="23.0.0" ExcludeAssets="runtime" GeneratePathProperty="true" />
+    <None Include="$(PkgNationalInstruments_TestStand_API)\lib\netstandard2.0\NationalInstruments.TestStand.*.dll"
+          Link="interop-fallback\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" Visible="false" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="8.0.1" />
     <PackageReference Include="Microsoft.Extensions.Logging" Version="8.0.1" />
     <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="8.0.1" />

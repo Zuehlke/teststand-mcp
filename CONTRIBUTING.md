@@ -34,6 +34,11 @@ The release PR gets its required checks like any other PR: `ci.yml` and `pr-titl
 `pull_request` event. If they ever do not appear on it, close and reopen the PR yourself: your reopen event
 starts both workflows.
 
+A PR merges only when it is up to date with `main` and green, and `ci.yml` does not run again on `main`. When
+`main` moves, a PR shows **Update branch**: click it and wait for the checks. That includes the release PR,
+because release-please rewrites it only when the release notes change (after a `fix:` or `feat:`, not after a
+`ci:` or `docs:` merge).
+
 ### Pushing a tag by hand (fallback)
 
 Push a tag `vX.Y.Z` and the release workflow takes it from there. You never edit a version number: the tag
@@ -55,8 +60,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File build\Assert-ReleaseTag.
 
 Two things to know about the push itself:
 
-- The `pre-push` hook runs on a tag push too. It stops every `TestStandMCP.exe` and `SeqEdit.exe` and runs
-  the integration suite, so save open Sequence Editor work first. See [.githooks/README.md](.githooks/README.md).
+- The `pre-push` hook runs on a tag push too. After two script checks (`hooks.json`, the staging table)
+  it stops every `TestStandMCP.exe` and `SeqEdit.exe` and runs the integration suite, so save open
+  Sequence Editor work first. See [.githooks/README.md](.githooks/README.md).
   On the real repository, let the hook run.
 - Every tag has its own run, and a running release is never cancelled. Two tags pushed close together may
   overlap. Before it publishes, the workflow compares the version with the current latest release, and a
@@ -311,9 +317,12 @@ Done once by a repository admin:
    then, and `ci.yml` and `release.yml` are not affected.
 3. **Squash merging only, with the PR title as the commit** (Settings, General, Pull Requests): untick "Allow
    merge commits" and "Allow rebase merging", keep "Allow squash merging" and set its default commit message
-   to "Pull request title". release-please reads those squash commits.
+   to "Pull request title". release-please reads those squash commits. Tick "Always suggest updating pull
+   request branches", so an out-of-date PR shows **Update branch**.
 4. **Protect `main`** (Settings, Rules, Rulesets, `ProtectMain`): enforcement Active, target the default
-   branch, require a pull request, require the status checks `check` and `pr-title`, block force pushes.
+   branch, require a pull request, require the status checks `check` and `pr-title` with "Require branches to
+   be up to date before merging", block force pushes, and no bypass list. `ci.yml` runs on pull requests only,
+   so this is what keeps `main` tested: the squash commit has exactly the tree the up-to-date PR tested.
    GitHub offers a check here only after it has run once, so add `pr-title` after the first PR that ran it.
 5. **Optional: the `STATS_TRAFFIC_TOKEN` secret** (Settings, Secrets and variables, Actions). The workflow
    token cannot read repository traffic, so the views and clones need a token that can. Without the secret

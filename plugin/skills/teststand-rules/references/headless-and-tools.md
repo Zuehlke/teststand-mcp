@@ -17,6 +17,7 @@
 
 ## Bitness
 
+- The server uses the .NET interop of the INSTALLED TestStand, not a copy of its own, so one build works with every supported TestStand version. `get_engine_paths` reports `interopVersion` and `interopPath`; the path must lie inside the TestStand installation. A path in the server's `interop-fallback` folder means no installation was found.
 - Each plugin drives only the TestStand of its own bitness: the x86 plugin the 32-bit engine, the x64 plugin the 64-bit engine. The code modules a sequence calls (DLLs, .NET assemblies, LabVIEW, Python) must match that engine's bitness; a 32-bit DLL does not load into the 64-bit engine and the other way round. `get_engine_paths` reports which engine you are on (`versionString` ends in `32-bit` or `64-bit`).
 
 ## Expressions
