@@ -50,7 +50,7 @@ git config core.hooksPath   # -> .githooks
 | File            | Role                                                        |
 | --------------- | ---------------------------------------------------------- |
 | `pre-push`      | POSIX-sh entry point Git invokes; delegates to PowerShell. |
-| `run-tests.ps1` | Runs the two script checks, stops engine processes, runs `dotnet test` per installed bitness, returns the result. `-DryRun` prints the runs it would make. |
+| `run-tests.ps1` | Runs the two script checks, stops engine processes, runs `dotnet test` per installed bitness, returns the result. `-DryRun` prints the script checks and the runs it would make. |
 
 The `pre-push` stub is forced to LF line endings via `.gitattributes`; without
 that, `sh.exe` on Windows would fail with `bad interpreter: /bin/sh^M`.

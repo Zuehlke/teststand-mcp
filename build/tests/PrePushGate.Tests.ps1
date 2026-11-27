@@ -115,6 +115,7 @@ try {
         $run = Invoke-FakeGate $repo
         Assert-Equal 1 $run.ExitCode 'exit code'
         Assert-Contains $run.Output 'plugin/hooks/hooks.json is stale or missing' 'the reason'
+        Assert-NotContains $run.Output 'ReadAllText' 'Test-Path catches the missing file, not a read exception'
         Assert-NotContains $run.Output 'ARCHIVE RAN' 'the archive test is not started'
     }
 
@@ -133,7 +134,7 @@ try {
         Assert-Contains $run.Output 'ARCHIVE RAN with GIT_DIR=[]' 'the CRLF copy was accepted and the archive test saw no GIT_DIR'
         Assert-Contains $run.Output 'BuildPluginArchive.Tests.ps1 did not pass (exit 1)' 'the reason'
         Assert-NotContains $run.Output 'a case the gate hides' 'PASS lines are filtered out'
-        # 'dotnet test as' is printed right after the process stop, so its absence proves neither ran.
+        # The archive stub exits 1, so the gate must exit before step 3; this marker proves the tests never started.
         Assert-NotContains $run.Output 'dotnet test as' 'the gate stops before the integration tests'
     }
 }
